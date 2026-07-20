@@ -1,0 +1,12 @@
+{
+  "T00001": {
+    "ticket_id": "T00001",
+    "user_id": "user_001",
+    "issue": "订单未发货",
+    "priority": "high",
+    "status": "processing",
+    "create_time": "2024-03-01 10:30:00",
+    "update_time": "2024-03-01 14:20:00",
+    "description": "订单号12345已支付3天，仍未发货"
+  }
+}

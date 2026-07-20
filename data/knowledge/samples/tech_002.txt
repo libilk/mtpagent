@@ -1,0 +1,34 @@
+# Python快速排序实现
+
+## 算法原理
+快速排序是一种分治算法，平均时间复杂度O(n log n)。
+
+## 代码实现
+
+```python
+def quicksort(arr):
+    """快速排序"""
+    if len(arr) <= 1:
+        return arr
+
+    pivot = arr[len(arr) // 2]
+    left = [x for x in arr if x < pivot]
+    middle = [x for x in arr if x == pivot]
+    right = [x for x in arr if x > pivot]
+
+    return quicksort(left) + middle + quicksort(right)
+
+# 使用示例
+arr = [3, 6, 8, 10, 1, 2, 1]
+sorted_arr = quicksort(arr)
+print(sorted_arr)  # [1, 1, 2, 3, 6, 8, 10]
+```
+
+## 复杂度分析
+- 时间复杂度：平均O(n log n)，最坏O(n²)
+- 空间复杂度：O(log n)
+
+## 优化技巧
+1. 三数取中选择pivot
+2. 小数组使用插入排序
+3. 尾递归优化

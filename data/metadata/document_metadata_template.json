@@ -1,0 +1,110 @@
+{
+  "embedding_models": {
+    "doc_id": "embedding_models",
+    "title": "Embedding Models",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [],
+    "priority": 5,
+    "_source_file": "documents\\embedding_models.docx",
+    "_note": "请根据实际情况修改 domain, audiences, tags, priority"
+  },
+  "faq_data": {
+    "doc_id": "faq_data",
+    "title": "Faq Data",
+    "domain": "customer_service",
+    "audiences": [
+      "customer_service_rep"
+    ],
+    "tags": [],
+    "priority": 5,
+    "_source_file": "documents\\faq_data.json",
+    "_note": "请根据实际情况修改 domain, audiences, tags, priority"
+  },
+  "llm_comparison": {
+    "doc_id": "llm_comparison",
+    "title": "Llm Comparison",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [],
+    "priority": 5,
+    "_source_file": "documents\\llm_comparison.csv",
+    "_note": "请根据实际情况修改 domain, audiences, tags, priority"
+  },
+  "product_sales_data": {
+    "doc_id": "product_sales_data",
+    "title": "Product Sales Data",
+    "domain": "sales",
+    "audiences": [
+      "sales_rep"
+    ],
+    "tags": [],
+    "priority": 5,
+    "_source_file": "documents\\product_sales_data.xlsx",
+    "_note": "请根据实际情况修改 domain, audiences, tags, priority"
+  },
+  "rag_introduction": {
+    "doc_id": "rag_introduction",
+    "title": "Rag Introduction",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [],
+    "priority": 5,
+    "_source_file": "documents\\rag_introduction.pdf",
+    "_note": "请根据实际情况修改 domain, audiences, tags, priority"
+  },
+  "sales_report_with_tables": {
+    "doc_id": "sales_report_with_tables",
+    "title": "Sales Report With Tables",
+    "domain": "sales",
+    "audiences": [
+      "sales_rep"
+    ],
+    "tags": [],
+    "priority": 5,
+    "_source_file": "documents\\sales_report_with_tables.pdf",
+    "_note": "请根据实际情况修改 domain, audiences, tags, priority"
+  },
+  "text_vectorization_basics": {
+    "doc_id": "text_vectorization_basics",
+    "title": "文本向量化基础",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [],
+    "priority": 5,
+    "_source_file": "documents\\text_vectorization_basics.md",
+    "_note": "请根据实际情况修改 domain, audiences, tags, priority"
+  },
+  "vector_database_comparison": {
+    "doc_id": "vector_database_comparison",
+    "title": "主流向量数据库对比",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [],
+    "priority": 5,
+    "_source_file": "documents\\vector_database_comparison.md",
+    "_note": "请根据实际情况修改 domain, audiences, tags, priority"
+  },
+  "vector_database_intro": {
+    "doc_id": "vector_database_intro",
+    "title": "向量数据库详解",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [],
+    "priority": 5,
+    "_source_file": "documents\\vector_database_intro.md",
+    "_note": "请根据实际情况修改 domain, audiences, tags, priority"
+  }
+}

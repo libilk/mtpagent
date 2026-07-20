@@ -1,0 +1,130 @@
+[
+  {
+    "doc_id": "tech_001",
+    "title": "RAG系统架构设计",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [
+      "架构",
+      "RAG",
+      "设计"
+    ],
+    "priority": 10
+  },
+  {
+    "doc_id": "tech_002",
+    "title": "Python快速排序实现",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [
+      "算法",
+      "Python",
+      "排序"
+    ],
+    "priority": 8
+  },
+  {
+    "doc_id": "tech_003",
+    "title": "API接口文档 - 用户管理",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [
+      "API",
+      "接口",
+      "用户管理"
+    ],
+    "priority": 9
+  },
+  {
+    "doc_id": "sales_001",
+    "title": "产品定价策略",
+    "domain": "sales",
+    "audiences": [
+      "sales_rep"
+    ],
+    "tags": [
+      "定价",
+      "销售",
+      "策略"
+    ],
+    "priority": 10
+  },
+  {
+    "doc_id": "sales_002",
+    "title": "客户异议处理手册",
+    "domain": "sales",
+    "audiences": [
+      "sales_rep"
+    ],
+    "tags": [
+      "销售",
+      "异议处理",
+      "话术"
+    ],
+    "priority": 9
+  },
+  {
+    "doc_id": "sales_003",
+    "title": "行业解决方案 - 电商",
+    "domain": "sales",
+    "audiences": [
+      "sales_rep",
+      "product_manager"
+    ],
+    "tags": [
+      "解决方案",
+      "电商",
+      "案例"
+    ],
+    "priority": 8
+  },
+  {
+    "doc_id": "product_001",
+    "title": "产品功能清单",
+    "domain": "product",
+    "audiences": [
+      "product_manager",
+      "all"
+    ],
+    "tags": [
+      "产品",
+      "功能",
+      "规划"
+    ],
+    "priority": 10
+  },
+  {
+    "doc_id": "cs_001",
+    "title": "客服标准话术",
+    "domain": "customer_service",
+    "audiences": [
+      "customer_service_rep"
+    ],
+    "tags": [
+      "客服",
+      "话术",
+      "标准"
+    ],
+    "priority": 10
+  },
+  {
+    "doc_id": "cs_002",
+    "title": "工单处理流程",
+    "domain": "customer_service",
+    "audiences": [
+      "customer_service_rep"
+    ],
+    "tags": [
+      "工单",
+      "流程",
+      "客服"
+    ],
+    "priority": 9
+  }
+]

@@ -1,0 +1,50 @@
+# API接口文档 - 用户管理
+
+## 基础信息
+- Base URL: https://api.example.com/v1
+- 认证方式: Bearer Token
+
+## 接口列表
+
+### 1. 获取用户信息
+**请求**
+```
+GET /users/{user_id}
+Authorization: Bearer {token}
+```
+
+**响应**
+```json
+{
+  "user_id": "user_001",
+  "name": "张三",
+  "email": "zhangsan@example.com",
+  "vip_level": "gold"
+}
+```
+
+### 2. 创建用户
+**请求**
+```
+POST /users
+Content-Type: application/json
+
+{
+  "name": "李四",
+  "email": "lisi@example.com"
+}
+```
+
+**响应**
+```json
+{
+  "user_id": "user_002",
+  "status": "created"
+}
+```
+
+## 错误码
+- 400: 请求参数错误
+- 401: 未授权
+- 404: 用户不存在
+- 500: 服务器错误

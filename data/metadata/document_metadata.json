@@ -1,0 +1,92 @@
+{
+  "embedding_models": {
+    "doc_id": "embedding_models",
+    "title": "Embedding Models",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [],
+    "priority": 5
+  },
+  "faq_data": {
+    "doc_id": "faq_data",
+    "title": "Faq Data",
+    "domain": "customer_service",
+    "audiences": [
+      "customer_service_rep"
+    ],
+    "tags": [],
+    "priority": 5
+  },
+  "llm_comparison": {
+    "doc_id": "llm_comparison",
+    "title": "Llm Comparison",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [],
+    "priority": 5
+  },
+  "product_sales_data": {
+    "doc_id": "product_sales_data",
+    "title": "Product Sales Data",
+    "domain": "sales",
+    "audiences": [
+      "sales_rep"
+    ],
+    "tags": [],
+    "priority": 5
+  },
+  "rag_introduction": {
+    "doc_id": "rag_introduction",
+    "title": "Rag Introduction",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [],
+    "priority": 5
+  },
+  "sales_report_with_tables": {
+    "doc_id": "sales_report_with_tables",
+    "title": "Sales Report With Tables",
+    "domain": "sales",
+    "audiences": [
+      "sales_rep"
+    ],
+    "tags": [],
+    "priority": 5
+  },
+  "text_vectorization_basics": {
+    "doc_id": "text_vectorization_basics",
+    "title": "文本向量化基础",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [],
+    "priority": 5
+  },
+  "vector_database_comparison": {
+    "doc_id": "vector_database_comparison",
+    "title": "主流向量数据库对比",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [],
+    "priority": 5
+  },
+  "vector_database_intro": {
+    "doc_id": "vector_database_intro",
+    "title": "向量数据库详解",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [],
+    "priority": 5
+  }
+}
