@@ -1,0 +1,43 @@
+agents:
+  - id: knowledge_agent
+    name: 知识检索Agent（含客服功能）
+    description: 专门处理通用知识查询和客服咨询。支持向量检索、关键词检索、混合检索、对话记忆、情感分析、工单管理。基于ReAct模式自主决策。
+    capabilities:
+      - 语义相似度检索
+      - 关键词精确匹配
+      - 混合检索（RRF融合）
+      - 查询优化（扩展、分解、改写）
+      - 文本摘要
+      - 结果重排序
+      - 文档对比
+      - 质量评估
+      - 对话记忆
+      - 情感分析
+      - 指代消解
+      - 工单管理
+      - 用户查询
+    openapi_spec: agents/knowledge_agent/openapi.yaml
+    model: qwen-plus
+    enabled: true
+    optimizations:
+      enable_customer_service: true
+      enable_memory: true
+      enable_sentiment: true
+      enable_rerank: true
+      enable_hyde: true
+      enable_self_consistency: true
+
+  - id: document_agent
+    name: 合同审核Agent
+    description: 企业级合同审核Agent，支持文档解析、风险识别、历史对比。基于ReAct模式自主决策。
+    capabilities:
+      - 文档解析（PDF/Word/TXT）
+      - 结构化信息提取
+      - 风险识别
+      - 历史合同对比
+      - 风险评分
+      - 供应商查询
+    openapi_spec: agents/document_agent/openapi.yaml
+    model: qwen-plus
+    enabled: true
+

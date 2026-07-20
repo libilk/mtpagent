@@ -1,0 +1,163 @@
+skills:
+  # Knowledge Agent 工具
+  vector_search:
+    name: 向量检索
+    description: 在知识库中进行语义相似度检索，适用于概念性查询和模糊匹配
+    agent: knowledge_agent
+    parameters:
+      query:
+        type: string
+        required: true
+        description: 查询文本
+      top_k:
+        type: integer
+        default: 3
+        description: 返回结果数量
+    适用场景:
+      - 询问技术概念
+      - 查找相关文档
+      - 语义相似查询
+    不适用场景:
+      - 需要精确匹配的查询
+
+  keyword_search:
+    name: 关键词检索
+    description: 基于BM25算法的关键词精确匹配检索
+    agent: knowledge_agent
+    parameters:
+      query:
+        type: string
+        required: true
+      top_k:
+        type: integer
+        default: 3
+    适用场景:
+      - 精确关键词匹配
+      - 专有名词查询
+    不适用场景:
+      - 语义理解查询
+
+  hybrid_search:
+    name: 混合检索
+    description: 结合向量检索和关键词检索，使用RRF算法融合结果
+    agent: knowledge_agent
+    parameters:
+      query:
+        type: string
+        required: true
+      top_k:
+        type: integer
+        default: 3
+      vector_weight:
+        type: float
+        default: 0.5
+        description: 向量检索权重
+    适用场景:
+      - 复杂查询
+      - 需要兼顾语义和精确匹配
+
+  summarize:
+    name: 文本摘要
+    description: 对长文本进行摘要提取
+    agent: knowledge_agent
+    parameters:
+      text:
+        type: string
+        required: true
+      max_length:
+        type: integer
+        default: 200
+
+  # Code Agent 工具
+  generate_code:
+    name: 代码生成
+    description: 根据需求生成代码
+    agent: code_agent
+    parameters:
+      task:
+        type: string
+        required: true
+        description: 代码任务描述
+      language:
+        type: string
+        default: python
+        description: 编程语言
+      style:
+        type: string
+        default: clean
+        description: 代码风格
+
+  review_code:
+    name: 代码审查
+    description: 审查代码质量和潜在问题
+    agent: code_agent
+    parameters:
+      code:
+        type: string
+        required: true
+      language:
+        type: string
+        required: true
+
+  debug_code:
+    name: 代码调试
+    description: 分析和修复代码错误
+    agent: code_agent
+    parameters:
+      code:
+        type: string
+        required: true
+      error_message:
+        type: string
+        required: true
+
+  # Customer Agent 工具
+  analyze_sentiment:
+    name: 情感分析
+    description: 分析用户情绪（正面/负面/中性）
+    agent: customer_agent
+    parameters:
+      text:
+        type: string
+        required: true
+    returns:
+      sentiment:
+        type: string
+        enum: [positive, negative, neutral]
+      score:
+        type: float
+        description: 情感分数（-1到1）
+
+  create_ticket:
+    name: 创建工单
+    description: 为用户创建客服工单
+    agent: customer_agent
+    parameters:
+      user_id:
+        type: string
+        required: false
+      issue:
+        type: string
+        required: true
+      priority:
+        type: string
+        default: normal
+        enum: [low, normal, high, urgent]
+
+  query_ticket:
+    name: 查询工单
+    description: 查询工单状态
+    agent: customer_agent
+    parameters:
+      ticket_id:
+        type: string
+        required: true
+
+  query_user_info:
+    name: 查询用户信息
+    description: 查询用户基本信息和历史记录
+    agent: customer_agent
+    parameters:
+      user_id:
+        type: string
+        required: true

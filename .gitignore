@@ -1,0 +1,81 @@
+# .gitignore
+
+# ==================== 敏感信息 ====================
+# 环境变量文件（包含 API Key）
+.env
+.env.local
+.env.*.local
+api.env
+
+# API Key 配置文件
+*_api_key.txt
+*_secret.txt
+
+# ==================== Python ====================
+# 字节码
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.venv
+
+# ==================== 数据文件 ====================
+# 向量数据库（保留目录结构，排除实际数据）
+vector_db/chroma_db/
+vector_db/indexed_files.json
+chroma_db/
+vector_store/
+*.faiss
+*.index
+
+# 文档和日志
+logs/
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# ==================== IDE ====================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ==================== 模型文件 ====================
+# 本地模型
+# Model_Package/
+*.bin
+*.safetensors
+*.ckpt
+*.pth
+
+# ==================== Node.js ====================
+node_modules/
+package-lock.json
+
+# ==================== OCR 二进制文件 ====================
+ocr_tools/*.dll
+ocr_tools/tessdata/
+
+# ==================== Claude IDE ====================
+.claude/
+
+# ==================== 文档 ====================
+docs/
+
+# ==================== 其他 ====================
+# 测试输出
+test_output/
+*.test
+
+# 数据库文件（可由用户自行下载或初始化）
+database/chinook.db

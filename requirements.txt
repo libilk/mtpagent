@@ -1,0 +1,67 @@
+# ==================== 核心框架 ====================
+# LLM 调用（DashScope 兼容 OpenAI 接口）
+openai>=1.0.0
+
+# LangChain（对话记忆、文本分块）
+langchain>=0.1.0
+langchain-text-splitters>=0.0.1
+langchain-community>=0.0.1
+
+# MCP 协议客户端
+mcp>=1.0.0
+
+# ==================== 向量检索 ====================
+# 向量数据库
+chromadb>=0.4.0
+
+# 中文分词（BM25 检索）
+jieba>=0.42.1
+
+# 数值计算
+numpy>=1.24.0
+
+# ==================== 文档处理 ====================
+# PDF 文本与表格提取
+pdfplumber>=0.10.0
+
+# OCR 识别（扫描版 PDF）
+pytesseract>=0.3.10
+Pillow>=10.0.0
+
+# Word 文档解析
+python-docx>=0.8.11
+
+# Excel / CSV 处理
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# ==================== 网络与工具 ====================
+# HTTP 请求
+requests>=2.31.0
+
+# 联网搜索
+tavily-python>=0.3.0
+
+# 重试机制
+tenacity>=8.0.0
+
+# 异步事件循环（MCP 同步封装）
+nest-asyncio>=1.6.0
+
+# YAML 配置解析
+pyyaml>=6.0.0
+
+# 数据校验
+pydantic>=2.0.0
+
+# ==================== 可选依赖 ====================
+# Redis 缓存（生产环境持久化缓存，本地运行可不装）
+# redis>=4.5.0
+
+# PDF 生成（仅 OCR 测试脚本使用）
+# reportlab>=4.0.0
+
+# 本地 Embedding 模型（如不使用 API Embedding 可启用）
+# sentence-transformers>=2.2.0
+# torch>=2.0.0
+# transformers>=4.30.0
