@@ -214,7 +214,7 @@ class RAGSystem:
 
                         # 检索
                         results = self.chroma_store.search(
-                            query_vector=query_embedding.tolist(),
+                            query_vector=query_embedding,
                             top_k=top_k
                         )
 

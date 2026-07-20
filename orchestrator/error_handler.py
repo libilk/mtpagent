@@ -92,11 +92,10 @@ class AgentErrorHandler:
             if parsed:
                 response = parsed
             else:
-                # 解析失败，包装为标准格式
+                # 非 JSON 文本视为有效回答
                 return {
-                    "success": False,
-                    "error": "响应格式错误",
-                    "raw_response": response
+                    "success": True,
+                    "answer": response
                 }
 
         # 如果不是字典，包装

@@ -47,9 +47,11 @@ class MCPClient:
                 env=server_env
             )
 
-            # 连接 server
-            stdio_transport = await stdio_client(server_params)
-            read, write = stdio_transport
+            # 连接 server（新版 MCP SDK 返回 async context manager）
+            self._stdio_contexts = getattr(self, '_stdio_contexts', {})
+            stdio_context = stdio_client(server_params)
+            read, write = await stdio_context.__aenter__()
+            self._stdio_contexts[server_name] = stdio_context
 
             session = ClientSession(read, write)
             await session.initialize()
@@ -116,6 +118,15 @@ class MCPClient:
                 logger.error(f"关闭 {server_name} 失败: {e}")
 
         self.sessions.clear()
+
+        # 关闭 stdio 上下文
+        for server_name, ctx in getattr(self, '_stdio_contexts', {}).items():
+            try:
+                await ctx.__aexit__(None, None, None)
+                logger.info(f"✓ {server_name} stdio 已关闭")
+            except Exception as e:
+                logger.error(f"关闭 {server_name} stdio 失败: {e}")
+        self._stdio_contexts = {}
 
 
 class MCPClientSync:

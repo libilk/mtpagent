@@ -179,3 +179,7 @@ class CachedEmbedder:
     def encode(self, text: str) -> List[float]:
         """兼容不同的API命名（encode/embed）"""
         return self.embed(text)
+
+    def encode_query(self, text: str) -> List[float]:
+        """兼容 encode_query 调用"""
+        return self.embed(text)

@@ -183,3 +183,8 @@ class FunctionCalling:
             "tool": tool_name,
             "result": result
         }, ensure_ascii=False, indent=2)
+
+
+def parse_tool_calls(response: str):
+    """模块级便捷函数，代理到 FunctionCalling.parse_tool_calls"""
+    return FunctionCalling.parse_tool_calls(response)

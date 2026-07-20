@@ -142,6 +142,14 @@ class StructuredLogger:
         else:
             logger.info(log_message)
 
+    def log_error(self, event: str, **kwargs):
+        """记录错误日志"""
+        self.log(event, level="ERROR", **kwargs)
+
+    def log_warning(self, event: str, **kwargs):
+        """记录警告日志"""
+        self.log(event, level="WARNING", **kwargs)
+
     def log_query(self, query: str, user_id: Optional[str] = None, **kwargs):
         """记录查询日志"""
         self.log("query", query=query, user_id=user_id, **kwargs)
@@ -206,6 +214,16 @@ class MetricsCollector:
             "timestamp": time.time(),
             "tags": tags or {}
         })
+
+    def record(self, metric_name: str, value: Any, tags: Optional[Dict] = None):
+        """记录指标（collect 的别名）"""
+        self.collect(metric_name, value, tags)
+
+    def increment(self, counter_name: str, value: int = 1):
+        """增加计数器"""
+        if counter_name not in self.metrics:
+            self.metrics[counter_name] = 0
+        self.metrics[counter_name] += value
 
     def get_metrics(self, metric_name: str) -> List:
         """获取指标"""

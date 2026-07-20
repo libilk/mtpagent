@@ -33,26 +33,25 @@ class FilesystemService:
         self._connect()
 
     def _connect(self):
-        """连接 Filesystem MCP Server"""
-        try:
-            logger.info(f"连接 Filesystem MCP，允许目录: {self.allowed_directory}")
-
-            # 连接 MCP Server
-            self.mcp_client.connect_server(
-                server_name=self.server_name,
-                command="npx",
-                args=[
-                    "-y",
-                    "@modelcontextprotocol/server-filesystem",
-                    self.allowed_directory
-                ]
-            )
-            self.connected = True
-            logger.info("✓ Filesystem MCP 连接成功")
-
-        except Exception as e:
-            logger.error(f"连接 Filesystem MCP 失败: {e}")
-            self.connected = False
+        """连接 Filesystem MCP Server（暂时禁用，直接使用 Python 降级方案）"""
+        self.connected = False
+        logger.info("Filesystem MCP 已禁用，使用 Python os 降级方案")
+        # try:
+        #     logger.info(f"连接 Filesystem MCP，允许目录: {self.allowed_directory}")
+        #     self.mcp_client.connect_server(
+        #         server_name=self.server_name,
+        #         command="npx",
+        #         args=[
+        #             "-y",
+        #             "@modelcontextprotocol/server-filesystem",
+        #             self.allowed_directory
+        #         ]
+        #     )
+        #     self.connected = True
+        #     logger.info("✓ Filesystem MCP 连接成功")
+        # except Exception as e:
+        #     logger.warning(f"连接 Filesystem MCP 失败（将使用 Python 降级方案）: {e}")
+        #     self.connected = False
 
     def list_directory(self, path: str = "") -> List[str]:
         """
