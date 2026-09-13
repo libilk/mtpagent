@@ -91,38 +91,43 @@ class ProfileWorker:
             return {"status": "ungradeable", "reason": str(exc)}
 
         kp_ids = list(problem.kp_ids)
-        # ★ 第二道幂等闸:answer_id 已存在说明这次答题已经计过画像
-        inserted = self.profile.record_answer(
-            answer_id=event.event_id,
-            learner_id=learner_id,
-            problem_id=problem_id,
-            kp_ids=kp_ids,
-            correct=correct,
-            answer_text=answer_text,
-            elapsed_ms=elapsed_ms,
-        )
-        if not inserted:
-            return {"status": "duplicate_answer"}
-
         now = time.time()
         quality = sm2.quality_from_correct(correct)
-        mastery = self.profile.get_mastery_map(learner_id, kp_ids)
-        due_at = {}
-        for kp_id in kp_ids:
-            new_p = bkt.update(mastery.get(kp_id), correct)
-            mastery[kp_id] = new_p
-            self.profile.set_mastery(learner_id, kp_id, new_p)
 
-            memory = sm2.review(
-                sm2.SM2State.from_row(self.profile.get_memory(learner_id, kp_id)),
-                quality,
-                now,
+        # ★ 全部写操作放进**同一个事务**:答题记录 / 掌握度 / SM-2 / 易错计数
+        # 要么全成、要么全不成。否则进程在中间被杀,恢复重放会看到答题记录
+        # 已存在而直接跳过,掌握度就永远停在旧值。
+        with self.profile.transaction():
+            # 第二道幂等闸:answer_id 已存在说明这次答题已经计过画像
+            inserted = self.profile.record_answer(
+                answer_id=event.event_id,
+                learner_id=learner_id,
+                problem_id=problem_id,
+                kp_ids=kp_ids,
+                correct=correct,
+                answer_text=answer_text,
+                elapsed_ms=elapsed_ms,
             )
-            self._save_memory(learner_id, kp_id, memory)
-            due_at[kp_id] = memory.due_at
+            if not inserted:
+                return {"status": "duplicate_answer"}
 
-            if not correct:
-                self.profile.bump_error(learner_id, kp_id, "wrong")
+            mastery = self.profile.get_mastery_map(learner_id, kp_ids)
+            due_at = {}
+            for kp_id in kp_ids:
+                new_p = bkt.update(mastery.get(kp_id), correct)
+                mastery[kp_id] = new_p
+                self.profile.set_mastery(learner_id, kp_id, new_p)
+
+                memory = sm2.review(
+                    sm2.SM2State.from_row(self.profile.get_memory(learner_id, kp_id)),
+                    quality,
+                    now,
+                )
+                self._save_memory(learner_id, kp_id, memory)
+                due_at[kp_id] = memory.due_at
+
+                if not correct:
+                    self.profile.bump_error(learner_id, kp_id, "wrong")
 
         self._publish_profile_updated(event, kp_ids, mastery)
         return {

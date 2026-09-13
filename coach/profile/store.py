@@ -6,8 +6,9 @@
 import json
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 
 from coach import config
 from coach.knowledge import schema
@@ -65,10 +66,48 @@ CREATE INDEX IF NOT EXISTS idx_memory_due ON learner_memory(learner_id, due_at);
 
 
 class ProfileStore:
+    """画像持久化。**所有写操作默认各自提交**;要原子地做多步写,用 `transaction()`。
+
+    为什么需要事务:一次答题要写「答题记录 + 掌握度 + SM-2 状态 + 易错计数」,
+    如果进程中途被杀而只写了一半,恢复重放时答题记录已存在 → 会被当成重复而跳过,
+    掌握度就永远停在旧值。所以这些写必须**要么全成、要么全不成**。
+    """
+
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
+        self._in_transaction = False
         self.conn.executescript(DDL)
         self.conn.commit()
+
+    # ---------------- 事务 ----------------
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """把块内所有写操作合成一个事务:正常退出提交,抛异常整体回滚。
+
+        注意:`self.conn` 是与图/journal **共用**的连接,所以块内不要调用
+        Journal / KnowledgeStore 的写方法 —— 它们自带 commit,会提前提交掉。
+        """
+        if self._in_transaction:
+            yield
+            return
+
+        self._in_transaction = True
+        try:
+            yield
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
+        finally:
+            self._in_transaction = False
+
+    def _write(self, sql: str, params: Sequence[Any]) -> sqlite3.Cursor:
+        """执行一条写语句。在 `transaction()` 块内不提交,块外立即提交。"""
+        cursor = self.conn.execute(sql, params)
+        if not self._in_transaction:
+            self.conn.commit()
+        return cursor
 
     @classmethod
     def open(
@@ -124,16 +163,15 @@ class ProfileStore:
     def set_mastery(
         self, learner_id: str, kp_id: str, p_known: float, ts: Optional[float] = None
     ) -> None:
-        with self.conn:
-            self.conn.execute(
-                """
-                INSERT INTO learner_mastery (learner_id, kp_id, p_known, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(learner_id, kp_id) DO UPDATE SET
-                    p_known = excluded.p_known, updated_at = excluded.updated_at
-                """,
-                (learner_id, kp_id, p_known, time.time() if ts is None else ts),
-            )
+        self._write(
+            """
+            INSERT INTO learner_mastery (learner_id, kp_id, p_known, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(learner_id, kp_id) DO UPDATE SET
+                p_known = excluded.p_known, updated_at = excluded.updated_at
+            """,
+            (learner_id, kp_id, p_known, time.time() if ts is None else ts),
+        )
 
     # ---------------- 间隔重复状态(P3 用)----------------
 
@@ -155,22 +193,21 @@ class ProfileStore:
         last_review: Optional[float],
         due_at: Optional[float],
     ) -> None:
-        with self.conn:
-            self.conn.execute(
-                """
-                INSERT INTO learner_memory
-                    (learner_id, kp_id, ease, interval_days, reps, lapses, last_review, due_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(learner_id, kp_id) DO UPDATE SET
-                    ease = excluded.ease,
-                    interval_days = excluded.interval_days,
-                    reps = excluded.reps,
-                    lapses = excluded.lapses,
-                    last_review = excluded.last_review,
-                    due_at = excluded.due_at
-                """,
-                (learner_id, kp_id, ease, interval_days, reps, lapses, last_review, due_at),
-            )
+        self._write(
+            """
+            INSERT INTO learner_memory
+                (learner_id, kp_id, ease, interval_days, reps, lapses, last_review, due_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(learner_id, kp_id) DO UPDATE SET
+                ease = excluded.ease,
+                interval_days = excluded.interval_days,
+                reps = excluded.reps,
+                lapses = excluded.lapses,
+                last_review = excluded.last_review,
+                due_at = excluded.due_at
+            """,
+            (learner_id, kp_id, ease, interval_days, reps, lapses, last_review, due_at),
+        )
 
     def due_reviews(self, learner_id: str, now: Optional[float] = None) -> List[str]:
         """到期待复习的知识点,最急的排前面。"""
@@ -185,16 +222,15 @@ class ProfileStore:
     # ---------------- 易错模式 ----------------
 
     def bump_error(self, learner_id: str, kp_id: str, error_type: str) -> None:
-        with self.conn:
-            self.conn.execute(
-                """
-                INSERT INTO learner_error (learner_id, kp_id, error_type, count)
-                VALUES (?, ?, ?, 1)
-                ON CONFLICT(learner_id, kp_id, error_type) DO UPDATE SET
-                    count = count + 1
-                """,
-                (learner_id, kp_id, error_type),
-            )
+        self._write(
+            """
+            INSERT INTO learner_error (learner_id, kp_id, error_type, count)
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(learner_id, kp_id, error_type) DO UPDATE SET
+                count = count + 1
+            """,
+            (learner_id, kp_id, error_type),
+        )
 
     def list_errors(self, learner_id: str) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
@@ -222,7 +258,7 @@ class ProfileStore:
         这是**幂等的第二道闸**:processed_events 挡住重复消费,
         这里挡住「恢复重放」时把同一次答题二次计入画像。
         """
-        cur = self.conn.execute(
+        cursor = self._write(
             """
             INSERT OR IGNORE INTO answers
                 (answer_id, learner_id, problem_id, kp_ids, correct, answer_text, elapsed_ms, ts)
@@ -239,8 +275,7 @@ class ProfileStore:
                 time.time() if ts is None else ts,
             ),
         )
-        self.conn.commit()
-        return cur.rowcount > 0
+        return cursor.rowcount > 0
 
     def has_answer(self, answer_id: str) -> bool:
         return (
@@ -272,18 +307,17 @@ class ProfileStore:
         daily_minutes: int = 30,
         preference: Optional[str] = None,
     ) -> None:
-        with self.conn:
-            self.conn.execute(
-                """
-                INSERT INTO learner_profile (learner_id, goal_kp_id, daily_minutes, preference, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(learner_id) DO UPDATE SET
-                    goal_kp_id = excluded.goal_kp_id,
-                    daily_minutes = excluded.daily_minutes,
-                    preference = excluded.preference
-                """,
-                (learner_id, goal_kp_id, daily_minutes, preference, time.time()),
-            )
+        self._write(
+            """
+            INSERT INTO learner_profile (learner_id, goal_kp_id, daily_minutes, preference, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(learner_id) DO UPDATE SET
+                goal_kp_id = excluded.goal_kp_id,
+                daily_minutes = excluded.daily_minutes,
+                preference = excluded.preference
+            """,
+            (learner_id, goal_kp_id, daily_minutes, preference, time.time()),
+        )
 
     def get_profile(self, learner_id: str) -> Optional[Dict[str, Any]]:
         row = self.conn.execute(
@@ -291,22 +325,28 @@ class ProfileStore:
         ).fetchone()
         return dict(row) if row else None
 
+    def list_learners(self) -> List[str]:
+        """所有已建档的学习者。定时巡检要遍历他们发 tick。"""
+        rows = self.conn.execute(
+            "SELECT learner_id FROM learner_profile ORDER BY learner_id"
+        ).fetchall()
+        return [r["learner_id"] for r in rows]
+
     # ---------------- 根因解释缓存 ----------------
 
     def set_gap_explanation(
         self, learner_id: str, kp_id: str, explanation: str, ts: Optional[float] = None
     ) -> None:
-        with self.conn:
-            self.conn.execute(
-                """
-                INSERT INTO gap_explanations (learner_id, kp_id, explanation, generated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(learner_id, kp_id) DO UPDATE SET
-                    explanation = excluded.explanation,
-                    generated_at = excluded.generated_at
-                """,
-                (learner_id, kp_id, explanation, time.time() if ts is None else ts),
-            )
+        self._write(
+            """
+            INSERT INTO gap_explanations (learner_id, kp_id, explanation, generated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(learner_id, kp_id) DO UPDATE SET
+                explanation = excluded.explanation,
+                generated_at = excluded.generated_at
+            """,
+            (learner_id, kp_id, explanation, time.time() if ts is None else ts),
+        )
 
     def get_gap_explanation(self, learner_id: str, kp_id: str) -> Optional[Dict[str, Any]]:
         row = self.conn.execute(
@@ -320,12 +360,11 @@ class ProfileStore:
 
     def mark_processed(self, event_id: str, ts: Optional[float] = None) -> bool:
         """标记事件已处理。返回 True 表示本次是新标记;False 表示早就处理过。"""
-        cur = self.conn.execute(
+        cursor = self._write(
             "INSERT OR IGNORE INTO processed_events (event_id, ts) VALUES (?, ?)",
             (event_id, time.time() if ts is None else ts),
         )
-        self.conn.commit()
-        return cur.rowcount > 0
+        return cursor.rowcount > 0
 
     def is_processed(self, event_id: str) -> bool:
         return (

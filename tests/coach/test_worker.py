@@ -96,6 +96,70 @@ class TestIdempotency:
         assert profile.get_mastery("u1", "algo.dp") == mastery_after_first
 
 
+class TestAtomicity:
+    """★ 一次答题的写操作必须全成或全不成(见 profile/store.py transaction)。"""
+
+    @staticmethod
+    def _crash_after_answer_insert(worker, monkeypatch):
+        """模拟:答题记录已写、掌握度还没写时进程被杀。"""
+        def boom(_learner_id, _kp_id, _memory):
+            raise RuntimeError("模拟进程被杀")
+
+        monkeypatch.setattr(worker, "_save_memory", boom)
+
+    def test_partial_failure_rolls_back_everything(self, worker, profile, problem, monkeypatch):
+        self._crash_after_answer_insert(worker, monkeypatch)
+
+        with pytest.raises(RuntimeError):
+            worker.process(answer_event())
+
+        # 答题记录必须一起回滚,否则恢复重放会以为已经处理过而跳过
+        assert profile.list_answers("u1") == []
+        assert profile.get_memory("u1", "algo.dp") is None
+        assert profile.get_mastery("u1", "algo.dp") == config.BKT_P_INIT
+
+    def test_recovery_after_crash_applies_everything(self, worker, profile, journal, problem, monkeypatch):
+        event = answer_event()
+        self._crash_after_answer_insert(worker, monkeypatch)
+        with pytest.raises(RuntimeError):
+            worker.process(event)
+        assert profile.get_mastery("u1", "algo.dp") == config.BKT_P_INIT
+
+        # 进程重启:关掉故障,走正常恢复路径
+        monkeypatch.undo()
+        replayed = Recovery(journal).replay(worker.process)
+
+        assert replayed == [event.event_id]
+        assert profile.get_mastery("u1", "algo.dp") > config.BKT_P_INIT
+        assert len(profile.list_answers("u1")) == 1
+        assert profile.get_memory("u1", "algo.dp")["reps"] == 1
+
+    def test_transaction_commits_on_success(self, profile):
+        with profile.transaction():
+            profile.set_mastery("u1", "a", 0.5)
+            profile.set_mastery("u1", "b", 0.7)
+
+        assert profile.get_mastery("u1", "a") == pytest.approx(0.5)
+        assert profile.get_mastery("u1", "b") == pytest.approx(0.7)
+
+    def test_nested_transaction_reuses_outer(self, profile):
+        with profile.transaction():
+            profile.set_mastery("u1", "a", 0.5)
+            with profile.transaction():
+                profile.set_mastery("u1", "b", 0.7)
+
+        assert profile.get_mastery("u1", "a") == pytest.approx(0.5)
+        assert profile.get_mastery("u1", "b") == pytest.approx(0.7)
+
+    def test_rollback_leaves_no_trace(self, profile):
+        with pytest.raises(RuntimeError):
+            with profile.transaction():
+                profile.set_mastery("u1", "a", 0.5)
+                raise RuntimeError("boom")
+
+        assert profile.get_mastery("u1", "a") == config.BKT_P_INIT
+
+
 class TestJournal:
     def test_record_is_idempotent(self, journal):
         event = answer_event()

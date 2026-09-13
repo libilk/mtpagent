@@ -17,10 +17,14 @@
 
 **一句话:** 用知识图谱多跳推理定位"学不会的根因"的学习 Agent,并以量化评测证明图推理相比扁平检索的增益。
 
-**当前状态:** **P0~P3 已完成**。图底座、可靠队列、画像、根因定位、遗忘调度均已落地并有测试
-(截至 2026-09-13:`coach/` 约 3.5k 行,coach 测试 156 项 / 全量 306 项)。
+**当前状态:** **P0~P3 已完成**,并已补齐跑通所需的零件(题目库、tick 生产者、LLM 装配、学习者建档)。
+截至 2026-09-13:`coach/` 约 4k 行,coach 测试 168 项 / 全量 323 项。
 未做:P4 工作流(换 LangGraph)、P5 评测、P6 交付。
-**P1 的端到端验收欠一次真 Redis 实跑**(开发机 Docker 未启动),见 §10 台账。
+
+**两个诚实的缺口:**
+1. **P1 的端到端验收欠一次真 Redis 实跑**(开发机 Docker 未启动)。目前 `<50ms` 是进程内
+   总线实测,`kill -9` 恢复是逻辑验证 —— 见 §10 台账。
+2. **LLM 抽取的 id 会与人工金标准漂移**,已实测复现,尚未解决(见 §11)。
 
 **已有的可复用资产(来自上一个项目):**
 
@@ -375,12 +379,18 @@ def has_cycle(edges: list[tuple[str, str]]) -> bool:
 2. 查 processed_events:已存在 → 直接 ACK,跳过
 3. 写 journal(append-only)——先记后做
 4. 执行业务
+   ★ 业务若有多步写,必须放在**同一个事务**里。否则"有一步写成功、后续失败"
+     加上"恢复重放看到第一步已落库而跳过"= 该更新永久丢失(P1 实现时踩到,已修)
 5. 写 processed_events + XACK
 6. 失败 → attempt += 1
    ├─ ≤ 3 → 重新投递
    └─ > 3 → 移入 dlq + 告警
 7. 重启 → recovery 扫 journal 中「已记未完成」的事件,补做
 ```
+
+**幂等要做两道闸**(只做第 2 步不够):
+- `processed_events` 挡「同一消息被消费两次」
+- 业务侧的唯一键(如 `answers.answer_id`)挡「恢复重放把同一步执行两次」
 
 ---
 
@@ -619,8 +629,16 @@ uv pip install --python .venv/Scripts/python.exe fastapi "uvicorn[standard]" red
 # Redis(需自行安装或用 Docker)
 docker run -d -p 6379:6379 --name coach-redis redis:7-alpine
 
-# P0:建图
-.venv/Scripts/python.exe -m coach.knowledge.builder --build --seed 15
+# P0:建图 + 灌题目(22 知识点 / 27 关系 / 13 题)
+.venv/Scripts/python.exe -m coach.knowledge.builder --build
+.venv/Scripts/python.exe -m coach.knowledge.builder --build --seed 15   # 只建前 15 个点的子图
+
+# P1~P3:建档 + 起 worker(定时 60 秒发一次 tick)
+.venv/Scripts/python.exe -m coach.workers.run_all --init-learner u1 --goal algo.dp
+.venv/Scripts/python.exe -m coach.workers.run_all --init-learner u1 --goal algo.dp --no-llm
+.venv/Scripts/python.exe -m coach.workers.run_all --tick-once u1    # 只发一次 tick,手动触发
+
+# 注意:python -m uvicorn 那条要等 Redis 起来才有意义
 
 # P1:起服务
 .venv/Scripts/python.exe -m uvicorn coach.api.main:app --reload --port 8000
@@ -685,6 +703,8 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | 图可能不比向量强 | 卖点站不住 | **这本身就是结论**,写进 Limitations | 待 P5 验证 |
 | **BKT 全对时饱和到 1.0**(约 10 次) | P5 校准曲线/置信度会失真 | 照抄 §5.3 不改公式;P5 若校准差,再考虑加参数或改公式并记录 | 已发现 |
 | **没作答记录的前置会被算成缺口** | 根因列表被"从没考过的点"挤占,学生见过的真缺口排到后面 | 这是 §5.5 的既定行为(未记录 = 掌握度初始值 0.1 < 0.4);P5 评测时要么用有作答轨迹的学生,要么显式区分"未观测"与"已观测且弱" | 需注意 |
+| ★ **LLM 抽取的 id 与人工金标准可能对不上** | 治理按 id 判重,LLM 给的 `algo.merge_sort` 与金标准的 `algo.mergesort` 会被当成两个概念 → 图里出现重复节点,前置闭包被污染 | 实测已复现(2026-09-13 真实调用)。对策候选:抽取时把已有概念清单喂给 LLM 要求复用 id / 增加按 name 归一化的判重规则 / 抽取结果落 observation 后人工过一遍再 aggregate | **未解决** |
+| LLM 抽取已实测可用 | — | 单次真实调用(qwen-plus)抽 4 概念 / 3 关系,类型与置信度都合理,`PREREQUISITE` 判定正确 | 已验证 |
 
 ---
 
@@ -720,3 +740,6 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | 2026-09-13 | ★ 决策:§5.4 没规定二值判分怎么映射到 0~5 评分。**定为 答对=4、答错=1**。理由:q=4 时 EF 增量为 0,难度因子不漂移;q=5 会让 EF 无限上涨。改这个映射会直接改变复习间隔节奏 |
 | 2026-09-13 | ★ 修复(潜在丢消息):`planner_worker` 原本同时消费 `coach:profile` 和 `coach:tick`。Redis 消费组里一条消息只投给组内**一个**消费者,两个 worker 抢同一个流会随机丢消息。**改为一个流只配一个 worker**:planner 只认 `coach:profile`,tick 归 scheduler |
 | 2026-09-13 | 决策:`GET /plan` 的预算是**软的** —— 超预算就停,但至少留一项,不返回空计划 |
+| 2026-09-13 | **修复(数据丢失)**:`profile_worker` 写「答题记录/掌握度/SM-2/易错」原本各自提交,进程半途被杀会让答题记录落了库而掌握度没更新;恢复重放看到记录已存在直接跳过 → **该次更新永久丢失**。已改为 `ProfileStore.transaction()` 包成一个事务;5 项原子性测试,把 `transaction()` 打回空操作后其中 3 项失败(已验证测试有效) |
+| 2026-09-13 | **P4/P5 前置补齐**:① 题目种子 13 道(`GOLDEN_PROBLEMS`,覆盖 13 个知识点),`--build` 一并灌入;② `tick.scheduled` 有了生产者(run_all 定时 + `--tick-once` 手动);③ run_all 装配真 LLM(没 key 或 `--no-llm` 自动降级为模板);④ 学习者建档 `--init-learner`(只碰 SQLite,不依赖 Redis)。新增 `tests/coach/test_demo.py` 端到端测试:POST /answer → 判分 → profile.updated → planner 写解释 → GET /gap 读得到。coach 168 项 / 全量 323 passed |
+| 2026-09-13 | ★ 实测发现:真实 LLM 调用(qwen-plus)抽取可用,但 **id 与人工金标准对不上**(LLM 给 `algo.merge_sort`,金标准是 `algo.mergesort`)。治理按 id 判重 → 会产生重复概念。已入 §11,**未解决** |

@@ -328,6 +328,140 @@ def seed_graph(governance: Governance, limit: Optional[int] = None) -> IngestRep
     return ingest(governance, concepts, edges, source="golden")
 
 
+# 题目不经过治理流程(治理是给"LLM 抽的知识"用的,题目来自公开题库,是事实)。
+# test_cases 的**最后一条**视为提交用例 —— 学生交的 answer_text 跟它比。
+GOLDEN_PROBLEMS: List[Dict[str, Any]] = [
+    {
+        "id": "lc.1", "title": "两数之和", "source": "leetcode:1", "difficulty": 2.0,
+        "kp_ids": ["ds.hash_table", "ds.array"],
+        "test_cases": [
+            {"input": "nums=[2,7,11,15], target=9", "expected": "[0,1]"},
+            {"input": "nums=[3,2,4], target=6", "expected": "[1,2]"},
+        ],
+    },
+    {
+        "id": "lc.704", "title": "二分查找", "source": "leetcode:704", "difficulty": 2.0,
+        "kp_ids": ["algo.binary_search", "ds.array"],
+        "test_cases": [
+            {"input": "nums=[-1,0,3,5,9,12], target=9", "expected": "4"},
+            {"input": "nums=[-1,0,3,5,9,12], target=2", "expected": "-1"},
+        ],
+    },
+    {
+        "id": "lc.206", "title": "反转链表", "source": "leetcode:206", "difficulty": 2.5,
+        "kp_ids": ["ds.linked_list"],
+        "test_cases": [
+            {"input": "head=[1,2,3,4,5]", "expected": "5 4 3 2 1"},
+        ],
+    },
+    {
+        "id": "lc.20", "title": "有效的括号", "source": "leetcode:20", "difficulty": 2.0,
+        "kp_ids": ["ds.stack"],
+        "test_cases": [
+            {"input": "s=\"()[]{}\"", "expected": "true"},
+            {"input": "s=\"([)]\"", "expected": "false"},
+        ],
+    },
+    {
+        "id": "lc.232", "title": "用栈实现队列", "source": "leetcode:232", "difficulty": 2.5,
+        "kp_ids": ["ds.queue", "ds.stack"],
+        "test_cases": [
+            {"input": "push(1);push(2);peek();pop();empty()", "expected": "ok"},
+        ],
+    },
+    {
+        "id": "lc.70", "title": "爬楼梯", "source": "leetcode:70", "difficulty": 2.0,
+        "kp_ids": ["algo.dp", "algo.recursion"],
+        "test_cases": [
+            {"input": "n=3", "expected": "3"},
+            {"input": "n=5", "expected": "8"},
+        ],
+    },
+    {
+        "id": "lc.509", "title": "斐波那契数", "source": "leetcode:509", "difficulty": 1.5,
+        "kp_ids": ["algo.recursion", "algo.memoization"],
+        "test_cases": [
+            {"input": "n=4", "expected": "3"},
+            {"input": "n=5", "expected": "5"},
+        ],
+    },
+    {
+        "id": "lc.46", "title": "全排列", "source": "leetcode:46", "difficulty": 3.5,
+        "kp_ids": ["algo.backtracking", "algo.recursion"],
+        "test_cases": [
+            {"input": "nums=[1,2,3]", "expected": "6"},
+        ],
+    },
+    {
+        "id": "lc.200", "title": "岛屿数量", "source": "leetcode:200", "difficulty": 3.0,
+        "kp_ids": ["algo.dfs", "ds.stack"],
+        "test_cases": [
+            {"input": "grid=3x5 见题面", "expected": "3"},
+        ],
+    },
+    {
+        "id": "lc.102", "title": "二叉树的层序遍历", "source": "leetcode:102", "difficulty": 3.0,
+        "kp_ids": ["algo.bfs", "ds.queue"],
+        "test_cases": [
+            {"input": "root=[3,9,20,null,null,15,7]", "expected": "[3,9,20,15,7]"},
+        ],
+    },
+    {
+        "id": "lc.53", "title": "最大子数组和", "source": "leetcode:53", "difficulty": 3.0,
+        "kp_ids": ["algo.dp", "ds.array"],
+        "test_cases": [
+            {"input": "nums=[-2,1,-3,4,-1,2,1,-5,4]", "expected": "6"},
+        ],
+    },
+    {
+        "id": "lc.455", "title": "分发饼干", "source": "leetcode:455", "difficulty": 2.5,
+        "kp_ids": ["algo.greedy", "algo.sorting"],
+        "test_cases": [
+            {"input": "g=[1,2,3], s=[1,1]", "expected": "1"},
+            {"input": "g=[1,2], s=[1,2,3]", "expected": "2"},
+        ],
+    },
+    {
+        "id": "lc.209", "title": "长度最小的子数组", "source": "leetcode:209", "difficulty": 3.0,
+        "kp_ids": ["algo.sliding_window", "algo.two_pointers"],
+        "test_cases": [
+            {"input": "target=7, nums=[2,3,1,2,4,3]", "expected": "2"},
+        ],
+    },
+]
+
+
+def seed_problems(knowledge) -> int:
+    """灌题目。引用不到知识点的题目直接跳过,不留悬空引用。返回实际写入数。"""
+    from coach.domain.models import Problem
+
+    written = 0
+    for payload in GOLDEN_PROBLEMS:
+        if not all(knowledge.has_concept(kp) for kp in payload["kp_ids"]):
+            continue
+        knowledge.upsert_problem(
+            Problem(
+                id=payload["id"],
+                title=payload["title"],
+                source=payload.get("source"),
+                difficulty=payload.get("difficulty"),
+                judge_type=payload.get("judge_type", "exact_output"),
+                test_cases=payload["test_cases"],
+                kp_ids=payload["kp_ids"],
+            )
+        )
+        written += 1
+    return written
+
+
+def expected_answer(problem_id: str) -> Optional[str]:
+    """取某题的"正确提交",方便演示和测试。"""
+    for payload in GOLDEN_PROBLEMS:
+        if payload["id"] == problem_id:
+            return str(payload["test_cases"][-1]["expected"])
+    return None
+
+
 # ---------------------------------------------------------------- CLI
 
 def _cmd_extract(args) -> int:
@@ -363,8 +497,12 @@ def _cmd_build(args) -> int:
         for kind, key, reason in report.rejections:
             print(f"  [拒] {kind} {key}: {reason}")
 
+        problems = seed_problems(store)
+        print(f"题目写入/更新:{problems} 道")
+
         pairs = store.prerequisite_pairs()
-        print(f"\n图规模:知识点 {len(store.list_concepts())} / 关系 {len(store.list_edges())}")
+        print(f"\n图规模:知识点 {len(store.list_concepts())} / 关系 {len(store.list_edges())}"
+              f" / 题目 {len(store.list_problems())}")
         print(f"无环校验:{'通过' if not has_cycle(pairs) else '★ 成环(异常,请检查)'}")
         print(f"ancestors('algo.dp', 3) = {store.ancestors('algo.dp', 3)}")
     finally:
