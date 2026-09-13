@@ -25,6 +25,9 @@ ENV/
 .venv
 
 # ==================== 数据文件 ====================
+# coach 本地数据：SQLite 图/画像，可用 coach.knowledge.builder --build 重建
+data/coach/
+
 # 向量数据库（保留目录结构，排除实际数据）
 vector_db/chroma_db/
 vector_db/indexed_files.json
