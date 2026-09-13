@@ -18,7 +18,7 @@
 **一句话:** 用知识图谱多跳推理定位"学不会的根因"的学习 Agent,并以量化评测证明图推理相比扁平检索的增益。
 
 **当前状态:** **P0~P3 已完成**,并已补齐跑通所需的零件(题目库、tick 生产者、LLM 装配、学习者建档)。
-截至 2026-09-13:`coach/` 约 4k 行,coach 测试 168 项 / 全量 323 项。
+截至 2026-09-13:`coach/` 约 4k 行,coach 测试 186 项 / 全量 336 项。
 未做:P4 工作流(换 LangGraph)、P5 评测、P6 交付。
 
 **唯一还没验的:**
@@ -742,6 +742,6 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | 2026-09-13 | ★ 修复(潜在丢消息):`planner_worker` 原本同时消费 `coach:profile` 和 `coach:tick`。Redis 消费组里一条消息只投给组内**一个**消费者,两个 worker 抢同一个流会随机丢消息。**改为一个流只配一个 worker**:planner 只认 `coach:profile`,tick 归 scheduler |
 | 2026-09-13 | 决策:`GET /plan` 的预算是**软的** —— 超预算就停,但至少留一项,不返回空计划 |
 | 2026-09-13 | **修复(数据丢失)**:`profile_worker` 写「答题记录/掌握度/SM-2/易错」原本各自提交,进程半途被杀会让答题记录落了库而掌握度没更新;恢复重放看到记录已存在直接跳过 → **该次更新永久丢失**。已改为 `ProfileStore.transaction()` 包成一个事务;5 项原子性测试,把 `transaction()` 打回空操作后其中 3 项失败(已验证测试有效) |
-| 2026-09-13 | **P4/P5 前置补齐**:① 题目种子 13 道(`GOLDEN_PROBLEMS`,覆盖 13 个知识点),`--build` 一并灌入;② `tick.scheduled` 有了生产者(run_all 定时 + `--tick-once` 手动);③ run_all 装配真 LLM(没 key 或 `--no-llm` 自动降级为模板);④ 学习者建档 `--init-learner`(只碰 SQLite,不依赖 Redis)。新增 `tests/coach/test_demo.py` 端到端测试:POST /answer → 判分 → profile.updated → planner 写解释 → GET /gap 读得到。coach 168 项 / 全量 323 passed |
+| 2026-09-13 | **P4/P5 前置补齐**:① 题目种子 13 道(`GOLDEN_PROBLEMS`,覆盖 13 个知识点),`--build` 一并灌入;② `tick.scheduled` 有了生产者(run_all 定时 + `--tick-once` 手动);③ run_all 装配真 LLM(没 key 或 `--no-llm` 自动降级为模板);④ 学习者建档 `--init-learner`(只碰 SQLite,不依赖 Redis)。新增 `tests/coach/test_demo.py` 端到端测试:POST /answer → 判分 → profile.updated → planner 写解释 → GET /gap 读得到。全量 323 passed |
 | 2026-09-13 | ★ 实测发现:真实 LLM 调用(qwen-plus)抽取可用,但 **id 与人工金标准对不上**(LLM 给 `algo.merge_sort`,金标准是 `algo.mergesort`)。治理按 id 判重 → 会产生重复概念。已入 §11,**未解决** |
-| 2026-09-13 | **修复(id 漂移)**:① `builder.extract(known_concepts=...)` 把已有概念清单喂给 LLM 要求复用 id;② 治理层新增第 5 条规则「同名归并」(`normalize_name` 去空白+小写,同名提案拒绝入库并记别名,引用别名的边自动改指规范 id)。observation 保留 LLM 原始输出以便追溯。真实调用复验:22→22 个节点,无重复;新增 13 项测试(`test_id_drift.py`)。coach 181 项 / 全量 336 passed |
+| 2026-09-13 | **修复(id 漂移)**:① `builder.extract(known_concepts=...)` 把已有概念清单喂给 LLM 要求复用 id;② 治理层新增第 5 条规则「同名归并」(`normalize_name` 去空白+小写,同名提案拒绝入库并记别名,引用别名的边自动改指规范 id)。observation 保留 LLM 原始输出以便追溯。真实调用复验:22→22 个节点,无重复;新增 13 项测试(`test_id_drift.py`)。coach 186 项 / 全量 336 passed |
