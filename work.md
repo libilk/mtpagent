@@ -21,10 +21,10 @@
 截至 2026-09-13:`coach/` 约 4k 行,coach 测试 168 项 / 全量 323 项。
 未做:P4 工作流(换 LangGraph)、P5 评测、P6 交付。
 
-**两个诚实的缺口:**
-1. **P1 的端到端验收欠一次真 Redis 实跑**(开发机 Docker 未启动)。目前 `<50ms` 是进程内
-   总线实测,`kill -9` 恢复是逻辑验证 —— 见 §10 台账。
-2. **LLM 抽取的 id 会与人工金标准漂移**,已实测复现,尚未解决(见 §11)。
+**唯一还没验的:**
+- **P1 的端到端验收欠一次真 Redis 实跑**(开发机 Docker 未启动)。目前 `<50ms` 是进程内
+  总线实测,`kill -9` 恢复是逻辑验证 —— 见 §10 台账。
+- LLM 抽取链路已用真实调用验证过(含 id 漂移修复的复验)。
 
 **已有的可复用资产(来自上一个项目):**
 
@@ -458,7 +458,7 @@ coach/
   - [x] `descendants(kp_id, depth)`
 - [x] P0.5 `knowledge/governance.py`:
   - [x] `observe(payload)` → 写 observations
-  - [x] `propose(observation_id)` → 规则校验(自环/重复/confidence<0.6/引用不存在的知识点)→ 写 proposals
+  - [x] `propose(observation_id)` → 规则校验(自环/重复/confidence<0.6/引用不存在的知识点/同名归并)→ 写 proposals
   - [x] `aggregate(proposal_id)` → §5.2 环检测 → 通过则写 edges,否则 status=rejected
 - [x] P0.6 `knowledge/builder.py`:LLM 从教材/大纲抽取(复用 `llm/llm_client.py`)
 - [x] P0.7 录入 **15 个知识点 + 前置关系**(数据来源见 [mainconten.md](mainconten.md) §5.1)
@@ -703,7 +703,8 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | 图可能不比向量强 | 卖点站不住 | **这本身就是结论**,写进 Limitations | 待 P5 验证 |
 | **BKT 全对时饱和到 1.0**(约 10 次) | P5 校准曲线/置信度会失真 | 照抄 §5.3 不改公式;P5 若校准差,再考虑加参数或改公式并记录 | 已发现 |
 | **没作答记录的前置会被算成缺口** | 根因列表被"从没考过的点"挤占,学生见过的真缺口排到后面 | 这是 §5.5 的既定行为(未记录 = 掌握度初始值 0.1 < 0.4);P5 评测时要么用有作答轨迹的学生,要么显式区分"未观测"与"已观测且弱" | 需注意 |
-| ★ **LLM 抽取的 id 与人工金标准可能对不上** | 治理按 id 判重,LLM 给的 `algo.merge_sort` 与金标准的 `algo.mergesort` 会被当成两个概念 → 图里出现重复节点,前置闭包被污染 | 实测已复现(2026-09-13 真实调用)。对策候选:抽取时把已有概念清单喂给 LLM 要求复用 id / 增加按 name 归一化的判重规则 / 抽取结果落 observation 后人工过一遍再 aggregate | **未解决** |
+| ~~LLM 抽取的 id 与人工金标准对不上~~ | 治理按 id 判重会让同一概念长成两个节点,污染前置闭包 | **已解决(2026-09-13)**:① 抽取时把已有概念清单喂给 LLM 要求复用 id;② 治理层按**名字**归并 —— 同名提案不新增节点,引用别名的边改指规范 id。真实调用复验:修复前 LLM 给 `algo.merge_sort` / 22→23 个节点;修复后给 `algo.mergesort` / 22→22 | ✅ 已解决 |
+| 提示词塞不下全量概念清单 | 知识点上千后 `known_concepts` 会撑爆上下文 | 当前 22 个点无问题;真要扩容时改成"按文本相似度召回相关概念再喂",而不是全量塞 | 远期 |
 | LLM 抽取已实测可用 | — | 单次真实调用(qwen-plus)抽 4 概念 / 3 关系,类型与置信度都合理,`PREREQUISITE` 判定正确 | 已验证 |
 
 ---
@@ -743,3 +744,4 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | 2026-09-13 | **修复(数据丢失)**:`profile_worker` 写「答题记录/掌握度/SM-2/易错」原本各自提交,进程半途被杀会让答题记录落了库而掌握度没更新;恢复重放看到记录已存在直接跳过 → **该次更新永久丢失**。已改为 `ProfileStore.transaction()` 包成一个事务;5 项原子性测试,把 `transaction()` 打回空操作后其中 3 项失败(已验证测试有效) |
 | 2026-09-13 | **P4/P5 前置补齐**:① 题目种子 13 道(`GOLDEN_PROBLEMS`,覆盖 13 个知识点),`--build` 一并灌入;② `tick.scheduled` 有了生产者(run_all 定时 + `--tick-once` 手动);③ run_all 装配真 LLM(没 key 或 `--no-llm` 自动降级为模板);④ 学习者建档 `--init-learner`(只碰 SQLite,不依赖 Redis)。新增 `tests/coach/test_demo.py` 端到端测试:POST /answer → 判分 → profile.updated → planner 写解释 → GET /gap 读得到。coach 168 项 / 全量 323 passed |
 | 2026-09-13 | ★ 实测发现:真实 LLM 调用(qwen-plus)抽取可用,但 **id 与人工金标准对不上**(LLM 给 `algo.merge_sort`,金标准是 `algo.mergesort`)。治理按 id 判重 → 会产生重复概念。已入 §11,**未解决** |
+| 2026-09-13 | **修复(id 漂移)**:① `builder.extract(known_concepts=...)` 把已有概念清单喂给 LLM 要求复用 id;② 治理层新增第 5 条规则「同名归并」(`normalize_name` 去空白+小写,同名提案拒绝入库并记别名,引用别名的边自动改指规范 id)。observation 保留 LLM 原始输出以便追溯。真实调用复验:22→22 个节点,无重复;新增 13 项测试(`test_id_drift.py`)。coach 181 项 / 全量 336 passed |

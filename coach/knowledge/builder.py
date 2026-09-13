@@ -117,12 +117,23 @@ def _parse_extraction(raw: Dict[str, Any], subject: Optional[str] = None) -> tup
     return concepts, edges
 
 
-def extract(llm, text: str, subject: Optional[str] = None) -> tuple:
+def extract(llm, text: str, subject: Optional[str] = None, known_concepts=None) -> tuple:
     """调 LLM 抽取,返回 (concepts, edges) 两个 payload 列表。**不写库**。
 
     优先取 tool_call 的结构化参数;模型没走工具调用时,退化到解析 content 里的 JSON。
+
+    known_concepts: 图中已有的知识点(id + name)。喂给模型要求**复用已有 id**,
+    从源头减少 id 漂移。注意这是把清单整个塞进 prompt,知识点多了会撑爆上下文——
+    到那时要换成"按文本检索相关概念"再喂。当前 22 个点没问题。
     """
     hint = f"\n\n所属学科:{subject}" if subject else ""
+    if known_concepts:
+        listing = "、".join(f"{c.id}={c.name}" for c in known_concepts)
+        hint += (
+            "\n\n图中已有这些知识点,**请优先复用它们的 id,不要另起新 id**"
+            f"(确实不在其中的才新建):\n{listing}"
+        )
+
     messages = [
         {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
         {"role": "user", "content": f"请抽取以下材料中的知识点与关系:{hint}\n\n{text}"},
@@ -468,19 +479,23 @@ def _cmd_extract(args) -> int:
     from llm.llm_client import LLM
 
     text = open(args.extract_file, encoding="utf-8").read()
-    llm = LLM(model_name=args.model)
-    concepts, edges = extract(llm, text, subject=args.subject)
-    print(f"抽取到 {len(concepts)} 个知识点、{len(edges)} 条关系")
-
-    if not args.apply:
-        print("(dry-run:未写库。加 --apply 才入库)")
-        print(json.dumps({"concepts": concepts, "edges": edges}, ensure_ascii=False, indent=2))
-        return 0
-
     store = KnowledgeStore.open(args.db)
     try:
+        llm = LLM(model_name=args.model)
+        concepts, edges = extract(
+            llm, text, subject=args.subject, known_concepts=store.list_concepts()
+        )
+        print(f"抽取到 {len(concepts)} 个知识点、{len(edges)} 条关系")
+
+        if not args.apply:
+            print("(dry-run:未写库。加 --apply 才入库)")
+            print(json.dumps({"concepts": concepts, "edges": edges}, ensure_ascii=False, indent=2))
+            return 0
+
         report = ingest(Governance(store), concepts, edges, source="llm_extract")
         print(report.summary())
+        print("提示:被拒提案里若有「同名知识点已存在:归并到 X」,"
+              "说明 LLM 起了别名,图里没有重复节点,这条边已改指规范 id。")
         for kind, key, reason in report.rejections:
             print(f"  [拒] {kind} {key}: {reason}")
     finally:

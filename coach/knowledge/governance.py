@@ -60,6 +60,18 @@ def _proposal_key(kind: str, payload: Dict[str, Any]):
     return payload.get("id")
 
 
+def normalize_name(name: Optional[str]) -> str:
+    """知识点名字归一化:去掉所有空白并转小写。
+
+    用来做**同名归并** —— LLM 抽出来的 id 经常和人工金标准不一致
+    (实测:LLM 给 `algo.merge_sort`,金标准是 `algo.mergesort`),
+    但它是同一个概念,名字一样。只按 id 判重会让图里长出一个重复节点。
+    """
+    if not name:
+        return ""
+    return "".join(str(name).split()).lower()
+
+
 def _row_to_observation(row: sqlite3.Row) -> Observation:
     return Observation(
         id=row["id"],
@@ -92,6 +104,9 @@ class Governance:
         # 没法用 SQL 直接比 —— 每次全表扫会退化成 O(n²)(建种子图时明显)。
         # 缓存在实例内构建一次,之后靠 _insert_proposal 增量维护。
         self._open_keys: Optional[Dict[str, set]] = None
+        # 同名归并:归一化名字 → 图中规范 id;以及本次运行里「别名 id → 规范 id」
+        self._name_index: Optional[Dict[str, str]] = None
+        self._aliases: Dict[str, str] = {}
 
     # ---------------- 阶段 1:观察 ----------------
 
@@ -123,35 +138,68 @@ class Governance:
     # ---------------- 阶段 2:提案(规则校验)----------------
 
     def propose(self, observation_id: str) -> Proposal:
-        """把观察变成提案。规则不通过的直接落 rejected,连同 reason。"""
+        """把观察变成提案。规则不通过的直接落 rejected,连同 reason。
+
+        提案里的 payload 是**归一化之后**的(别名 id 已被改写为规范 id),
+        原始的 LLM 输出仍留在 observation 里,便于追溯。
+        """
         obs = self.get_observation(observation_id)
         if obs is None:
             raise KeyError(f"观察不存在:{observation_id}")
 
-        reason = self._validate(obs)
+        payload = dict(obs.payload)
+        reason = self._validate(obs.kind, payload)
         proposal = Proposal(
             id=new_ulid(),
             observation_id=obs.id,
             kind=obs.kind,
-            payload=obs.payload,
+            payload=payload,
             status="rejected" if reason else "pending",
             reason=reason,
         )
         self._insert_proposal(proposal)
         return proposal
 
-    def _validate(self, obs: Observation) -> Optional[str]:
-        """返回拒绝原因;None 表示通过。"""
-        if obs.kind == "edge":
-            return self._validate_edge(obs.payload)
-        if obs.kind == "concept":
-            return self._validate_concept(obs.payload)
-        return f"未知的观察类型:{obs.kind}"
+    def _validate(self, kind: str, payload: Dict[str, Any]) -> Optional[str]:
+        """就地归一化 payload,并返回拒绝原因;None 表示通过。"""
+        if kind == "edge":
+            return self._validate_edge(payload)
+        if kind == "concept":
+            return self._validate_concept(payload)
+        return f"未知的观察类型:{kind}"
+
+    # ---------------- 同名归并 ----------------
+
+    def _load_name_index(self) -> Dict[str, str]:
+        if self._name_index is None:
+            self._name_index = {
+                normalize_name(c.name): c.id for c in self.store.list_concepts()
+            }
+        return self._name_index
+
+    def _resolve_id(self, kp_id: str, name: Optional[str] = None) -> str:
+        """把可能是别名的 kp_id 归到图中的规范 id 上。
+
+        匹配只认**名字**(不认 id):LLM 起 id 的花样太多,概念是不是同一个,
+        看名字比看 id 可靠。没有名字(比如边的端点)时只查本次运行的别名表。
+        """
+        if kp_id in self._aliases:
+            return self._aliases[kp_id]
+
+        canonical = self._load_name_index().get(normalize_name(name)) if name else None
+        if canonical and canonical != kp_id:
+            self._aliases[kp_id] = canonical
+            return canonical
+        return kp_id
 
     def _validate_edge(self, payload: Dict[str, Any]) -> Optional[str]:
         missing = [k for k in _EDGE_REQUIRED if not payload.get(k)]
         if missing:
             return f"缺少必填字段:{','.join(missing)}"
+
+        # ★ 先归并别名,再校验 —— 否则 LLM 起的别名会被判成"引用不存在的知识点"
+        payload["from_id"] = self._resolve_id(payload["from_id"])
+        payload["to_id"] = self._resolve_id(payload["to_id"])
 
         from_id, to_id, edge_type = payload["from_id"], payload["to_id"], payload["type"]
         if edge_type not in EDGE_TYPES:
@@ -178,6 +226,13 @@ class Governance:
         missing = [k for k in _CONCEPT_REQUIRED if not payload.get(k)]
         if missing:
             return f"缺少必填字段:{','.join(missing)}"
+
+        # ★ 同名归并:名字已存在就拒绝该提案(不新增节点),
+        #   同时记下别名,让后续引用这个别名的边自动改指到规范 id
+        canonical = self._resolve_id(payload["id"], payload.get("name"))
+        if canonical != payload["id"]:
+            return f"同名知识点已存在:归并到 {canonical}"
+
         if self.store.has_concept(payload["id"]):
             return "重复:该知识点已存在于图中"
         if self._has_open_proposal("concept", payload["id"]):
@@ -256,6 +311,8 @@ class Governance:
                 description=payload.get("description"),
             )
         )
+        # 新节点要立刻进名字索引,否则同一批里后面的同名提案会重复插入
+        self._load_name_index()[normalize_name(payload["name"])] = payload["id"]
         return None
 
     # ---------------- 查询辅助 ----------------
