@@ -29,15 +29,29 @@ def detect_gaps(
     kp_id: str,
     depth: int = config.MAX_PREREQ_DEPTH,
     threshold: float = config.GAP_THRESHOLD,
+    observed: Optional[set] = None,
 ) -> List[Dict]:
     """找出 X 前置闭包里的缺口,按 §5.5 排序。
 
+    ★ **两态区分(2026-09-13 修正的核心)**
+    闭包里掌握度低的点有两种,数值上可能一样,含义完全不同:
+    - `status="gap"`:有作答证据,确实弱 → 这是**真根因**
+    - `status="unobserved"`:从没被观测过,掌握度只是初始值 → 这是**没测过**,不是弱
+
+    原先只按 `(depth, mastery)` 排,导致大量从没见过的浅层点(掌握度停在 0.1)
+    把真正观测到的弱项挤到后面。P5 评测里这让作答稀疏时的 Top-1 掉到 0.4933,
+    **反低于闭包内随机排序的 0.6267**。
+
+    排序改为 `(status_rank, depth, mastery)`:已观测的缺口永远排在未观测点前面。
+    (对标 DeepTutor:它的 `new` 与 `learning` 从不共享同一条排序轴。)
+
     Args:
-        mastery: {kp_id: p_known};**必须已经包含闭包内全部节点**(缺的按 0 兜底)
+        mastery: {kp_id: p_known};**应包含闭包内全部节点**(缺的按 0 兜底)
+        observed: 有证据的 kp_id 集合。**传 None 则退化为旧行为**(全部当已观测),
+                  这是给不关心两态的调用方留的出口。
 
     Returns:
-        [{"kp_id","name","depth","mastery"}],按 (depth 升序, mastery 升序)。
-        最浅且最弱 = 最可能的根因,排在前面。
+        [{"kp_id","name","depth","mastery","status"}]
     """
     closure = prereq_closure(store, kp_id, depth)
     if not closure:
@@ -51,10 +65,21 @@ def detect_gaps(
     gaps = []
     for kp, d in closure.items():
         m = mastery.get(kp, 0.0)
-        if m < threshold:
-            gaps.append({"kp_id": kp, "name": names[kp], "depth": d, "mastery": m})
+        if m >= threshold:
+            continue
+        seen = observed is None or kp in observed
+        gaps.append(
+            {
+                "kp_id": kp,
+                "name": names[kp],
+                "depth": d,
+                "mastery": m,
+                "status": "gap" if seen else "unobserved",
+            }
+        )
 
-    gaps.sort(key=lambda g: (g["depth"], g["mastery"]))
+    # 已观测的缺口(depth 浅、掌握度低)在前;未观测的按深浅兜底排在后
+    gaps.sort(key=lambda g: (0 if g["status"] == "gap" else 1, g["depth"], g["mastery"]))
     return gaps
 
 
@@ -65,9 +90,15 @@ def root_causes(
     top_k: int = config.ROOT_CAUSE_TOP_K,
     depth: int = config.MAX_PREREQ_DEPTH,
     threshold: float = config.GAP_THRESHOLD,
+    observed: Optional[set] = None,
 ) -> List[Dict]:
-    """缺口里最像"根因"的前 top_k 个,每个带上从目标出发的依赖路径。"""
-    gaps = detect_gaps(store, mastery, kp_id, depth=depth, threshold=threshold)[:top_k]
+    """缺口里最像"根因"的前 top_k 个,每个带上从目标出发的依赖路径。
+
+    `observed` 传进来时,有证据的缺口会排在前面(见 `detect_gaps` 的说明)。
+    """
+    gaps = detect_gaps(
+        store, mastery, kp_id, depth=depth, threshold=threshold, observed=observed
+    )[:top_k]
     for gap in gaps:
         gap["path"] = shortest_prereq_path(store, kp_id, gap["kp_id"], depth)
     return gaps
@@ -144,18 +175,25 @@ def _rebuild(parent: Dict[str, Optional[str]], target: str) -> List[str]:
 def explain_gaps(
     goal_kp_id: str, goal_name: str, kp_mastery: float, gaps: List[Dict]
 ) -> str:
-    """不调 LLM 的兜底解释。有 LLM 时由 planner_worker 覆盖成人话(§5.5 第 6 步)。"""
+    """不调 LLM 的兜底解释。有 LLM 时由 pipeline 的 explain 节点覆盖成人话。
+
+    ★ 措辞区分两类:有证据的弱项说得肯定("确实薄弱"),
+    没观测过的只说"还没测过",不武断下结论。
+    """
     if not gaps:
         return f"「{goal_name}」的前置知识都已具备,问题可能出在这个知识点本身。"
 
-    parts = []
+    confirmed, untested = [], []
     for gap in gaps:
         chain = " → ".join(gap.get("path") or [])
         where = f"(路径 {chain})" if chain else ""
-        parts.append(f"「{gap['name']}」掌握度 {gap['mastery']:.2f}{where}")
+        line = f"「{gap['name']}」掌握度 {gap['mastery']:.2f}{where}"
+        (untested if gap.get("status") == "unobserved" else confirmed).append(line)
 
-    return (
-        f"你卡在「{goal_name}」(当前掌握度 {kp_mastery:.2f}),"
-        f"但根因很可能在更基础的地方:{';'.join(parts)}。"
-        "建议先把这些前置补上,再回到目标知识点。"
-    )
+    head = f"你卡在「{goal_name}」(当前掌握度 {kp_mastery:.2f})。"
+    body = []
+    if confirmed:
+        body.append(f"已确认薄弱的前置:{';'.join(confirmed)}。建议先补这些。")
+    if untested:
+        body.append(f"另外这些前置还没有作答记录,建议先测一下:{';'.join(untested)}。")
+    return head + "".join(body)

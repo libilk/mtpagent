@@ -45,9 +45,16 @@ class QueryService:
         closure = queries.prereq_closure(self.knowledge, kp_id, depth=depth)
         mastery = self.profile.get_mastery_map(learner_id, list(closure))
         goal_mastery = self.profile.get_mastery(learner_id, kp_id)
+        # ★ 把"有没有证据"一并交给查询层,否则未观测点会挤掉真正的弱项
+        observed = self.profile.observed_kp_ids(learner_id, list(closure))
 
         roots = queries.root_causes(
-            self.knowledge, mastery, kp_id, top_k=top_k, depth=depth
+            self.knowledge,
+            mastery,
+            kp_id,
+            top_k=top_k,
+            depth=depth,
+            observed=observed,
         )
 
         cached = self.profile.get_gap_explanation(learner_id, kp_id)
@@ -156,9 +163,12 @@ class QueryService:
     def _goal_items(self, learner_id: str, goal_kp_id: str, seen: set) -> List[Dict]:
         closure = queries.prereq_closure(self.knowledge, goal_kp_id)
         mastery = self.profile.get_mastery_map(learner_id, list(closure))
+        observed = self.profile.observed_kp_ids(learner_id, list(closure))
 
         items = []
-        for root in queries.root_causes(self.knowledge, mastery, goal_kp_id):
+        for root in queries.root_causes(
+            self.knowledge, mastery, goal_kp_id, observed=observed
+        ):
             concept = self.knowledge.get_concept(root["kp_id"])
             if concept is None or root["kp_id"] in seen:
                 continue

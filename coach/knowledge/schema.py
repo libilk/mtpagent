@@ -23,14 +23,17 @@ CREATE TABLE IF NOT EXISTS concepts (
     created_at  REAL
 );
 
--- 边:四类关系
+-- 边:前置关系(from 是 to 的前置)
+-- type 列保留、值域只剩 PREREQUISITE。为什么不一并删列:它是递归 CTE 的过滤键、
+-- 也是 idx_edges_to 的一部分,删列要动项目最核心且测试最密的代码,收益只是少一列。
+-- 这是有意的取舍(见 work.md §11.1 P2#8)。
 CREATE TABLE IF NOT EXISTS edges (
     from_id     TEXT NOT NULL,
     to_id       TEXT NOT NULL,
-    type        TEXT NOT NULL,         -- PREREQUISITE|RELATED|EXTENDS|CONTRASTS
+    type        TEXT NOT NULL,         -- 目前只有 PREREQUISITE
     weight      REAL DEFAULT 1.0,
     confidence  REAL DEFAULT 1.0,      -- 抽取置信度
-    source      TEXT,                  -- 来源:llm_extract|manual|outline
+    source      TEXT,                  -- 来源:llm_extract|manual|outline|golden
     PRIMARY KEY (from_id, to_id, type)
 );
 CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id, type);   -- ★ 反向遍历用

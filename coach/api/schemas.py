@@ -28,6 +28,10 @@ class RootCause(BaseModel):
     name: str
     depth: int = Field(description="距目标知识点的前置深度,越小越基础")
     mastery: float
+    status: str = Field(
+        default="gap",
+        description="gap=有作答证据、确实薄弱;unobserved=从没测过(低掌握度只是初始值)",
+    )
     path: List[str] = Field(default_factory=list, description="从目标走回根因的依赖路径")
 
 

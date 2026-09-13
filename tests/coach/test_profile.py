@@ -160,6 +160,25 @@ class TestProfileStore:
         profile.set_mastery("u1", "algo.dp", 0.9)
         assert profile.get_mastery("u2", "algo.dp") == config.BKT_P_INIT
 
+    def test_observed_kp_ids_distinguishes_no_record(self, profile):
+        """★ `get_mastery` 对没记录的点返回 0.1,和"考过且确实弱"数值一样 ——
+        `observed_kp_ids` 就是用来把这两者分开的。"""
+        profile.set_mastery("u1", "a", config.BKT_P_INIT)
+
+        observed = profile.observed_kp_ids("u1", ["a", "b"])
+
+        assert observed == {"a"}
+        assert profile.get_mastery("u1", "b") == config.BKT_P_INIT  # 数值一样
+
+    def test_observed_kp_ids_without_filter(self, profile):
+        profile.set_mastery("u1", "a", 0.1)
+        profile.set_mastery("u1", "b", 0.2)
+
+        assert profile.observed_kp_ids("u1") == {"a", "b"}
+
+    def test_observed_kp_ids_empty_input(self, profile):
+        assert profile.observed_kp_ids("u1", []) == set()
+
     def test_get_mastery_map_fills_missing_with_default(self, profile):
         profile.set_mastery("u1", "a", 0.4)
         result = profile.get_mastery_map("u1", ["a", "b"])

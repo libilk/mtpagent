@@ -160,6 +160,33 @@ class ProfileStore:
         known = {r["kp_id"]: r["p_known"] for r in rows}
         return {kp: known.get(kp, config.BKT_P_INIT) for kp in ids}
 
+    def observed_kp_ids(
+        self, learner_id: str, kp_ids: Optional[Sequence[str]] = None
+    ) -> set:
+        """**有证据的**知识点:被作答记录观测过、`learner_mastery` 里有行的那些。
+
+        这张表存在的意义是区分「没有证据」和「有证据且弱」。
+        `get_mastery` 对没记录的点返回 `BKT_P_INIT`(0.1),这个 0.1 和
+        "考过几次、确实很弱"得到的 0.1 在数值上一样,但含义完全不同 ——
+        排序时把两者混在一起,就会让"从没见过的浅层点"挤掉真正的弱项。
+        (对标:DeepTutor 的 `objective_status()` 把 `new` 与 `learning` 分成两态。)
+        """
+        if kp_ids is None:
+            rows = self.conn.execute(
+                "SELECT kp_id FROM learner_mastery WHERE learner_id = ?", (learner_id,)
+            ).fetchall()
+        else:
+            ids = list(kp_ids)
+            if not ids:
+                return set()
+            placeholders = ",".join("?" for _ in ids)
+            rows = self.conn.execute(
+                f"SELECT kp_id FROM learner_mastery "
+                f"WHERE learner_id = ? AND kp_id IN ({placeholders})",
+                (learner_id, *ids),
+            ).fetchall()
+        return {r["kp_id"] for r in rows}
+
     def set_mastery(
         self, learner_id: str, kp_id: str, p_known: float, ts: Optional[float] = None
     ) -> None:

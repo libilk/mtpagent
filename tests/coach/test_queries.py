@@ -69,6 +69,66 @@ class TestDetectGaps:
         assert gaps[0]["name"] == "中层"
 
 
+class TestObservedVersusUnobserved:
+    """★ 两态区分:P5 评测里稀疏条件下图 0.4933 反低于随机 0.6267,根因就在这里。
+
+    没被观测过的点,掌握度只是初始值,数值上可能比"考过且确实弱"的点还低。
+    旧排序只看数值,于是把真正的弱项挤到后面。
+    """
+
+    def test_observed_gap_outranks_shallower_unobserved(self, chain):
+        # mid 是 depth1、有证据、掌握度 0.3;base 是 depth2、从没测过、掌握度 0.1
+        mastery = {"mid": 0.3, "sibling": 0.9, "base": 0.1}
+        observed = {"mid", "sibling"}  # base 没观测过
+
+        gaps = queries.detect_gaps(chain, mastery, "top", observed=observed)
+
+        assert [g["kp_id"] for g in gaps] == ["mid", "base"]
+        assert gaps[0]["status"] == "gap"
+        assert gaps[1]["status"] == "unobserved"
+
+    def test_without_observed_falls_back_to_old_order(self, chain):
+        """不传 observed 就是旧行为,方便不关心两态的调用方。"""
+        mastery = {"mid": 0.3, "sibling": 0.9, "base": 0.1}
+
+        gaps = queries.detect_gaps(chain, mastery, "top")
+
+        assert [g["kp_id"] for g in gaps] == ["mid", "base"]
+        assert all(g["status"] == "gap" for g in gaps)
+
+    def test_unobserved_still_reported_not_dropped(self, chain):
+        """未观测的点不该被丢掉 —— 它是"该去测一下",不是"没问题"。"""
+        mastery = {"mid": 0.1, "sibling": 0.1, "base": 0.1}
+        observed = set()  # 什么都没测过
+
+        gaps = queries.detect_gaps(chain, mastery, "top", observed=observed)
+
+        assert {g["kp_id"] for g in gaps} == {"mid", "sibling", "base"}
+        assert all(g["status"] == "unobserved" for g in gaps)
+
+    def test_root_causes_passes_status_through(self, chain):
+        mastery = {"mid": 0.2, "sibling": 0.9, "base": 0.1}
+        roots = queries.root_causes(chain, mastery, "top", observed={"mid", "sibling"})
+
+        assert roots[0]["kp_id"] == "mid"
+        assert roots[0]["status"] == "gap"
+        assert roots[-1]["status"] == "unobserved"
+
+    def test_explain_distinguishes_confirmed_from_untested(self, chain):
+        gaps = [
+            {"kp_id": "mid", "name": "中层", "depth": 1, "mastery": 0.2,
+             "status": "gap", "path": ["top", "mid"]},
+            {"kp_id": "base", "name": "基础", "depth": 2, "mastery": 0.1,
+             "status": "unobserved", "path": ["top", "mid", "base"]},
+        ]
+
+        text = queries.explain_gaps("top", "目标", 0.3, gaps)
+
+        assert "已确认薄弱" in text
+        assert "还没有作答记录" in text
+        assert "中层" in text and "基础" in text
+
+
 class TestRootCauses:
     def test_includes_dependency_path(self, chain):
         mastery = {"mid": 0.9, "sibling": 0.9, "base": 0.1}

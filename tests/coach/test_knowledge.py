@@ -71,12 +71,20 @@ class TestCycleDetection:
         assert "自环" in proposal.reason
         assert store.list_edges() == []
 
-    def test_contrasts_may_form_pair(self, store, gov):
-        """CONTRASTS 天然可以成对,不该被当环拒绝。"""
+    def test_only_prerequisite_is_accepted(self, store, gov):
+        """2026-09-13 起只做 PREREQUISITE —— 其余三类被主动砍掉,不是遗漏。
+
+        原本 RELATED/EXTENDS/CONTRASTS 存进图后没有任何代码读取,是装饰。
+        """
         add_concept(gov, "A")
         add_concept(gov, "B")
-        assert add_edge(gov, "A", "B", "CONTRASTS").status == "accepted"
-        assert add_edge(gov, "B", "A", "CONTRASTS").status == "accepted"
+
+        for dropped in ("RELATED", "EXTENDS", "CONTRASTS"):
+            proposal = add_edge(gov, "A", "B", dropped)
+            assert proposal.status == "rejected", dropped
+            assert "未知关系类型" in proposal.reason
+
+        assert store.list_edges() == []
 
     def test_has_cycle_pure(self):
         assert has_cycle([("A", "B"), ("B", "C"), ("C", "A")]) is True
@@ -210,14 +218,6 @@ class TestPrereqClosure:
         assert store.ancestors("S", 2) == {"R": 1, "Q": 2}
         assert store.ancestors("S", 5) == {"R": 1, "Q": 2, "P": 3}
 
-    def test_related_edges_do_not_leak_into_prereq_traversal(self, gov, store):
-        add_concept(gov, "M")
-        add_concept(gov, "N")
-        add_edge(gov, "M", "N", "RELATED")
-
-        assert store.ancestors("N", 3) == {}
-        assert store.ancestors("N", 3, edge_type="RELATED") == {"M": 1}
-
 
 # ---------------------------------------------------------------- 种子图
 
@@ -238,14 +238,10 @@ class TestGoldenSeedGraph:
         store, _ = seeded
         assert has_cycle(store.prerequisite_pairs()) is False
 
-    def test_seeded_graph_covers_all_relation_types(self, seeded):
+    def test_seeded_graph_only_has_prerequisite_edges(self, seeded):
+        """2026-09-13 起图里只有 PREREQUISITE —— 另外三类被主动砍掉。"""
         store, _ = seeded
-        assert {e.type for e in store.list_edges()} == {
-            "PREREQUISITE",
-            "RELATED",
-            "EXTENDS",
-            "CONTRASTS",
-        }
+        assert {e.type for e in store.list_edges()} == {"PREREQUISITE"}
 
     def test_ancestors_of_dp(self, seeded):
         """P2 验收场景的前置:动态规划的前置闭包必须包含函数调用与递归。"""

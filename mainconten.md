@@ -24,7 +24,7 @@
 ```
 backend/kg/
 ├── models.py                 # 图数据模型
-├── relation_semantics.py     # ★ 关系语义
+├── relation_semantics.py     # ★ 关系探针(见下方更正:不是"语义表")
 ├── embedder.py / vector_store.py / text_for_embedding.py
 ├── repositories/
 │   ├── concept_repo.py       # 概念节点
@@ -40,7 +40,19 @@ backend/kg/
 
 **三个必须记住的设计点:**
 
-1. **四类知识关系**(不只是"前置"):`prerequisite` / `related` / `extends` / `contrasts`
+1. **知识关系不止"前置"**:它的 `models.VALID_RELATION_TYPES` 有 **8 类**
+   (`prerequisite` / `part_of` / `related` / `contrasts` / `application_of` /
+   `special_case_of` / `generalizes` / `equivalent_to`,**没有 `extends`**)。
+
+   > **⚠️ 2026-09-13 更正(读源码后):** 本节原文写的是"四类关系:
+   > prerequisite/related/extends/contrasts",这是**错记** —— 数量错(8 不是 4)、
+   > 内容错(没有 extends),而且**机制也错**:`relation_semantics.py` 不是
+   > 关系语义表(方向性/传递性),而是一组 **embedding 探针**:每类关系配 4~6 条
+   > 学生口吻的 probe 文本,query embedding 给各类型打分,低于 `floor=0.30`
+   > 的类型**不遍历**,类型分作为乘子进邻居排序。
+   > 且它**没有 per-type 分支** —— 八类统一加权。`CONTENT_PROBES` 那张表
+   > 在仓库里未被任何代码调用。
+   > **决定:我们只留 `PREREQUISITE`,把前置关系做深**(见 §4.4)。
 2. **间隔重复用 SM-2**,不是 FSRS(更简单,经典,够用)
 3. **★ 知识写入有治理流程**:LLM 抽取的知识**不直接写图**,而是
    `observation(观察到) → proposal(提案) → aggregator(聚合审核后入库)`。
@@ -175,7 +187,7 @@ capabilities/mastery/
 |---|---|---|
 | **① 知识写入要治理** | LLM 抽完直接写图 | `observation → proposal → aggregator` 三阶段,LLM 的输出是**提案**不是事实 |
 | **② 队列 = Redis 协调 + journal + recovery** | Redis Stream,重试 + 死信 | 加上 **journal(append-only 日志)** 和 **recovery(重启恢复)**,这才是"不丢消息" |
-| **③ 关系不止"前置"** | 只有 `prerequisite` | 四类:`prerequisite` / `related` / `extends` / `contrasts` |
+| ~~**③ 关系不止"前置"**~~ | 只有 `prerequisite` | ~~四类关系~~ **已推翻**:WeSmartFlow 实际是 8 类 + embedding 探针路由,且无 per-type 分支。我们改为**只做 `PREREQUISITE` 并做深**(见 §4.4 与 work.md §11.3) |
 
 ---
 
@@ -237,7 +249,7 @@ capabilities/mastery/
 | ✅ 做 | ❌ 不做 |
 |---|---|
 | 30~50 个知识点的小图(数据结构+算法) | 上千知识点的全量图 |
-| 四类关系:prerequisite / related / extends / contrasts | 只做 prerequisite |
+| 只做 `PREREQUISITE`,并把它做深(多跳闭包 + 根因定位) | 存四种关系但三种不参与推理 |
 | BKT 掌握度 + SM-2 间隔重复 | FSRS / 复杂参数拟合 |
 | **根因定位**(多跳图推理) | 泛泛的"推荐相关题" |
 | Redis 协调 + journal + recovery | Kafka / RabbitMQ |
@@ -304,10 +316,19 @@ capabilities/mastery/
       Topic   {id, name}
 
 边:   PREREQUISITE  (前置,★ 多跳推理用)
-      RELATED       (相关)
-      EXTENDS       (延伸)
-      CONTRASTS     (对比)          ← 四类关系,借鉴 WeSmartFlow
-      ASSESSED_BY   (知识点 ←→ 题目)
+
+> **⚠️ 2026-09-13 更正与决定:** 本节原写四类关系(prerequisite/related/extends/contrasts),
+> 标"借鉴 WeSmartFlow"。读源码后确认这是**错记**(它是 8 类、无 extends、且是 embedding
+> 探针路由而非语义表,详见 §1.1 更正框)。
+>
+> **决定:只保留 `PREREQUISITE`,把它做深。** 理由:
+> - 另外三类在实现里**存进图却没有任何代码读取** —— 是装饰,不是设计;
+> - 连 WeSmartFlow 自己也没有 per-type 分支逻辑(八类统一加权);
+> - 与其维持"四类关系"的说法被面试官问倒,不如说"我刻意只做前置,因为根因定位
+>   只需要前置闭包;多类型关系我是评估后主动砍掉的"。
+>
+> 这是**有意的裁剪,不是遗漏**。(`edges.type` 列保留,值域只剩 PREREQUISITE ——
+> 见 work.md §11.1 P2#8 的说明。)
 ```
 
 **★ 写入治理流程(借鉴 WeSmartFlow 的 observation/proposal/aggregator):**
@@ -448,10 +469,11 @@ WHERE kp_id != $x GROUP BY kp_id;
 栈        ──PREREQUISITE──►  DFS
 DFS + 队列 ─PREREQUISITE──►  拓扑排序
 贪心      ──PREREQUISITE──►  Dijkstra
-排序      ──RELATED──────►   二分查找
-快排      ──CONTRASTS────►   归并排序
-动态规划  ──CONTRASTS────►   贪心
 ```
+
+> 原样例里还有 3 条 `RELATED` / `CONTRASTS`(排序↔二分查找、快排↔归并、DP↔贪心)。
+> 2026-09-13 决定只做 `PREREQUISITE` 后,这些边已从种子里移除 ——
+> 它们原本只被存进图、没有任何代码读取。
 
 **数据来源:**
 - 知识点清单:公开课程大纲(数据结构/算法课程目录)、LeetCode tag 体系
@@ -588,7 +610,7 @@ GET /graph/{kp_id}?depth=3             # 图谱可视化数据
 | 2 | 判分方式 | 纯规则(比对 test_cases) | ✅ 已确认 |
 | 3 | 代码位置 | 现有 repo 加 `coach/` | ✅ 已确认 |
 | 4 | 图存储 | SQLite 表 + 递归 CTE(不上 Kuzu) | ✅ 已确认 |
-| 5 | 关系类型 | 四类(prerequisite/related/extends/contrasts) | ✅ 已确认 |
+| 5 | 关系类型 | ~~四类~~ → **只做 `PREREQUISITE`**(2026-09-13 更正后决定) | ✅ 已确认 |
 | 6 | 间隔重复 | SM-2(不用 FSRS) | ✅ 已确认 |
 | 7 | 写入治理 | 做 observation→proposal→aggregator 简化版 | ✅ 已确认 |
 | 8 | 队列 | Redis Stream + journal + recovery(不上 Kafka) | ✅ 已确认 |
@@ -603,7 +625,7 @@ GET /graph/{kp_id}?depth=3             # 图谱可视化数据
 |---|---|---|---|
 | 定位 | 学习教练(泛) | 单点做深 + 量化评测 | 同类项目已有两个,不能重复 |
 | 图存储 | Kuzu → 后来改 SQLite | **确定 SQLite + CTE** | WeSmartFlow 用 sqlite-vec 印证 |
-| 关系 | 只有 prerequisite | **四类关系** | 借鉴 WeSmartFlow |
+| 关系 | 只有 prerequisite | ~~四类关系~~ → **回到只做 prerequisite,但做深**(多跳闭包 + 根因定位) | 读源码后确认"四类"是错记;且另外三类在实现里无人读取 |
 | 抽取 | LLM 直接写图 | **三步治理流程** | 借鉴 WeSmartFlow 的 observation/proposal |
 | 队列 | Redis Stream + 重试 + 死信 | **+ journal + recovery** | 借鉴 DeepTutor 的 coordination/journal/recovery |
 | 间隔重复 | FSRS | **SM-2** | WeSmartFlow 用 SM-2,更简单够用 |

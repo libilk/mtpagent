@@ -28,11 +28,8 @@ EXTRACT_SYSTEM_PROMPT = """你是计算机课程的知识工程师。从给定�
 
 规则:
 1. id 用 "域名.短名" 的小写英文形式,如 algo.dp、ds.array;同一概念复用同一 id。
-2. 关系四选一:
-   - PREREQUISITE:学 to 之前必须先掌握 from(★ 最重要,只标真正必要的前置)
-   - RELATED:相关但无先后
-   - EXTENDS:to 是 from 的深化/推广
-   - CONTRASTS:to 与 from 常被对比(如快排 vs 归并)
+2. 只抽一种关系:**PREREQUISITE** —— 学 to 之前必须先掌握 from。
+   只标**真正必要**的前置。仅仅是"相关""可以对比""是它的推广"都不算,不要抽。
 3. confidence 是你的确信度 0~1;拿不准就写低一点,下游会过滤。
 4. 只抽文本中确有依据的关系,不要凭常识补充文本没提到的内容。
 5. 每条关系给出 evidence:原文中的短语或句子片段。
@@ -301,14 +298,12 @@ GOLDEN_EDGES: List[Dict[str, Any]] = [
     ("algo.dfs", "algo.topological_sort", "PREREQUISITE", "DFS + 队列 ─PREREQUISITE──► 拓扑排序"),
     ("ds.queue", "algo.topological_sort", "PREREQUISITE", "DFS + 队列 ─PREREQUISITE──► 拓扑排序"),
     ("algo.greedy", "algo.dijkstra", "PREREQUISITE", "贪心 ──PREREQUISITE──► Dijkstra"),
-    ("algo.sorting", "algo.binary_search", "RELATED", "排序 ──RELATED──────► 二分查找"),
-    ("ds.array", "ds.linked_list", "CONTRASTS", "连续存储 vs 链式存储"),
-    ("ds.hash_table", "ds.array", "RELATED", "都依赖下标寻址"),
-    ("algo.quicksort", "algo.mergesort", "CONTRASTS", "快排 ──CONTRASTS────► 归并排序"),
-    ("algo.dp", "algo.greedy", "CONTRASTS", "动态规划 ──CONTRASTS────► 贪心"),
-    ("algo.bfs", "algo.dfs", "CONTRASTS", "逐层扩散 vs 一路到底"),
-    ("algo.memoization", "algo.dp", "EXTENDS", "DP 是记忆化的迭代化推广"),
 ]
+
+# 2026-09-13:原样例里还有 7 条 RELATED / EXTENDS / CONTRASTS,已移除。
+# 它们只被存进图、没有任何代码读取(详见 work.md §11.3 的对标调研)。
+# 副作用:`ds.linked_list` 与 `ds.hash_table` 现在没有前置边(它们本来也只有那几条非前置边),
+# 这是诚实的 —— 我们没有它们的前置依据,不臆造。
 
 
 def _golden_payloads(limit: Optional[int] = None):

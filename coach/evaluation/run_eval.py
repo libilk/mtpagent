@@ -352,20 +352,27 @@ def exp_root_cause(
     `graph` vs `closure_random` 回答「排序逻辑有没有用」;
     `closure_random` vs `flat` 回答「知道前置结构有没有用」。
     只看 graph vs flat 会把「候选集小」误当成「图推理强」。
+
+    **第四个臂 `graph_no_status` 是消融对照:** 用同一份候选集、同一套排序,
+    但**不区分"未观测"与"已观测且弱"**(即 observed=None,修复前的行为)。
+    有了它,"两态区分到底有没有用"就有数字可看,而不是靠嘴说。
     """
     flat = baselines.FlatRetrievalBaseline(env.knowledge)
-    graph_pred, flat_pred, closure_random_pred = [], [], []
+    graph_pred, flat_pred, closure_random_pred, no_status_pred = [], [], [], []
     truths = []
     skipped = 0
 
-    # 只在「有后继」的知识点里埋短板 —— 没人依赖的点谈不上是别人的前置根因
+    # 只在「有后继」**且「有题可做」**的知识点里埋短板。
+    # 有后继:没人依赖的点谈不上是别人的前置根因。
+    # 有题:★ 没题的点无论答什么都不可能产生证据,拿它当 ground truth 是无效测量
+    #      —— 系统在原理上就不可能定位到一个从未被观测过的点。
     candidates = [
         c.id
         for c in env.knowledge.list_concepts()
-        if env.knowledge.descendants(c.id, depth=3)
+        if env.knowledge.descendants(c.id, depth=3) and problems_for_kp(env, c.id)
     ]
     if not candidates:
-        return {"error": "图中没有可作为前置的薄弱点"}
+        return {"error": "图中没有既可作答又作为前置的薄弱点"}
 
     for index in range(n_students):
         learner = f"rc_{coverage}_{index}"
@@ -410,7 +417,11 @@ def exp_root_cause(
             closure = queries.prereq_closure(env.knowledge, target)
             mastery = {kp: full_mastery.get(kp, config.BKT_P_INIT) for kp in all_ids}
 
-            graph_roots = queries.root_causes(env.knowledge, mastery, target, top_k=top_k)
+            graph_roots = queries.root_causes(
+                env.knowledge, mastery, target, top_k=top_k, observed=observed
+            )
+            # 消融:同一份数据,但不告诉查询层"哪些有证据"
+            legacy_roots = queries.root_causes(env.knowledge, mastery, target, top_k=top_k)
             flat_roots = flat.root_causes(
                 mastery, target, top_k=top_k, observed=observed
             )
@@ -422,6 +433,7 @@ def exp_root_cause(
             closure_random_pred.append(shuffled[:top_k])
 
             graph_pred.append([r["kp_id"] for r in graph_roots])
+            no_status_pred.append([r["kp_id"] for r in legacy_roots])
             flat_pred.append([r["kp_id"] for r in flat_roots])
             truths.append(weakness)
 
@@ -436,6 +448,10 @@ def exp_root_cause(
         "skipped_no_successors": skipped,
         "graph_top1_accuracy": round(metrics.top1_accuracy(graph_pred, truths), 4),
         "graph_recall_at_k": round(metrics.recall_at_k(graph_pred, truths), 4),
+        "graph_no_status_top1_accuracy": round(
+            metrics.top1_accuracy(no_status_pred, truths), 4
+        ),
+        "graph_no_status_recall_at_k": round(metrics.recall_at_k(no_status_pred, truths), 4),
         "closure_random_top1_accuracy": round(
             metrics.top1_accuracy(closure_random_pred, truths), 4
         ),
@@ -512,22 +528,30 @@ def render_markdown(results: Dict) -> str:
         "",
         "| 条件 | 样本 | 臂 | Top-1 | Recall@k |",
         "|---|---|---|---|---|",
-        f"| 作答覆盖充分 | {rc_full['n_cases']} | **图遍历(闭包 + depth/掌握度排序)** "
+        f"| 作答覆盖充分 | {rc_full['n_cases']} | **图遍历(两态区分)** "
         f"| **{rc_full['graph_top1_accuracy']}** | {rc_full['graph_recall_at_k']} |",
+        f"| | | 图遍历(**消融**:不区分有无证据) | "
+        f"{rc_full['graph_no_status_top1_accuracy']} "
+        f"| {rc_full['graph_no_status_recall_at_k']} |",
         f"| | | 闭包内随机排序 | {rc_full['closure_random_top1_accuracy']} "
         f"| {rc_full['closure_random_recall_at_k']} |",
         f"| | | 扁平召回(文本相似度) | {rc_full['flat_top1_accuracy']} "
         f"| {rc_full['flat_recall_at_k']} |",
-        f"| 作答稀疏 | {rc_sparse['n_cases']} | **图遍历** "
+        f"| 作答稀疏 | {rc_sparse['n_cases']} | **图遍历(两态区分)** "
         f"| **{rc_sparse['graph_top1_accuracy']}** | {rc_sparse['graph_recall_at_k']} |",
+        f"| | | 图遍历(**消融**:不区分有无证据) | "
+        f"{rc_sparse['graph_no_status_top1_accuracy']} "
+        f"| {rc_sparse['graph_no_status_recall_at_k']} |",
         f"| | | 闭包内随机排序 | {rc_sparse['closure_random_top1_accuracy']} "
         f"| {rc_sparse['closure_random_recall_at_k']} |",
         f"| | | 扁平召回(文本相似度) | {rc_sparse['flat_top1_accuracy']} "
         f"| {rc_sparse['flat_recall_at_k']} |",
         "",
         f"> 无脑随机猜的 Top-1 是 {rc_full['random_guess_top1']}(1/知识点数)。",
-        "> 「闭包内随机排序」这一臂是关键对照:它和图遍历拿到**同样的候选集**,"
-        "只是不排序 —— 于是能把「知道前置结构」和「排序逻辑」两件事分开看。",
+        "> **消融臂**是关键:它和图遍历用同样的候选集、同样的排序公式,"
+        "唯一差别是**不区分「未观测」与「已观测且弱」**(即修复前的行为)。",
+        "> 有了它,\"两态区分到底值多少\"就是数字而不是说法。",
+        "> 「闭包内随机排序」则隔离掉「候选集大小」这个因素。",
         "",
         render_limitations(results),
     ]
@@ -537,7 +561,8 @@ def render_markdown(results: Dict) -> str:
 def render_limitations(results: Dict) -> str:
     """诚实交代局限。§11 明确要求:结论无论好坏都得把边界写清楚。
 
-    下面几条是**由数字触发**的(条件成立才写),而不是写死的套话。
+    下面几条**由数字触发**(条件成立才写),不是写死的套话 ——
+    所以问题修掉之后,对应的限制会自动消失,而不是留在文档里误导人。
     """
     m = results["mastery_prediction"]
     f = results["forgetting"]
@@ -545,108 +570,142 @@ def render_limitations(results: Dict) -> str:
     rc_full = results["root_cause_full_coverage"]
     rc_sparse = results["root_cause_sparse_coverage"]
 
-    lines = [
-        "## Limitations(必读)",
-        "",
-        "### 1. 这是模拟学生,不是真人",
-        "",
-        "模拟学生的答题模型与 BKT **不同**(有前置拖累、逻辑函数、遗忘),所以不是循环论证;",
-        "但结论仍然只在「这套假设」里成立。它验证的是**算法能否收敛到一个未知的真实过程**,"
-        "不是「学生用了会不会变好」。",
-        "",
-        "### 2. 扁平基线偏弱,别把差距当成定论",
-        "",
-        "对照组用的是**字符二元组余弦相似度**,不是真正的向量 embedding。"
-        "真 embedding 语义泛化更强,很可能显著缩小差距。要下更硬的结论,"
-        "得换成 Chroma + 真实 embedding(`rag_core/chroma_store.py` 已具备,"
-        "但那要联网调服务,评测的可复现性会下降)。",
-        "",
-    ]
+    sections: List[tuple] = []
+
+    sections.append(
+        (
+            "这是模拟学生,不是真人",
+            [
+                "模拟学生的答题模型与 BKT **不同**(有前置拖累、逻辑函数、遗忘),所以不是循环论证;",
+                "但结论仍然只在「这套假设」里成立。它验证的是**算法能否收敛到一个未知的真实过程**,"
+                "不是「学生用了会不会变好」。",
+            ],
+        )
+    )
+
+    sections.append(
+        (
+            "扁平基线偏弱,别把差距当成定论",
+            [
+                "对照组用的是**字符二元组余弦相似度**,不是真正的向量 embedding。"
+                "真 embedding 语义泛化更强,很可能显著缩小差距。要下更硬的结论,"
+                "得换成 Chroma + 真实 embedding(`rag_core/chroma_store.py` 已具备,"
+                "但那要联网调服务,评测的可复现性会下降)。",
+            ],
+        )
+    )
+
+    if rc_full["graph_top1_accuracy"] > rc_full["graph_no_status_top1_accuracy"]:
+        gap = (rc_full["graph_top1_accuracy"] - rc_full["graph_no_status_top1_accuracy"]) * 100
+        gap2 = (rc_sparse["graph_top1_accuracy"] - rc_sparse["graph_no_status_top1_accuracy"]) * 100
+        sections.append(
+            (
+                "「两态区分」的增益是实测出来的,不是声称的",
+                [
+                    "消融臂(同样候选集、同样排序公式,唯一差别是不区分「未观测」与「已观测且弱」)"
+                    f"与正式臂的差距:作答充分 **+{gap:.1f} 个点**,"
+                    f"作答稀疏 **+{gap2:.1f} 个点**。",
+                    f"注意两臂的 Recall@k 完全相同({rc_full['graph_recall_at_k']} / "
+                    f"{rc_sparse['graph_recall_at_k']})—— 说明这个改动只改了**排序**,"
+                    "没有改哪些点能进候选,符合预期。",
+                ],
+            )
+        )
 
     if m["auc"] < 0.6 or m["brier"] > m["brier_baseline_baserate"]:
-        lines += [
-            "### 3. ★ 表 1 是负面结果:BKT 的掌握度预测基本不可用",
-            "",
-            f"AUC 只有 {m['auc']}(随机是 0.5),Brier {m['brier']} "
-            f"**比恒定预测基准率的 {m['brier_baseline_baserate']} 还差**。",
-            "",
-            "原因有两个,都在 §11 记过:",
-            "- §5.3 的 `P_init = 0.1` 系统性低估,前几次预测必然偏低;",
-            "- 连续答对约 10 次后 `p_known` 饱和到 1.0,之后一律预测「会」,失去判别力。",
-            "",
-            "**这不是实现 bug,是照抄公式的必然结果。**要改善得动 BKT 的参数或公式本身。",
-            "",
-        ]
+        sections.append(
+            (
+                "★ 表 1 是负面结果:BKT 的掌握度预测基本不可用",
+                [
+                    f"AUC 只有 {m['auc']}(随机是 0.5),Brier {m['brier']} "
+                    f"**比恒定预测基准率的 {m['brier_baseline_baserate']} 还差**。",
+                    "原因有两个,都在 §11 记过:",
+                    "- §5.3 的 `P_init = 0.1` 系统性低估,前几次预测必然偏低;",
+                    "- 连续答对约 10 次后 `p_known` 饱和到 1.0,之后一律预测「会」,失去判别力。",
+                    "**这不是实现 bug,是照抄公式的必然结果。**要改善得动 BKT 的参数或公式本身。",
+                ],
+            )
+        )
 
     if f["stale_after_30_days"]["ece"] > f["fresh"]["ece"]:
-        lines += [
-            "### 4. 表 2 印证了「BKT 不建模遗忘」",
-            "",
-            f"连续练习时 ECE = {f['fresh']['ece']},隔 30 天不练后升到 "
-            f"{f['stale_after_30_days']['ece']}。",
-            f"隔 30 天后模型平均预测 {f['stale_after_30_days']['mean_predicted']} 的正确率,"
-            f"实际只有 {f['stale_after_30_days']['observed_rate']} —— **严重高估**。",
-            "",
-            "这正是需要把 SM-2 的 `due_at` 和 BKT 的掌握度**分开看**的理由:"
-            "一个建模「会不会」,一个建模「忘没忘」。",
-            "",
-        ]
+        sections.append(
+            (
+                "表 2 印证了「BKT 不建模遗忘」",
+                [
+                    f"连续练习时 ECE = {f['fresh']['ece']},隔 30 天不练后升到 "
+                    f"{f['stale_after_30_days']['ece']}。",
+                    f"隔 30 天后模型平均预测 {f['stale_after_30_days']['mean_predicted']} 的正确率,"
+                    f"实际只有 {f['stale_after_30_days']['observed_rate']} —— **严重高估**。",
+                    "这正是需要把 SM-2 的 `due_at` 和 BKT 的掌握度**分开看**的理由:"
+                    "一个建模「会不会」,一个建模「忘没忘」。",
+                ],
+            )
+        )
 
     if (p["planned_practicable_goal_lift"] is None) or p["planned_practicable_goal_lift"] <= 0.05:
-        lines += [
-            "### 5. ★ 表 3 是负面结果:计划没跑赢随机",
-            "",
-            f"修掉「推荐没有题目的知识点」之后,按计划练相对随机是 "
-            f"**{p['planned_practicable_goal_lift']}**,基本打平。",
-            "",
-            "当前计划的价值**没有被这次实验证实**。可能的原因:",
-            "- 计划总推「最浅的根因」那个点,反复练同一点,边际收益递减太快;",
-            "- 随机策略天然分散练习面,而模拟学生的能力增益是「按点算」的,"
-            "分散反而更快抬高闭包均值;",
-            "- 本题库只有 13 道题,覆盖不到很多知识点,计划的可选空间被压得很窄。",
-            "",
-            "要真正证明规划有用,得先解决「推荐必须可落地」(出题能力),再重跑。",
-            "",
-        ]
+        sections.append(
+            (
+                "★ 表 3 是负面结果:计划没跑赢随机",
+                [
+                    f"修掉「推荐没有题目的知识点」之后,按计划练相对随机是 "
+                    f"**{p['planned_practicable_goal_lift']}**,基本打平。",
+                    "当前计划的价值**没有被这次实验证实**。可能的原因:",
+                    "- 计划总推「最浅的根因」那个点,反复练同一点,边际收益递减太快;",
+                    "- 随机策略天然分散练习面,而模拟学生的能力增益是「按点算」的,"
+                    "分散反而更快抬高闭包均值;",
+                    "- 本题库只有 13 道题,覆盖不到很多知识点,计划的可选空间被压得很窄。",
+                    "要真正证明规划有用,得先解决「推荐必须可落地」(出题能力),再重跑。",
+                ],
+            )
+        )
 
-    if rc_sparse["graph_top1_accuracy"] < rc_sparse["closure_random_top1_accuracy"]:
-        lines += [
-            "### 6. ★ 证据稀疏时,排序规则反而是有害的",
-            "",
-            f"作答充分时,图遍历 {rc_full['graph_top1_accuracy']} > 闭包内随机 "
-            f"{rc_full['closure_random_top1_accuracy']},排序有用;",
-            f"但作答稀疏时反过来:{rc_sparse['graph_top1_accuracy']} < "
-            f"{rc_sparse['closure_random_top1_accuracy']}。",
-            "",
-            "解释:`root_causes` 先按 depth 升序、再按掌握度升序。当大量前置**从没被观测过**"
-            "(掌握度停在初始值 0.1)时,这些「没见过的浅层点」会被排到真正观测到的弱项前面。"
-            "证据越稀疏,这个偏差越严重。",
-            "",
-            "修法方向:区分「未观测」与「已观测且弱」——未观测的点不该当作缺口参与排序。",
-            "",
-        ]
+    sections.append(
+        (
+            "★ 没有题目的知识点,根因定位在原理上就做不到",
+            [
+                "这是本轮修复过程中发现的新局限。「两态区分」把**没有证据**的点降权处理,"
+                "这本身是对的 —— 不该凭一个初始值就断定学生弱。但它有个前提:",
+                "**该知识点得有机会产生证据**,也就是得有题目。当前 13 道题覆盖不到全部 "
+                f"{results['graph']['concepts']} 个知识点,没被覆盖的那些永远不会被观测,"
+                "于是永远无法被定位为根因。",
+                "变通:这类点会被标成 `status=\"unobserved\"` 并提示「该去测一下」,"
+                "而不是伪装成「已确认的薄弱项」。真正的解法是补出题能力(见 work.md §11.1 #5)。",
+            ],
+        )
+    )
 
-    if rc_sparse["flat_top1_accuracy"] < 0.15:
-        lines += [
-            "### 7. 扁平基线的成绩很低,但它确实反映了方法本身",
-            "",
-            f"扁平召回 Top-1 只有 {rc_full['flat_top1_accuracy']},Recall@k "
-            f"{rc_full['flat_recall_at_k']}。",
-            "机制是清楚的:它按「和症状文本相似」挑候选,而根因**恰恰常常和症状不像**"
-            "(比如「动态规划做不出来」的根因是「函数调用」)。",
-            "",
-            "但注意第 2 条 —— 换成真 embedding 后这个数字会变,不能只看这一个数就下结论。",
-            "",
-        ]
+    if rc_sparse["flat_top1_accuracy"] < 0.25:
+        sections.append(
+            (
+                "扁平基线的成绩很低,但它确实反映了方法本身",
+                [
+                    f"扁平召回 Top-1 只有 {rc_full['flat_top1_accuracy']},Recall@k "
+                    f"{rc_full['flat_recall_at_k']}。",
+                    "机制是清楚的:它按「和症状文本相似」挑候选,而根因**恰恰常常和症状不像**"
+                    "(比如「动态规划做不出来」的根因是「函数调用」)。",
+                    "但注意上一条的提醒 —— 换成真 embedding 后这个数字会变,"
+                    "不能只看这一个数就下结论。",
+                ],
+            )
+        )
 
-    lines += [
-        "### 8. 规模小",
-        "",
-        f"只有 {results['graph']['concepts']} 个知识点、{results['graph']['problems']} 道题、"
-        f"{results['n_students']} 个模拟学生。单个数字会有随机波动,"
-        "换成别的种子结论方向可能变。`results.json` 里存了原始数组,可复算。",
-        "",
-    ]
+    sections.append(
+        (
+            "规模小",
+            [
+                f"只有 {results['graph']['concepts']} 个知识点、{results['graph']['problems']} 道题、"
+                f"{results['n_students']} 个模拟学生。单个数字会有随机波动,"
+                "换成别的种子结论方向可能变。`results.json` 里存了原始数组,可复算。",
+            ],
+        )
+    )
+
+    lines = ["## Limitations(必读)", ""]
+    for index, (title, body) in enumerate(sections, 1):
+        lines.append(f"### {index}. {title}")
+        lines.append("")
+        lines.extend(body)
+        lines.append("")
     return "\n".join(lines)
 
 

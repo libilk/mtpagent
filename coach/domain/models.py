@@ -10,8 +10,16 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-# 四类知识关系(work.md §4.1)
-EDGE_TYPES = ("PREREQUISITE", "RELATED", "EXTENDS", "CONTRASTS")
+# 边的类型。**只有一种**(2026-09-13 决定,见 work.md §11.3 / §12):
+#
+# 原设计照搬了"四类关系"(prerequisite/related/extends/contrasts),但读 WeSmartFlow
+# 源码后发现那是错记 —— 它实际是 8 类 + embedding 探针路由,且没有 per-type 分支。
+# 更要紧的是:另外三类在我们这里**存进图却没有任何代码读取**,是装饰不是设计。
+#
+# 所以收窄成只做 PREREQUISITE,把前置关系做深(多跳闭包 + 根因定位)。
+# 这是**有意的裁剪,不是遗漏** —— 面试被问"为什么不做多类型"时,答
+# "我只做根因定位需要的前置,多类型我评估过、主动砍掉了"。
+EDGE_TYPES = ("PREREQUISITE",)
 
 OBSERVATION_KINDS = ("edge", "concept")
 PROPOSAL_STATUSES = ("pending", "accepted", "rejected")
