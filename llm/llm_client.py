@@ -2,9 +2,30 @@ import os
 import json
 import logging
 from http.client import responses
+from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ToolCall:
+    """一次工具调用请求"""
+    id: str
+    name: str
+    arguments: Dict[str, Any]
+
+
+@dataclass
+class LLMResponse:
+    """结构化 LLM 响应：不再把 tool_calls 压成字符串"""
+    content: str = ""
+    tool_calls: List[ToolCall] = field(default_factory=list)
+    usage: Dict[str, int] = field(default_factory=dict)
+
+    @property
+    def has_tool_calls(self) -> bool:
+        return bool(self.tool_calls)
 
 try:
     from openai import OpenAI
@@ -110,6 +131,61 @@ class LLM:
         if self.enable_cache and self.llm_cache and not tools:
             self.llm_cache.cache_response(messages, response, self.model_name)
         return response
+
+    def chat_structured(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict]] = None,
+        **kwargs
+    ) -> LLMResponse:
+        """
+        结构化对话：返回 content / tool_calls / usage。
+
+        与 chat() 的区别：tool_calls 以结构化对象返回，而非 json 字符串；
+        同时透出 token usage。Agent 的 ReAct 循环应该用这个方法，
+        才能把 assistant/tool 消息按标准协议回传给模型。
+
+        不做缓存——ReAct 循环是有状态的，缓存会破坏语义。
+        """
+        if not has_OpenAi:
+            raise RuntimeError("chat_structured 需要安装 openai 库")
+
+        params = {
+            "model": self.model_name,
+            "messages": messages,
+            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+            "temperature": kwargs.get("temperature", self.temperature),
+        }
+        if tools:
+            params["tools"] = tools
+            params["tool_choice"] = "auto"
+
+        response = self.client.chat.completions.create(**params)
+        message = response.choices[0].message
+
+        usage = {}
+        raw_usage = getattr(response, "usage", None)
+        if raw_usage is not None:
+            usage = {
+                "prompt_tokens": getattr(raw_usage, "prompt_tokens", 0) or 0,
+                "completion_tokens": getattr(raw_usage, "completion_tokens", 0) or 0,
+                "total_tokens": getattr(raw_usage, "total_tokens", 0) or 0,
+            }
+
+        tool_calls = []
+        for tc in (getattr(message, "tool_calls", None) or []):
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                logger.warning(f"工具参数不是合法 JSON: {tc.function.arguments!r}")
+                args = {}
+            tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
+
+        return LLMResponse(
+            content=message.content or "",
+            tool_calls=tool_calls,
+            usage=usage,
+        )
 
     def _chat_with_openai(
         self,

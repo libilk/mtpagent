@@ -10,14 +10,47 @@ import os
 import logging
 import time
 import json
+from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 from llm.output_parser import parse_llm_json
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class RiskFinding:
+    """一条风险发现。evidence 必须逐字摘自合同原文，否则无法做 span 匹配评测。"""
+    category: str = ""
+    evidence: str = ""
+    level: str = ""
+    rationale: str = ""
+
+
+@dataclass
+class ReviewResult:
+    """一次合同审查的完整结果"""
+    findings: List[RiskFinding] = field(default_factory=list)
+    risk_level: str = ""
+    assessment: str = ""
+    trace: List[Dict[str, Any]] = field(default_factory=list)
+    usage: Dict[str, int] = field(default_factory=dict)
+    latency_ms: float = 0.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "findings": [vars(f) for f in self.findings],
+            "risk_level": self.risk_level,
+            "assessment": self.assessment,
+            "usage": self.usage,
+            "latency_ms": self.latency_ms,
+        }
+
+
 class DocumentAgent:
     """文档处理Agent（ReAct自主决策模式）"""
+
+    # 送入 LLM 的合同文本上限（字符）。旧值 3000 会切掉长合同的关键条款。
+    MAX_TEXT_CHARS = 12000
 
     def __init__(
         self,
@@ -77,9 +110,11 @@ class DocumentAgent:
             # 1. 缓存管理
             from core.unified_cache import CacheManager, LLMCache, RetrievalCache, SupplierCache
             self.cache_manager = CacheManager(max_size=1000, ttl=3600)
-            self.llm_cache = LLMCache(self.cache_manager)
-            self.retrieval_cache = RetrievalCache(self.cache_manager)
-            self.supplier_cache = SupplierCache(self.cache_manager)
+            # 注意：LLMCache/RetrievalCache/SupplierCache 的第一个参数是 max_size，
+            # 不是共享的 CacheManager —— 传错会把 max_size 变成 CacheManager 对象。
+            self.llm_cache = LLMCache(max_size=500, ttl=3600)
+            self.retrieval_cache = RetrievalCache(max_size=500, ttl=1800)
+            self.supplier_cache = SupplierCache(max_size=200, ttl=3600)
             logger.info("✓ 缓存管理器初始化完成")
 
             # 2. 行业标准计算器
@@ -278,196 +313,291 @@ class DocumentAgent:
                 function=self.read_contract_file
             )
 
+        # ========== 终止工具：提交结构化结果 ==========
+        # 这个函数不会被真正执行——ReAct 循环拦截它，作为"审查完成"的信号。
+        self.function_calling.register_function(
+            name="submit_review",
+            description=(
+                "提交最终的结构化审查结果。这是审查的最后一步，必须调用。"
+                "findings 每一项的 evidence 必须是逐字摘自合同原文的片段，不要改写或概括。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "findings": {
+                        "type": "array",
+                        "description": "风险点列表；没有风险则传空数组",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "category": {
+                                    "type": "string",
+                                    "description": "风险条款类别，如 违约金过高 / 无限责任 / 单方解约权 / 知识产权不明确 / 缺失必备条款"
+                                },
+                                "evidence": {
+                                    "type": "string",
+                                    "description": "合同原文片段，必须逐字摘抄，不要改写"
+                                },
+                                "level": {
+                                    "type": "string",
+                                    "enum": ["high", "medium", "low"]
+                                },
+                                "rationale": {
+                                    "type": "string",
+                                    "description": "一句话说明为什么这是风险"
+                                }
+                            },
+                            "required": ["category", "evidence", "level", "rationale"]
+                        }
+                    },
+                    "risk_level": {
+                        "type": "string",
+                        "enum": ["低风险", "中风险", "高风险"]
+                    },
+                    "assessment": {
+                        "type": "string",
+                        "description": "总体评估，2-3 句"
+                    }
+                },
+                "required": ["findings", "risk_level", "assessment"]
+            },
+            function=lambda **kwargs: "submit_review 由 ReAct 循环拦截，不应被直接执行"
+        )
+
     def handle(self, query: str, context: Dict) -> str:
         """
-        处理查询（ReAct模式）
+        处理自然语言查询（ReAct 模式），返回人类可读的审核报告。
 
         Args:
-            query: 用户查询
-            context: 上下文信息（包含file_path等）
+            query: 用户查询，如"请审核这份合同：path/to/contract.txt"
+            context: 上下文信息（可含 file_path）
 
         Returns:
-            处理结果
+            渲染后的审核报告
         """
-        start_time = time.time()
+        logger.info(f"[DocumentAgent] 开始处理查询: {query}")
+        return self._render(self._react(query))
 
-        try:
-            logger.info(f"[DocumentAgent] 开始处理查询: {query}")
-
-            # 使用ReAct模式（自主决策调用工具）
-            return self._handle_react(query, context, start_time)
-
-        except Exception as e:
-            logger.error(f"处理查询失败: {e}", exc_info=True)
-            return f"处理失败: {str(e)}"
-
-    def _handle_react(self, query: str, context: Dict, start_time: float) -> str:
+    def review_structured(self, contract_text: str) -> ReviewResult:
         """
-        ReAct模式处理查询
-        Agent自主决策调用哪些工具、调用顺序、何时停止
+        审查合同原文，返回结构化结果（评测入口）。
 
-        Args:
-            query: 用户查询
-            context: 上下文信息
-            start_time: 开始时间
-
-        Returns:
-            最终答案
+        与 handle() 的区别：直接接收合同文本，返回 RiskFinding[] 等机器可读字段，
+        用于和 gold 标注做指标计算。
         """
-        logger.info("[ReAct] 开始ReAct循环")
+        prompt = (
+            "请审核以下合同文本的风险，并调用 submit_review 提交结构化结果。\n"
+            "注意：findings 中每一项的 evidence 必须逐字摘自下面的合同原文。\n\n"
+            f"【合同文本】\n{contract_text}"
+        )
+        return self._react(prompt)
 
-        # 获取工具schema
-        tools = self.function_calling.get_tools_schema() if self.function_calling else None
+    # ---------------------------------------------------------------
+    # ReAct 循环
+    # ---------------------------------------------------------------
 
-        if not tools:
-            return "错误：无可用工具"
-
-        # 构建系统提示词（定义Agent的能力和决策策略）
-        system_prompt = """你是一个企业级合同审核Agent。你需要通过调用工具来分析合同，然后给出审核结论。
+    SYSTEM_PROMPT = """你是企业级合同审核Agent，通过调用工具分析合同，最后调用 submit_review 提交结构化结果。
 
 【工作流程】
-1. 解析文档，提取结构化信息
-2. 识别风险点
-3. 查询历史合同，进行对比
-4. 计算风险评分
-5. 给出审核结论和建议
+1. parse_document 读取合同（若用户已直接给出合同文本，可跳过）
+2. extract_structure 提取结构化要素（甲乙方、金额、付款方式、违约责任等）
+3. identify_risks 识别风险点
+4. （可选）search_by_supplier / compare_with_history 做历史对比
+5. （可选）calculate_risk_score 计算风险评分
+6. submit_review 提交最终结构化结果 —— 必须的最后一步
 
-【文档解析工具】
-- parse_document: 解析文档，提取文本（第一步必须调用）
-- extract_structure: 提取结构化信息（甲乙方、金额、条款等）
-
-【智能分析工具】
-- identify_risks: 识别风险点（违约金、无限责任、缺失条款等）
-- compare_with_history: 对比历史合同（需要先知道供应商名称）
-- calculate_risk_score: 计算风险评分（0-100分）
-
-【知识检索工具】
-- search_similar_contracts: 检索相似合同
-- search_by_supplier: 查询供应商历史
-
-【MCP外部工具】
-- list_contracts: 列出目录下的所有合同文件（批量审核）
-- read_contract_file: 读取合同文件内容
-
-【决策策略】
-1. 合同审核任务：
-   parse_document → extract_structure → identify_risks
-   → search_by_supplier → compare_with_history
-   → calculate_risk_score → 给出结论
-
-2. 供应商查询任务：
-   search_by_supplier → 分析历史
-
-3. 合同对比任务：
-   parse_document → extract_structure → search_similar_contracts → 对比分析
+【工具】
+- parse_document / extract_structure：解析与结构化
+- identify_risks：识别风险点（违约金、无限责任、缺失条款等）
+- compare_with_history / search_by_supplier / search_similar_contracts：历史对比
+- calculate_risk_score：风险评分（0-100）
+- list_contracts / read_contract_file：MCP 文件工具
+- submit_review：提交结构化结果（终止信号）
 
 【重要原则】
 - 不要硬编码流程，根据实际情况灵活调整
-- 每次调用1-3个工具，避免过度调用
-- 最多5轮迭代
-- 必须先parse_document才能extract_structure
-- 必须先extract_structure才能知道供应商名称
-- 给出明确的风险等级：低风险/中风险/高风险
+- 每次调用 1-3 个工具，避免过度调用
+- 只回复文本不算完成，必须调用 submit_review
+- findings 每一项的 evidence 必须是逐字摘自合同原文的片段，不要改写或概括
+- 若确认无风险，findings 传空数组
 """
 
-        # 初始化对话
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": query}
+    def _react(self, user_message: str, max_iterations: int = 6) -> ReviewResult:
+        """
+        运行 ReAct 循环，直到 Agent 调用 submit_review 或达到迭代上限。
+
+        与旧实现的关键区别：按标准 tool-calling 协议回传消息——
+        assistant 消息带 tool_calls 字段，工具结果用 role="tool" + tool_call_id。
+        旧实现把工具调用伪装成"我调用了工具: ..."的叙述文本，模型会模仿该文本
+        而不真正发起调用，导致 handle() 返回中间脚手架而不是审核结论。
+        """
+        start_time = time.time()
+        result = ReviewResult()
+
+        tools = self.function_calling.get_tools_schema() if self.function_calling else None
+        if not tools:
+            result.assessment = "错误：无可用工具"
+            return result
+
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": self.SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
         ]
 
-        max_iterations = 5  # 最多5轮ReAct循环
+        submitted: Optional[Dict[str, Any]] = None
+        last_content = ""
 
         for iteration in range(max_iterations):
             logger.info(f"[ReAct] 第 {iteration + 1}/{max_iterations} 轮")
 
             try:
-                # 调用LLM（支持function calling）
-                response = self.llm.chat(messages, tools=tools, temperature=0.3)
+                resp = self.llm.chat_structured(messages, tools=tools, temperature=0.3)
+            except Exception as e:
+                logger.error(f"[ReAct] 第{iteration + 1}轮调用 LLM 失败: {e}", exc_info=True)
+                result.assessment = result.assessment or f"LLM 调用失败: {e}"
+                break
 
-                # 解析工具调用
-                from llm.function_calling import parse_tool_calls
-                tool_calls = parse_tool_calls(response)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                result.usage[key] = result.usage.get(key, 0) + resp.usage.get(key, 0)
 
-                if not tool_calls:
-                    # 没有工具调用，说明Agent认为可以直接回答了
-                    logger.info("[ReAct] Agent决定给出最终答案")
-                    return response
+            if resp.content:
+                last_content = resp.content
 
-                # 执行工具调用
-                tool_results = []
-                for tool_call in tool_calls:
-                    func_name = tool_call["function"]["name"]
-                    arguments = json.loads(tool_call["function"]["arguments"])
+            # 模型没有调用工具
+            if not resp.has_tool_calls:
+                logger.info("[ReAct] 模型未调用工具")
+                if submitted is None and iteration < max_iterations - 1:
+                    # 还没提交结构化结果，追问一次
+                    if resp.content:
+                        messages.append({"role": "assistant", "content": resp.content})
+                    messages.append({
+                        "role": "user",
+                        "content": "请调用 submit_review 提交结构化结果（findings / risk_level / assessment）。",
+                    })
+                    continue
+                break
 
-                    logger.info(f"[ReAct] 调用工具: {func_name}({arguments})")
+            # 按标准协议回传 assistant 消息（带 tool_calls）
+            messages.append({
+                "role": "assistant",
+                "content": resp.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                        },
+                    }
+                    for tc in resp.tool_calls
+                ],
+            })
 
-                    # 执行工具
+            # 执行工具；每个 tool_call 都必须回一条 tool 消息（协议要求）
+            for tc in resp.tool_calls:
+                logger.info(f"[ReAct] 调用工具: {tc.name}({tc.arguments})")
+
+                if tc.name == "submit_review":
+                    submitted = tc.arguments
+                    tool_output: Any = "已收到结构化审查结果"
+                    result.trace.append({
+                        "iteration": iteration + 1,
+                        "tool": tc.name,
+                        "arguments": tc.arguments,
+                        "result": "ok",
+                    })
+                else:
                     tool_start = time.time()
-                    result = self.function_calling.execute_function(func_name, arguments)
-                    tool_latency = (time.time() - tool_start) * 1000
-
-                    tool_results.append({
-                        "tool": func_name,
-                        "arguments": arguments,
-                        "result": result
+                    tool_output = self._execute_tool_safe(tc.name, tc.arguments)
+                    result.trace.append({
+                        "iteration": iteration + 1,
+                        "tool": tc.name,
+                        "arguments": tc.arguments,
+                        "result": str(tool_output)[:2000],
+                        "latency_ms": round((time.time() - tool_start) * 1000, 1),
                     })
 
-                    logger.info(f"[ReAct] 工具执行完成，耗时 {tool_latency:.1f}ms")
-
-                # 将工具调用和结果添加到对话历史
-                tool_call_summary = ", ".join([f"{tr['tool']}({tr['arguments']})" for tr in tool_results])
                 messages.append({
-                    "role": "assistant",
-                    "content": f"我调用了工具: {tool_call_summary}"
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": str(tool_output),
                 })
 
-                # 格式化工具结果
-                tool_results_text = json.dumps(tool_results, ensure_ascii=False, indent=2)
+            if submitted is not None:
+                logger.info("[ReAct] Agent 已提交结构化结果，结束循环")
+                break
 
-                # 根据迭代次数调整提示
-                if iteration < max_iterations - 2:
-                    follow_up = "请分析结果。如果信息足够，直接给出审核结论；如果不足，可以继续调用工具补充信息。"
-                else:
-                    follow_up = "这是最后一轮。请基于已有信息给出最终审核结论，不要再调用工具。"
+        self._apply_submission(result, submitted, last_content)
+        result.latency_ms = round((time.time() - start_time) * 1000, 1)
+        logger.info(
+            f"[ReAct] 完成：{len(result.findings)} 个风险点，"
+            f"等级={result.risk_level or '未知'}，耗时 {result.latency_ms:.0f}ms"
+        )
+        return result
 
-                messages.append({
-                    "role": "user",
-                    "content": f"工具执行结果：\n{tool_results_text}\n\n{follow_up}"
-                })
-
-            except Exception as e:
-                logger.error(f"[ReAct] 第{iteration + 1}轮执行失败: {e}", exc_info=True)
-
-                # 如果是第一轮就失败，返回错误
-                if iteration == 0:
-                    return f"处理失败: {str(e)}"
-
-                # 否则尝试基于已有信息生成答案
-                messages.append({
-                    "role": "user",
-                    "content": "工具执行出现问题，请基于已有信息给出答案。"
-                })
-
-                try:
-                    final_answer = self.llm.chat(messages, temperature=0.5)
-                    return final_answer
-                except:
-                    return "抱歉，处理您的请求时遇到了问题。"
-
-        # 达到最大迭代次数，强制要求给出答案
-        logger.warning(f"[ReAct] 达到最大迭代次数 {max_iterations}，强制生成答案")
-        messages.append({
-            "role": "user",
-            "content": "请基于目前已有的所有信息给出最终审核结论。"
-        })
-
+    def _execute_tool_safe(self, name: str, arguments: Dict[str, Any]) -> Any:
+        """执行工具并捕获异常，返回错误文本而不中断 ReAct 循环"""
         try:
-            final_answer = self.llm.chat(messages, temperature=0.5)
-            return final_answer
+            return self.function_calling.execute_function(name, arguments)
         except Exception as e:
-            logger.error(f"[ReAct] 生成最终答案失败: {e}")
-            return "抱歉，我无法完成审核。请检查文档格式或重试。"
+            logger.error(f"工具 {name} 执行失败: {e}")
+            return f"工具执行失败: {e}"
+
+    @staticmethod
+    def _apply_submission(
+        result: ReviewResult,
+        submitted: Optional[Dict[str, Any]],
+        fallback_content: str,
+    ) -> None:
+        """把 submit_review 的参数（或兜底文本）填入 ReviewResult"""
+        if not submitted:
+            result.assessment = fallback_content or "Agent 未提交结构化结果"
+            return
+
+        raw_findings = submitted.get("findings") or []
+        if isinstance(raw_findings, str):
+            # 模型有时会把数组序列化成字符串
+            try:
+                raw_findings = json.loads(raw_findings)
+            except json.JSONDecodeError:
+                raw_findings = []
+
+        findings = []
+        for item in raw_findings:
+            if not isinstance(item, dict):
+                continue
+            findings.append(RiskFinding(
+                category=str(item.get("category", "")),
+                evidence=str(item.get("evidence", "")),
+                level=str(item.get("level", "")),
+                rationale=str(item.get("rationale", "")),
+            ))
+
+        result.findings = findings
+        result.risk_level = str(submitted.get("risk_level", ""))
+        result.assessment = str(submitted.get("assessment", "")) or fallback_content
+
+    def _render(self, result: ReviewResult) -> str:
+        """把结构化结果渲染成人类可读的审核报告"""
+        lines = [f"审核结论：{result.risk_level or '未给出'}", ""]
+
+        if result.findings:
+            lines.append(f"发现 {len(result.findings)} 个风险点：")
+            for i, f in enumerate(result.findings, 1):
+                lines.append(f"  {i}. [{f.level}] {f.category}")
+                if f.rationale:
+                    lines.append(f"     理由：{f.rationale}")
+                if f.evidence:
+                    evidence = f.evidence if len(f.evidence) <= 120 else f.evidence[:120] + "…"
+                    lines.append(f"     原文：{evidence}")
+            lines.append("")
+        else:
+            lines.append("未发现风险点。")
+            lines.append("")
+
+        lines.append(f"总体评估：{result.assessment}")
+        return "\n".join(lines)
 
     # ========== 工具实现 ==========
 
@@ -539,8 +669,9 @@ class DocumentAgent:
         try:
             logger.info("[提取结构] 开始提取结构化信息")
 
-            # 截断过长的文本
-            text_preview = document_text[:3000] if len(document_text) > 3000 else document_text
+            # 截断过长的文本（上限可调，默认 12000 字符）
+            limit = self.MAX_TEXT_CHARS
+            text_preview = document_text[:limit] if len(document_text) > limit else document_text
 
             prompt = f"""请从以下合同中提取结构化信息，输出JSON格式。
 
@@ -637,7 +768,7 @@ class DocumentAgent:
 
             # ========== 优化2：检查LLM缓存 ==========
             if self.enable_optimizations and self.llm_cache:
-                cached_response = self.llm_cache.get(prompt, temperature=0.2, max_tokens=1000)
+                cached_response = self.llm_cache.get(prompt)
                 if cached_response:
                     logger.info("[风险识别] 使用缓存结果")
                     return cached_response
@@ -663,7 +794,7 @@ class DocumentAgent:
 
             # ========== 优化4：缓存结果 ==========
             if self.enable_optimizations and self.llm_cache:
-                self.llm_cache.set(prompt, response, temperature=0.2, max_tokens=1000)
+                self.llm_cache.set(prompt, response)
 
             # 提取JSON
             result = parse_llm_json(response, fallback={"risks": [], "overall_assessment": "无法识别风险"})
