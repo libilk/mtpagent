@@ -20,7 +20,7 @@ from coach import config
 from coach.api import main as api_main
 from coach.coordination.recovery import Recovery
 from coach.events import schema as events
-from coach.knowledge import builder
+from coach.knowledge import builder, problem_bank
 from coach.knowledge.governance import Governance
 from coach.knowledge.store import KnowledgeStore
 from coach.profile.store import ProfileStore
@@ -156,10 +156,11 @@ class TestFullLoop:
         """题目库非空,且每道题的"正确提交"都能被判对。"""
         knowledge = system["service"].knowledge
         problems = knowledge.list_problems()
-        assert len(problems) == len(builder.GOLDEN_PROBLEMS)
+        bank = problem_bank.load_from_file(problem_bank.BUNDLED_BANK)
+        assert len(problems) == len(bank)
 
         for problem in problems:
-            expected = builder.expected_answer(problem.id)
+            expected = problem_bank.expected_answer(knowledge, problem.id)
             assert expected is not None, f"{problem.id} 缺正确答案"
 
             result = system["workers"]["profile"].handle_answer(

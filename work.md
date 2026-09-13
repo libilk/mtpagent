@@ -18,10 +18,11 @@
 **一句话:** 用知识图谱多跳推理定位"学不会的根因"的学习 Agent,并以量化评测证明图推理相比扁平检索的增益。
 
 **当前状态:** **P0~P6 全部完成**。
-截至 2026-09-13:`coach/` 约 6k 行,coach 测试 242 项 / 全量 392 项。
+截至 2026-09-14:`coach/` 约 7k 行,coach 测试 269 项 / 全量 424 项。
 四张评测表已产出:**两张是负面结果**(BKT 预测不可用、规划没跑赢随机),已如实写进
 [evaluation/results/RESULTS.md](coach/evaluation/results/RESULTS.md) 的 Limitations。
-根因定位那张(核心卖点)经两态区分修复后,**两个条件都反超对照组**(0.6774 / 0.7258;详见 §7 P5)。
+根因定位那张(核心卖点)经两态区分修复后,**两个条件都反超对照组**(0.6000 / 0.6667;详见 §7 P5)。
+计划那张也从负转正(白费步数 82% → 0%),但**幅度太小不足以声称有效**。
 
 **唯一还没验的:**
 - **P1 的端到端验收欠一次真 Redis 实跑**(开发机 Docker 未启动)。目前 `<50ms` 是进程内
@@ -409,13 +410,15 @@ coach/
 ├── domain/
 │   ├── models.py                # ✅ 领域模型
 │   ├── ids.py                   # ✅ ULID(§4.3 要求)
+│   ├── text.py                  # ✅ 轻量文本相似度(零依赖,可复现)
 │   └── grading.py               # ✅ 规则判分(P1.9)
 ├── knowledge/
 │   ├── schema.py                # ✅ §4.1 DDL + connect()/init_schema()
 │   ├── store.py                 # ✅ 存取 + §5.1 递归 CTE
 │   ├── queries.py               # ✅ ★ §5.5 根因定位(纯函数)
 │   ├── governance.py            # ✅ ★ observation → proposal → aggregator
-│   └── builder.py               # ✅ LLM 抽取 + §5.2 环检测 + 种子建图
+│   ├── builder.py               # ✅ LLM 抽取 + §5.2 环检测 + 种子建图
+│   └── problem_bank.py          # ✅ ★ 题库导入(文件/URL)
 ├── profile/
 │   ├── bkt.py                   # ✅ §5.3
 │   ├── sm2.py                   # ✅ §5.4
@@ -635,11 +638,11 @@ coach/
 
 | 表 | 结果 | 结论 |
 |---|---|---|
-| 1 掌握度预测 | AUC **0.5353**,Brier **0.2688** vs 基准率 0.25 | ❌ **负面**:比恒定预测基准率还差 |
+| 1 掌握度预测 | AUC **0.5336**(n=1710),Brier **0.2741** vs 基准率 0.2498 | ❌ **负面**:比恒定预测基准率还差(已降级为「仅用于排序」) |
 | 2 遗忘预测 | 隔 30 天 ECE 0.2397 → **0.3632**,平均预测 0.44 / 实际 0.08 | ✅ 印证 BKT 不建模遗忘 |
-| 3 规划增益 | 修掉"推荐无题项"后相对随机 **-8.0%** | ❌ **负面**:计划没跑赢随机 |
-| 4 ★ 根因定位(充分) | 两态 **0.6774** / 消融 0.6129 / 闭包内随机 0.6129 / 扁平 **0.1290** | ✅ 图最强 |
-| 4 ★ 根因定位(稀疏) | 两态 **0.7258** / 消融 0.6129 / 闭包内随机 0.5484 / 扁平 **0.1774** | ✅ 图最强 |
+| 3 规划增益 | 白费步数 82% → **0%**;相对随机 **+1.2%** | ⚠️ **转正但幅度太小**(见 Limitations #5) |
+| 4 ★ 根因定位(充分) | 两态 **0.6000** / 消融 0.6000 / 闭包内随机 0.5067 / 扁平 **0.0800** | ✅ 图最强 |
+| 4 ★ 根因定位(稀疏) | 两态 **0.6667** / 消融 0.4933 / 闭包内随机 0.6267 / 扁平 **0.1200** | ✅ 图最强 |
 
 > 表 4 的「消融」臂 = 同样候选集、同样排序公式,唯一差别是**不区分「未观测」与「已观测且弱」**
 > (即 2026-09-13 修复前的行为)。两态区分带来 **+6.5 / +11.3 个点**,是实测不是声称。
@@ -713,6 +716,10 @@ docker run -d -p 6379:6379 --name coach-redis redis:7-alpine
 ./demo.sh
 .venv/Scripts/python.exe -m coach.demo --learner u1 --goal algo.dp
 
+# 题库:看覆盖情况 / 从外部导入
+.venv/Scripts/python.exe -m coach.knowledge.problem_bank --coverage
+.venv/Scripts/python.exe -m coach.knowledge.problem_bank --from-url https://example.com/problems.json
+
 # 测试
 .venv/Scripts/python.exe -m pytest tests/coach/ -q
 
@@ -768,41 +775,40 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 
 **P0 — 直接影响项目可信度**
 
-| # | 问题 | 证据 | 改哪 |
-|---|---|---|---|
-| ✅ | ~~`root_causes` 把"未观测"当成缺口排序~~ | **已解决(2026-09-13)**:`detect_gaps` 增加 `observed` 参数 + `status` 字段,排序改为 `(status_rank, depth, mastery)`;`ProfileStore.observed_kp_ids()` 让画像能表达"无记录"。消融实测 **+6.5 / +11.3 个点**,两个条件都反超「闭包内随机排序」。对标 DeepTutor 的 `objective_status()` 三态 | 已完成 |
-| 2 | **计划推荐"没有题目的知识点"** | 计划 360 步里 **~300 步(82%)** 白费;跳过无题项后 **-89.7% → -8.0%** | [coach/workflow/query.py](coach/workflow/query.py) `plan_view` 过滤 or 补上出题能力(见 #5) |
-| 3 | **BKT 预测基本不可用** | AUC **0.5353**(随机 0.5),Brier **0.2688** 比恒定基准率 0.25 还差 | 要么调 [config.py](coach/config.py) 的 BKT 参数 / 改 §5.3 公式,要么在文档里明确"掌握度只用于排序,不用于预测" |
-| 4 | **计划没跑赢随机** | 相对随机 **-8.0%** | 先修 #2(推荐落地),若仍无增益就如实写进 Limitations |
+| # | 问题 | 状态 |
+|---|---|---|
+| ✅ | ~~`root_causes` 把"未观测"当成缺口排序~~ | **已解决(09-13)**:两态区分 + 消融实测 +6.5/+11.3 个点。对标 DeepTutor `objective_status()` |
+| ✅ | ~~计划推荐"没有题目的知识点"~~ | **已解决(09-14)**:`plan_view` 只推有题可做的点。**白费步数 82% → 0%** |
+| ✅ | ~~计划没跑赢随机~~ | **已改善(09-14)**:修完 #2 与 advance 分支后 **-8.0% → +1.2%**。**但幅度太小不足以声称有效**(见 RESULTS.md Limitations #5) |
+| ✅ | ~~BKT 预测不可用~~ | **已声明边界(09-14)**:不改公式,在 `bkt.py` 与 RESULTS.md 里明确「**只用于排序,不用于预测**」,AUC 表保留作为这条边界的证据 |
 
-> **#1 修完之后新增的一条已知局限**(已写进 RESULTS.md 的 Limitations):
-> 没有题目的知识点**永远不会被观测**,因此**原理上无法被定位为根因**。
-> 这类点现在会被标成 `status="unobserved"` 并提示"该去测一下",而不是伪装成"已确认薄弱"。
-> 真正的解法就是 #5 的出题能力。
+> 真正的修法见 #5:题库覆盖是根因定位的**必要条件** —— 没题的知识点永远产生不了证据。
+> 09-14 题库从 13 道扩到 **19 道,覆盖全部 22 个知识点**,这条前提才成立。
 
 **P1 — 验收欠账**
 
-| # | 问题 | 说明 |
+| # | 问题 | 状态 |
 |---|---|---|
-| 5 | 异步出题未实现 | `PROBLEM_GENERATE` 事件类型定义了,但**没有任何生产者**;§2.2 的 `[6] 异步出题` 是空的,#2 也和它相关 |
-| 6 | 真 Redis 端到端验收 | `<50ms` 目前是进程内总线实测;`kill -9` 恢复是逻辑验证。起 Docker 后跑一次真链路 |
-| 7 | `GET /profile/{learner_id}` 未实现 | §5.3 契约里有,但**没有任何阶段的清单包含它** —— 规划时就漏了 |
-| 8 | `next_to_learn` 把「未观测」的前置当成「没准备好」 | `next_to_learn` 要求前置掌握度 ≥ 阈值才放行。全新学生所有点都是初始值 0.1,于是**只有最底层的叶子能学**,其余全被卡住。对标 DeepTutor:未观测点应该给 `probe`(先测一下)动作,而不是当成"前置不满足"。这是 §11.1 #1 同一类问题的另一个面 |
+| ✅ | ~~异步出题未实现~~ | **已用另一条路解决(09-14)**:不做 LLM 现场出题(生成错的 expected 会污染判分和 BKT),改为 **`problem_bank.py` 从外部题库导入**(文件/URL)。数据在 `data/coach/problems/dsa_seed.json` |
+| ⛔ | **真 Redis 端到端验收** | **仍阻塞**:开发机 Docker daemon 未启动。`<50ms` 与 `kill -9` 恢复至今是进程内/逻辑验证 |
+| ✅ | ~~`GET /profile/{learner_id}` 未实现~~ | **已补(09-14)**:走 `workflow/query.py` 门面,含 `mastery_summary` / `due_now` / `error_patterns` |
+| ✅ | ~~`next_to_learn` 冷启动~~ | **已修(09-14)**:未观测的前置不再阻塞,改标 `action="probe"`(先摸底)。对标 DeepTutor 的 `probe` |
 
-**P2 — 功能缺口(不影响当前结论,但影响"讲得完整")**
+**P2 — 功能缺口**
 
-| # | 问题 | 说明 |
+| # | 问题 | 状态 |
 |---|---|---|
-| ✅ | ~~四类关系里三类是死的~~ | **已解决(2026-09-13)**:读源码确认"四类"是错记(WeSmartFlow 实为 8 类 + embedding 探针,且无 per-type 分支)。决定**只留 PREREQUISITE 做深**,`EDGE_TYPES` 收窄,种子里 7 条非前置边移除,抽取提示词同步改掉。见 §11.3 |
-| 9 | `profile/errors.py` | §6 目录树里列了,至今是空壳(易错计数目前直接在 store.py 里) |
-| 10 | `next_to_learn` 有 N+1 查询 | 循环里逐个 `store.ancestors(kp, 1)`。22 个点无所谓,P5 放大规模时会疼 |
-| 11 | 概念上千后 prompt 塞不下 | `known_concepts` 是全量塞;要改成按相似度召回相关概念 |
+| ✅ | ~~四类关系里三类是死的~~ | **已解决(09-13)**:只留 `PREREQUISITE` 并做深 |
+| ✅ | ~~`profile/errors.py` 空壳~~ | **已落地(09-14)**:错题模式分析层 —— 不只是计数,还识别「同一错误类型跨多个知识点 = 疑似系统性误解」 |
+| ✅ | ~~`next_to_learn` 有 N+1~~ | **已修(09-14)**:`KnowledgeStore.prerequisite_adjacency()` 一次查完 |
+| ✅ | ~~概念上千后 prompt 塞不下~~ | **已修(09-14)**:`select_relevant_concepts` 按文本相似度召回相关概念再喂(相似度抽到 `domain/text.py`,与评测基线共用) |
 
 **P3 — 收尾**
 
 | # | 问题 | 说明 |
 |---|---|---|
 | ✅ | ~~P6 交付~~ | **已完成(2026-09-13)**:README(评测表放最前)+ `demo.sh`(零外部依赖、可复跑)+ `requirements-coach.txt`。`docker-compose.yml` 主动跳过 —— 无法验证的东西不进交付物 |
+| ⛔ | **真 Redis 端到端验收** | 清单里唯一还欠的。启动 Docker Desktop 后即可执行 |
 
 ### 11.3 对标调研发现(2026-09-13,读源码,非 README)
 
@@ -911,3 +917,5 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | 2026-09-13 | **P6 完成**:`README.md`(评测表放最前 + 7 条 Limitations)+ `demo.sh`/`coach/demo.py`(起真 uvicorn、打真 HTTP、**零外部依赖**)+ `requirements-coach.txt`。**主动跳过 `docker-compose.yml`** —— 开发机 Docker daemon 未启动,写一个没验证过的交付物与本项目标准冲突,README 里已如实说明 |
 | 2026-09-13 | 修复(全新库踩坑):`schema.connect()` 只连接不建表,导致 `demo` 与 `run_all` 在全新数据库上都会报 `no such table`。新增 `schema.open_db()` = 连接 + 建表,demo / run_all / query 工厂统一改用它 |
 | 2026-09-13 | `coach/coordination/memory.py`:把测试里的 `FakeBus` 收编为正式代码 `InMemoryBus`,测试与 demo 共用一份实现,避免两套漂移 |
+| 2026-09-14 | **修完 §11.1 的 P0/P1/P2 大部分**。① **题库**:新增 `problem_bank.py`(文件/URL 导入)+ `data/coach/problems/dsa_seed.json`,**19 道题覆盖全部 22 个知识点**(原 13 道只覆盖 16 个 —— 没题的点永远产生不了证据,根因定位原理上够不着);题目数据从 `builder.py` 搬出,内置与外部导入走**同一条路径**。② **计划**:只推有题可做的点(白费步数 **82% → 0%**)+ 补上 §2.2 一直缺的 **advance 分支**(`next_to_learn` 只在前置闭包里找,**目标自己永远不在候选里**,导致前置补完后计划变空 —— 实测 24 步 18 步为空)。表 3 由 **-8.0% 转 +1.2%**,但幅度太小不足以声称有效。③ **冷启动**:`next_to_learn` 不再把"未观测的前置"当成"没准备好",改标 `probe`。④ **`GET /profile`** 补上(含 `error_patterns`,能识别跨知识点的系统性误解)。⑤ **`profile/errors.py`** 落地为分析层。⑥ 清掉 N+1(`prerequisite_adjacency`)与 prompt 容量问题(`select_relevant_concepts`,相似度抽到 `domain/text.py` 与评测基线共用)。⑦ **BKT 降级**:在 `bkt.py` 明确声明「只用于排序,不用于预测」。测试 269 项 / 全量 **424 通过** |
+| 2026-09-14 | 评测的 Limitations 改为**全部由数据触发**(问题修掉后对应限制自动消失,不留在文档里误导人);新增一条反过来的说明:题库覆盖是根因定位的**必要条件** |

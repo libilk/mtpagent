@@ -37,7 +37,7 @@ from coach.api.main import create_app
 from coach.coordination.journal import Journal
 from coach.coordination.memory import InMemoryBus
 from coach.events import schema as events
-from coach.knowledge import builder
+from coach.knowledge import builder, problem_bank
 from coach.knowledge.governance import Governance
 from coach.knowledge.schema import open_db
 from coach.knowledge.store import KnowledgeStore
@@ -150,7 +150,7 @@ def run(learner: str, goal: str, db_path, port: int) -> None:
             {
                 "learner_id": learner,
                 "problem_id": "lc.70",
-                "answer_text": builder.expected_answer("lc.70"),
+                "answer_text": problem_bank.expected_answer(knowledge, "lc.70"),
                 "elapsed_ms": 4200,
             },
         )

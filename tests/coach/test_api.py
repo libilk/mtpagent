@@ -102,6 +102,47 @@ class TestNoLLMInApiLayer:
                 assert f"import {name}" not in source, f"{module.__name__} 违规 import {name}"
 
 
+class TestProfileEndpoint:
+    @pytest.fixture(autouse=True)
+    def _seed(self, seeded, profile):
+        profile.upsert_profile("u1", goal_kp_id="algo.dp", daily_minutes=45)
+        profile.set_mastery("u1", "algo.dp", 0.3)
+        profile.set_mastery("u1", "ds.array", 0.2)
+        profile.bump_error("u1", "algo.dp", "wrong")
+        profile.bump_error("u1", "ds.array", "wrong")
+        profile.set_memory("u1", "ds.array", ease=2.5, interval_days=1, reps=1, lapses=0,
+                           last_review=0.0, due_at=time.time() - 3600)
+
+    def test_returns_goal_and_summary(self, client):
+        body = client.get("/profile/u1").json()
+
+        assert body["goal"]["kp_id"] == "algo.dp"
+        assert body["goal"]["mastery"] == pytest.approx(0.3)
+        assert body["daily_minutes"] == 45
+        assert body["mastery_summary"]["observed_count"] == 2
+
+    def test_lowest_lists_weak_points(self, client):
+        body = client.get("/profile/u1").json()
+        assert [x["kp_id"] for x in body["mastery_summary"]["lowest"]] == ["ds.array", "algo.dp"]
+
+    def test_due_now(self, client):
+        body = client.get("/profile/u1").json()
+        assert [x["kp_id"] for x in body["due_now"]] == ["ds.array"]
+
+    def test_error_patterns_flag_systematic_misunderstanding(self, client):
+        """同一个错误类型跨两个知识点 → 疑似系统性误解,不是单点不会。"""
+        body = client.get("/profile/u1").json()
+
+        assert len(body["error_patterns"]["top"]) == 2
+        assert len(body["error_patterns"]["recurring"]) == 1
+        assert set(body["error_patterns"]["recurring"][0]["kp_ids"]) == {"algo.dp", "ds.array"}
+
+    def test_unknown_learner_is_not_an_error(self, client):
+        body = client.get("/profile/nobody").json()
+        assert body["goal"] is None
+        assert body["mastery_summary"]["observed_count"] == 0
+
+
 class TestHealthAndDocs:
     def test_health_ok(self, client):
         response = client.get("/health")
@@ -115,6 +156,7 @@ class TestHealthAndDocs:
         assert "/health" in schema["paths"]
         assert "/gap/{learner_id}/{kp_id}" in schema["paths"]
         assert "/graph/{kp_id}" in schema["paths"]
+        assert "/profile/{learner_id}" in schema["paths"]
 
     def test_answer_documented_as_202(self, client):
         schema = client.get("/openapi.json").json()

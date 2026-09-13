@@ -16,6 +16,7 @@ from coach.api.schemas import (
     GraphResponse,
     HealthResponse,
     PlanResponse,
+    ProfileResponse,
 )
 from coach.events import schema as events
 
@@ -85,6 +86,24 @@ def get_graph(
         return service.graph_view(kp_id, depth=depth, learner_id=learner_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"知识点不存在:{kp_id}")
+
+
+@router.get(
+    "/profile/{learner_id}",
+    response_model=ProfileResponse,
+    summary="学习者档案",
+    description=(
+        "§5.3 契约:`{goal, mastery_summary, due_now, error_patterns}`。\n\n"
+        "`error_patterns.recurring` 是**跨多个知识点重复出现的错误类型** —— "
+        "它提示的是系统性误解,补单个知识点没用。"
+    ),
+)
+def get_profile(
+    learner_id: str,
+    request: Request,
+    top_k: int = Query(default=5, ge=1, le=20),
+) -> ProfileResponse:
+    return request.app.state.query_service.profile_view(learner_id, top_k=top_k)
 
 
 @router.get(

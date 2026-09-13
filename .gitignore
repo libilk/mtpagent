@@ -26,7 +26,11 @@ ENV/
 
 # ==================== 数据文件 ====================
 # coach 本地数据：SQLite 图/画像，可用 coach.knowledge.builder --build 重建
-data/coach/
+# 注意用 data/coach/* 而不是 data/coach/ —— 后者会让下面的 ! 失效
+# （git 不允许重新包含被排除目录里的文件）
+data/coach/*
+# 但题库要跟着仓库走：它是种子数据，不是生成的产物
+!data/coach/problems/
 
 # 向量数据库（保留目录结构，排除实际数据）
 vector_db/chroma_db/

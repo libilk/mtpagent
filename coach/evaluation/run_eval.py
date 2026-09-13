@@ -28,7 +28,7 @@ from coach.coordination.journal import Journal
 from coach.evaluation import baselines, metrics
 from coach.evaluation.simulated_student import StudentSimulator
 from coach.events import schema as events
-from coach.knowledge import builder, queries, schema
+from coach.knowledge import builder, problem_bank, queries, schema
 from coach.knowledge.governance import Governance
 from coach.knowledge.store import KnowledgeStore
 from coach.profile import bkt
@@ -72,7 +72,7 @@ class Env:
         答对就给标准答案,答错给一个明显错的 —— 判分是纯规则比对,这样做
         「学生答对/答错」和「链路判对/判错」严格一致。
         """
-        expected = builder.expected_answer(problem_id)
+        expected = problem_bank.expected_answer(self.knowledge, problem_id)
         text = expected if correct else "__definitely_wrong__"
         event = events.new_event(
             events.ANSWER_SUBMITTED,
@@ -522,7 +522,9 @@ def render_markdown(results: Dict) -> str:
         f"| {p['planned_practicable_closure_lift']} | | |",
         "",
         "> 「白费步数」= 计划推荐的**没有题目**的知识点,学生无从练起,这一步就空转了。",
-        "> 第三行是对照:它的数字说明问题出在「推荐能不能落地」,而不在排序逻辑。",
+        "> 修掉这个之后白费步数已归零;三行的差距也随之缩小 —— 说明**当时的负分主要来自"
+        "「推荐落不了地」,不是排序逻辑本身**。",
+        "> 但修完之后计划**只以微弱优势领先随机**,这个幅度不足以声称规划有效。",
         "",
         "## 表 4 ★ 根因定位:图遍历 vs 扁平召回",
         "",
@@ -645,34 +647,52 @@ def render_limitations(results: Dict) -> str:
     if (p["planned_practicable_goal_lift"] is None) or p["planned_practicable_goal_lift"] <= 0.05:
         sections.append(
             (
-                "★ 表 3 是负面结果:计划没跑赢随机",
+                "★ 表 3:计划只以微弱优势领先随机,不足以声称有效",
                 [
-                    f"修掉「推荐没有题目的知识点」之后,按计划练相对随机是 "
-                    f"**{p['planned_practicable_goal_lift']}**,基本打平。",
-                    "当前计划的价值**没有被这次实验证实**。可能的原因:",
-                    "- 计划总推「最浅的根因」那个点,反复练同一点,边际收益递减太快;",
-                    "- 随机策略天然分散练习面,而模拟学生的能力增益是「按点算」的,"
-                    "分散反而更快抬高闭包均值;",
-                    "- 本题库只有 13 道题,覆盖不到很多知识点,计划的可选空间被压得很窄。",
-                    "要真正证明规划有用,得先解决「推荐必须可落地」(出题能力),再重跑。",
+                    f"按计划练相对随机 **{p['planned_practicable_goal_lift']}**"
+                    f"(方案:{p['planned']['goal_effective_gain']} vs 随机 "
+                    f"{p['random']['goal_effective_gain']})。",
+                    "**这个幅度在 15 个学生 / 24 步的规模下无法与噪声区分。**",
+                    "诊断出来的原因是**计划的作用域太窄**:`plan_view` 只覆盖目标的前置闭包"
+                    "(本图里 `algo.dp` 的闭包只有 4 个点)。前置补完、目标也达标之后,"
+                    "计划就**真的没事可做了** —— 实测 24 步里有约一半返回空计划,"
+                    "此后比的就是「随机练」对「什么都不练」,已经不是规划的评估了。",
+                    "要真正证明规划有用,得让计划在目标达成后能提出**下一个目标**,"
+                    "而不是停在原地。当前设计里没有「下一站」的概念。",
                 ],
             )
         )
 
-    sections.append(
-        (
-            "★ 没有题目的知识点,根因定位在原理上就做不到",
-            [
-                "这是本轮修复过程中发现的新局限。「两态区分」把**没有证据**的点降权处理,"
-                "这本身是对的 —— 不该凭一个初始值就断定学生弱。但它有个前提:",
-                "**该知识点得有机会产生证据**,也就是得有题目。当前 13 道题覆盖不到全部 "
-                f"{results['graph']['concepts']} 个知识点,没被覆盖的那些永远不会被观测,"
-                "于是永远无法被定位为根因。",
-                "变通:这类点会被标成 `status=\"unobserved\"` 并提示「该去测一下」,"
-                "而不是伪装成「已确认的薄弱项」。真正的解法是补出题能力(见 work.md §11.1 #5)。",
-            ],
+    missing_kps = results["graph"].get("kps_without_problems") or []
+    if missing_kps:
+        sections.append(
+            (
+                "★ 没有题目的知识点,根因定位在原理上就做不到",
+                [
+                    "「两态区分」把**没有证据**的点降权处理,这本身是对的 —— "
+                    "不该凭一个初始值就断定学生弱。但它有个前提:",
+                    "**该知识点得有机会产生证据**,也就是得有题目。本题库里 "
+                    f"{len(missing_kps)} 个知识点没有题({', '.join(missing_kps[:6])}"
+                    f"{' …' if len(missing_kps) > 6 else ''}),它们永远不会被观测,"
+                    "于是永远无法被定位为根因。",
+                    "变通:这类点会被标成 `status=\"unobserved\"` 并提示「该去测一下」,"
+                    "而不是伪装成「已确认的薄弱项」。",
+                ],
+            )
         )
-    )
+    else:
+        sections.append(
+            (
+                "题库覆盖是根因定位的前提,不是可选项",
+                [
+                    f"本轮的题库({results['graph']['problems']} 道)已覆盖全部 "
+                    f"{results['graph']['concepts']} 个知识点 —— 这是**必要条件**:",
+                    "一个知识点没有题,就永远产生不了作答证据,也就永远无法被定位为根因。",
+                    "早先版本只有 13 道题、覆盖 16/22 个点,那些没被覆盖的点在评测里"
+                    "**原理上不可能被找到**,拉低了根因定位的数字。",
+                ],
+            )
+        )
 
     if rc_sparse["flat_top1_accuracy"] < 0.25:
         sections.append(
@@ -729,6 +749,7 @@ def run_all(
                 "concepts": len(env.knowledge.list_concepts()),
                 "edges": len(env.knowledge.list_edges()),
                 "problems": len(env.knowledge.list_problems()),
+                "kps_without_problems": sorted(problem_bank.coverage(env.knowledge)["missing"]),
             },
             "mastery_prediction": exp_mastery_prediction(env, n_students=n_students),
             "forgetting": exp_forgetting_calibration(env, n_students=n_students),

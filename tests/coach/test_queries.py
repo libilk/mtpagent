@@ -174,6 +174,36 @@ class TestNextToLearn:
 
         assert [p["kp_id"] for p in picked] == ["mid"]
 
+    def test_unobserved_prereq_does_not_block_but_flags_probe(self, chain):
+        """★ 冷启动修正:前置**从没测过**不该当成"没准备好"直接卡死。
+
+        旧行为下全新学生只能学叶子;现在未观测的前置不阻塞,但会标成 probe。
+        """
+        mastery = {"base": 0.1, "mid": 0.1, "sibling": 0.1}
+        observed = {"sibling"}  # base / mid 从没测过
+
+        picked = queries.next_to_learn(chain, mastery, "top", top_k=5, observed=observed)
+        by_id = {p["kp_id"]: p for p in picked}
+
+        assert "mid" in by_id, "前置 base 只是没测过,不该把 mid 卡死"
+        assert by_id["mid"]["action"] == "probe"      # 前置没测过 → 先摸底
+        assert by_id["base"]["action"] == "learn"     # 叶子,没有前置
+        assert by_id["sibling"]["action"] == "learn"  # 也没有前置
+
+    def test_confirmed_weak_prereq_still_blocks(self, chain):
+        """前置**有证据且确实弱** → 仍然不能学,这是对的。"""
+        mastery = {"base": 0.1, "mid": 0.2, "sibling": 0.9}
+        observed = {"base", "mid", "sibling"}  # base 是已确认的弱项
+
+        picked = queries.next_to_learn(chain, mastery, "top", top_k=5, observed=observed)
+
+        assert "mid" not in [p["kp_id"] for p in picked]
+
+    def test_without_observed_keeps_old_blocking_behaviour(self, chain):
+        mastery = {"base": 0.1, "mid": 0.1, "sibling": 0.9}
+        picked = queries.next_to_learn(chain, mastery, "top", top_k=5)
+        assert [p["kp_id"] for p in picked] == ["base"]
+
     def test_prefers_closest_to_goal(self, chain):
         mastery = {"base": 0.8, "mid": 0.1, "sibling": 0.1}
         picked = queries.next_to_learn(chain, mastery, "top", top_k=5)

@@ -185,3 +185,73 @@ class TestWorkerAdvancesDueDate:
         memory = profile.get_memory("u1", "algo.dp")
         assert memory["lapses"] == 1
         assert memory["reps"] == 0
+
+
+class TestPlanOnlyRecommendsPracticable:
+    """#2:推荐必须能落地 —— 推一个没有题的知识点,学生无从练起。
+
+    P5 实测:不加这道过滤时,计划 360 步里约 300 步(82%)是白费的。
+    """
+
+    def test_skips_kp_without_problems(self, service, profile, knowledge, seeded):
+        from coach.domain.models import KnowledgePoint
+
+        # 造一个没有题的知识点,并让它成为目标的唯一根因
+        knowledge.upsert_concept(
+            KnowledgePoint(id="algo.orphan", name="孤儿点", subject="algorithms")
+        )
+        profile.upsert_profile("u1", goal_kp_id="algo.dp", daily_minutes=600)
+        profile.set_mastery("u1", "algo.orphan", 0.05)
+
+        plan = service.plan_view("u1", now=NOW)
+
+        assert "algo.orphan" not in [i["kp_id"] for i in plan["items"]]
+
+    def test_keeps_kp_with_problems(self, service, profile, seeded):
+        profile.upsert_profile("u1", goal_kp_id="algo.dp", daily_minutes=600)
+        profile.set_mastery("u1", "ds.array", 0.1)
+
+        plan = service.plan_view("u1", now=NOW)
+
+        assert "ds.array" in [i["kp_id"] for i in plan["items"]]
+
+
+class TestPlanAdvancesToGoal:
+    """#4:前置都备齐之后,计划要能推进**目标本身**。
+
+    `next_to_learn` 只在前置闭包里找候选,**目标自己永远不在里面** ——
+    没有这一支,学生补完前置之后计划会变成空的。实测 24 步里 18 步为空。
+    """
+
+    def test_goal_appears_when_prereqs_ready(self, service, profile, seeded):
+        profile.upsert_profile("u1", goal_kp_id="algo.dp", daily_minutes=600)
+        # 前置全部达标,目标自己还没掌握
+        for kp in ("algo.recursion", "ds.array", "algo.memoization", "prog.func_call"):
+            profile.set_mastery("u1", kp, 0.9)
+        profile.set_mastery("u1", "algo.dp", 0.2)
+
+        plan = service.plan_view("u1", now=NOW)
+
+        goal_items = [i for i in plan["items"] if i["kp_id"] == "algo.dp"]
+        assert goal_items, "前置都备齐了,计划应该推进目标"
+        assert goal_items[0]["action"] == "learn"
+
+    def test_goal_marked_probe_when_prereq_untested(self, service, profile, seeded):
+        profile.upsert_profile("u1", goal_kp_id="algo.dp", daily_minutes=600)
+        profile.set_mastery("u1", "algo.dp", 0.2)
+        # 前置一个都没测过
+
+        plan = service.plan_view("u1", now=NOW)
+
+        goal_items = [i for i in plan["items"] if i["kp_id"] == "algo.dp"]
+        assert goal_items and goal_items[0]["action"] == "probe"
+
+    def test_goal_not_offered_when_prereq_confirmed_weak(self, service, profile, seeded):
+        profile.upsert_profile("u1", goal_kp_id="algo.dp", daily_minutes=600)
+        profile.set_mastery("u1", "algo.dp", 0.2)
+        profile.set_mastery("u1", "algo.recursion", 0.05)  # 已确认的弱前置
+
+        plan = service.plan_view("u1", now=NOW)
+
+        goal_items = [i for i in plan["items"] if i["kp_id"] == "algo.dp"]
+        assert goal_items == [], "前置确实不会,不该直接推目标"

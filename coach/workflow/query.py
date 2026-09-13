@@ -19,7 +19,7 @@ from coach import config
 from coach.knowledge import queries
 from coach.knowledge.schema import open_db
 from coach.knowledge.store import KnowledgeStore
-from coach.profile import sm2
+from coach.profile import errors, sm2
 from coach.profile.store import ProfileStore
 
 
@@ -142,9 +142,13 @@ class QueryService:
 
     def _due_items(self, learner_id: str, now: float, seen: set) -> List[Dict]:
         items = []
+        covered = self.knowledge.kp_ids_with_problems()
         for kp_id in self.profile.due_reviews(learner_id, now):
             concept = self.knowledge.get_concept(kp_id)
             if concept is None or kp_id in seen:
+                continue
+            # ★ 没有题可做就不推 —— 推了学生也无从练起(P5 里 82% 的步数是这么白费的)
+            if covered and kp_id not in covered:
                 continue
             memory = sm2.SM2State.from_row(self.profile.get_memory(learner_id, kp_id))
             overdue_days = (now - memory.due_at) / config.DAY_SECONDS if memory.due_at else 0.0
@@ -164,20 +168,26 @@ class QueryService:
         closure = queries.prereq_closure(self.knowledge, goal_kp_id)
         mastery = self.profile.get_mastery_map(learner_id, list(closure))
         observed = self.profile.observed_kp_ids(learner_id, list(closure))
+        covered = self.knowledge.kp_ids_with_problems()
+        goal_name = self.knowledge.get_concept(goal_kp_id).name
+
+        def practicable(kp_id: str) -> bool:
+            return not covered or kp_id in covered
 
         items = []
         for root in queries.root_causes(
             self.knowledge, mastery, goal_kp_id, observed=observed
         ):
             concept = self.knowledge.get_concept(root["kp_id"])
-            if concept is None or root["kp_id"] in seen:
+            if concept is None or root["kp_id"] in seen or not practicable(root["kp_id"]):
                 continue
+            flag = "已确认薄弱" if root.get("status") == "gap" else "还没测过"
             items.append(
                 {
                     "kp_id": root["kp_id"],
                     "name": concept.name,
                     "action": "remedial",
-                    "reason": f"「{self.knowledge.get_concept(goal_kp_id).name}」的根因缺口(掌握度 {root['mastery']:.2f})",
+                    "reason": f"「{goal_name}」的根因({flag},掌握度 {root['mastery']:.2f})",
                     "est_minutes": round(
                         concept.difficulty
                         * config.PLAN_LEARN_MINUTES_PER_DIFFICULTY
@@ -188,16 +198,58 @@ class QueryService:
             )
             seen.add(root["kp_id"])
 
-        for candidate in queries.next_to_learn(self.knowledge, mastery, goal_kp_id):
+        # ★ 「无缺口 → 推进目标」这一支(§2.2 的 advance 分支)
+        # `next_to_learn` 只在前置闭包里找候选,**目标自己永远不在里面** ——
+        # 于是前置都备齐之后计划会变成空的,学生不知道该干什么了。
+        # 实测:24 步里 18 步是空的,这是计划跑不赢随机的真正原因。
+        if goal_kp_id not in seen and practicable(goal_kp_id):
+            goal_mastery = self.profile.get_mastery(learner_id, goal_kp_id)
+            if goal_mastery < config.GAP_THRESHOLD:
+                goal_prereqs = self.knowledge.prerequisite_adjacency().get(goal_kp_id, [])
+                blocked = [
+                    p
+                    for p in goal_prereqs
+                    if mastery.get(p, 0.0) < config.GAP_THRESHOLD and p in observed
+                ]
+                needs_probe = any(
+                    mastery.get(p, 0.0) < config.GAP_THRESHOLD and p not in observed
+                    for p in goal_prereqs
+                )
+                if not blocked:
+                    goal_concept = self.knowledge.get_concept(goal_kp_id)
+                    items.append(
+                        {
+                            "kp_id": goal_kp_id,
+                            "name": goal_concept.name,
+                            "action": "probe" if needs_probe else "learn",
+                            "reason": (
+                                "前置里还有点没测过,先摸个底"
+                                if needs_probe
+                                else "前置已备齐,可以直接攻目标了"
+                            ),
+                            "est_minutes": round(
+                                goal_concept.difficulty
+                                * config.PLAN_LEARN_MINUTES_PER_DIFFICULTY,
+                                1,
+                            ),
+                        }
+                    )
+                    seen.add(goal_kp_id)
+
+        for candidate in queries.next_to_learn(
+            self.knowledge, mastery, goal_kp_id, observed=observed
+        ):
             concept = self.knowledge.get_concept(candidate["kp_id"])
-            if concept is None or candidate["kp_id"] in seen:
+            if concept is None or candidate["kp_id"] in seen or not practicable(candidate["kp_id"]):
                 continue
+            # next_to_learn 会把"前置还没测过"的标成 probe(先测再学)
+            is_probe = candidate.get("action") == "probe"
             items.append(
                 {
                     "kp_id": candidate["kp_id"],
                     "name": concept.name,
-                    "action": "learn",
-                    "reason": "前置已备齐,可以推进",
+                    "action": "probe" if is_probe else "learn",
+                    "reason": "前置里还有点没测过,先摸个底" if is_probe else "前置已备齐,可以推进",
                     "est_minutes": round(
                         concept.difficulty * config.PLAN_LEARN_MINUTES_PER_DIFFICULTY, 1
                     ),
@@ -205,6 +257,58 @@ class QueryService:
             )
             seen.add(candidate["kp_id"])
         return items
+
+    # ---------------- 学习者档案(P1 的契约欠账,2026-09-13 补上)----------------
+
+    def profile_view(self, learner_id: str, top_k: int = 5) -> Dict:
+        """§5.3 契约:`{goal, mastery_summary, due_now, error_patterns}`。
+
+        只读、纯计算,入口层可以放心同步调用。
+        """
+        row = self.profile.get_profile(learner_id) or {}
+        goal_kp_id = row.get("goal_kp_id")
+
+        mastered = self.profile.get_mastery_map(learner_id)
+        mastery_summary = {
+            "observed_count": len(mastered),
+            "mastered_count": sum(1 for v in mastered.values() if v >= config.GAP_THRESHOLD),
+            "mean": round(sum(mastered.values()) / len(mastered), 4) if mastered else None,
+            "lowest": sorted(
+                (
+                    {"kp_id": kp, "name": self._name(kp), "mastery": round(v, 4)}
+                    for kp, v in mastered.items()
+                    if v < config.GAP_THRESHOLD
+                ),
+                key=lambda item: item["mastery"],
+            )[:top_k],
+        }
+
+        due_now = [
+            {"kp_id": kp, "name": self._name(kp)}
+            for kp in self.profile.due_reviews(learner_id)
+        ]
+
+        goal = None
+        if goal_kp_id:
+            concept = self.knowledge.get_concept(goal_kp_id)
+            goal = {
+                "kp_id": goal_kp_id,
+                "name": concept.name if concept else goal_kp_id,
+                "mastery": round(self.profile.get_mastery(learner_id, goal_kp_id), 4),
+            }
+
+        return {
+            "learner_id": learner_id,
+            "goal": goal,
+            "daily_minutes": row.get("daily_minutes"),
+            "mastery_summary": mastery_summary,
+            "due_now": due_now,
+            "error_patterns": errors.summary(self.profile, learner_id, limit=top_k),
+        }
+
+    def _name(self, kp_id: str) -> str:
+        concept = self.knowledge.get_concept(kp_id)
+        return concept.name if concept else kp_id
 
     # ---------------- 图谱视图 ----------------
 

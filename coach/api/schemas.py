@@ -50,10 +50,28 @@ class GapResponse(BaseModel):
     )
 
 
+class ProfileResponse(BaseModel):
+    learner_id: str
+    goal: Optional[Dict[str, Any]] = Field(
+        default=None, description="目标知识点及其掌握度;没建档或没设目标时为 null"
+    )
+    daily_minutes: Optional[int] = None
+    mastery_summary: Dict[str, Any] = Field(
+        default_factory=dict, description="观测数 / 已掌握数 / 均值 / 最低的几个"
+    )
+    due_now: List[Dict[str, Any]] = Field(default_factory=list, description="当前到期复习项")
+    error_patterns: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="top=错误计数排行;recurring=跨多个知识点重复出现(疑似系统性误解)",
+    )
+
+
 class PlanItem(BaseModel):
     kp_id: str
     name: str
-    action: str = Field(description="review=到期复习 / remedial=补根因 / learn=推进新知识点")
+    action: str = Field(
+        description="review=到期复习 / remedial=补根因 / probe=前置没测过先摸底 / learn=推进新知识点"
+    )
     reason: str
     est_minutes: float
 

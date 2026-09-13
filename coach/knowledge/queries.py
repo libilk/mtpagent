@@ -111,21 +111,51 @@ def next_to_learn(
     top_k: int = config.ROOT_CAUSE_TOP_K,
     depth: int = config.MAX_PREREQ_DEPTH,
     threshold: float = config.GAP_THRESHOLD,
+    observed: Optional[set] = None,
 ) -> List[Dict]:
     """「现在该学什么」:目标前置闭包里,前置已备齐、自己还没掌握、离目标最近的节点。
 
     排序:depth 降序(先从离目标近的教起);同深度按掌握度升序(更弱的优先)。
+
+    ★ **两态区分(与 detect_gaps 同一类修正)**
+    原先一行 `any(mastery.get(p, 0.0) < threshold ...)` 会把**从没测过的**前置
+    当成"没准备好",于是全新学生只能学 7 个叶子,`algo.dp` / `mergesort` / `bfs`
+    全被卡死 —— 而学生可能**早就会了,只是系统没测过**。
+
+    现在的处理:
+    - 前置**已确认不会**(有证据且 < 阈值)→ 真的不能学,跳过;
+    - 前置**从没测过** → 不阻塞,但把这一项的 `action` 标成 `probe`(先测一下),
+      对标 DeepTutor 的 `probe` 动作。
     """
     closure = prereq_closure(store, goal_kp_id, depth)
+    adjacency = store.prerequisite_adjacency()  # 一次查完,避免 N+1
     candidates = []
+
     for kp, d in closure.items():
         if mastery.get(kp, 0.0) >= threshold:
             continue  # 自己已经掌握了
-        own_prereqs = store.ancestors(kp, depth=1)
-        if any(mastery.get(p, 0.0) < threshold for p in own_prereqs):
-            continue  # 自己的前置还没备齐,还不能学
+
+        own_prereqs = adjacency.get(kp, [])
+        blocked = [
+            p
+            for p in own_prereqs
+            if mastery.get(p, 0.0) < threshold and (observed is None or p in observed)
+        ]
+        if blocked:
+            continue  # 前置**已确认不会** —— 这是真的不能学
+
+        needs_probe = any(
+            mastery.get(p, 0.0) < threshold and observed is not None and p not in observed
+            for p in own_prereqs
+        )
         candidates.append(
-            {"kp_id": kp, "depth": d, "mastery": mastery.get(kp, 0.0)}
+            {
+                "kp_id": kp,
+                "depth": d,
+                "mastery": mastery.get(kp, 0.0),
+                # probe = 前置里有点"还没测过",先测再学更稳
+                "action": "probe" if needs_probe else "learn",
+            }
         )
 
     candidates.sort(key=lambda c: (-c["depth"], c["mastery"]))

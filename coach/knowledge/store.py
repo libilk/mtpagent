@@ -224,6 +224,18 @@ class KnowledgeStore:
         ).fetchall()
         return [(r["from_id"], r["to_id"]) for r in rows]
 
+    def prerequisite_adjacency(self) -> Dict[str, List[str]]:
+        """{知识点: [它的直接前置]}。**一次查完**。
+
+        给需要"自己看后一步前置"的调用方用(`next_to_learn` 就在循环里做这件事)。
+        在循环里逐个 `ancestors(kp, 1)` 是 N+1 —— 22 个点看不出来,
+        但 P5 评测 30 个学生 × 每步都在跑它。
+        """
+        adjacency: Dict[str, List[str]] = {}
+        for from_id, to_id in self.prerequisite_pairs():
+            adjacency.setdefault(to_id, []).append(from_id)
+        return adjacency
+
     # ---------------- 题目 ----------------
 
     def upsert_problem(self, problem: Problem) -> None:
@@ -260,6 +272,20 @@ class KnowledgeStore:
     def list_problems(self) -> List[Problem]:
         rows = self.conn.execute("SELECT * FROM problems ORDER BY id").fetchall()
         return [_row_to_problem(r) for r in rows]
+
+    def kp_ids_with_problems(self) -> set:
+        """有题目可做的知识点集合。
+
+        ★ 计划必须依赖它:推荐一个**没有题**的知识点,学生无从练起,那一步就空转了。
+        P5 实测:不加这道过滤时,计划 360 步里约 300 步(82%)是白费的。
+
+        注意 `problems.kp_ids` 是 JSON 列,**建不了索引** —— 现在 13 道题直接全扫,
+        上千道题时应该拆一张 `problem_kp` 关联表。
+        """
+        covered = set()
+        for problem in self.list_problems():
+            covered.update(problem.kp_ids)
+        return covered
 
     def delete_problem(self, problem_id: str) -> None:
         with self.conn:

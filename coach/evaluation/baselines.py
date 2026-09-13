@@ -18,30 +18,10 @@ Chroma + 真实 embedding —— `rag_core/chroma_store.py` 已具备,但那要�
 embedding 服务,评测的可复现性会变差。当前版本选择**可复现优先**,并如实说明。
 """
 
-import math
-from collections import Counter
 from typing import Dict, List, Optional, Sequence
 
 from coach import config
-
-
-def _bigrams(text: str) -> Counter:
-    """字符二元组。中文短词用这个比按空格切词靠谱。"""
-    cleaned = "".join(str(text).split()).lower()
-    if len(cleaned) < 2:
-        return Counter([cleaned]) if cleaned else Counter()
-    return Counter(cleaned[i : i + 2] for i in range(len(cleaned) - 1))
-
-
-def _cosine(a: Counter, b: Counter) -> float:
-    if not a or not b:
-        return 0.0
-    common = set(a) & set(b)
-    numerator = sum(a[t] * b[t] for t in common)
-    denominator = math.sqrt(sum(v * v for v in a.values())) * math.sqrt(
-        sum(v * v for v in b.values())
-    )
-    return numerator / denominator if denominator else 0.0
+from coach.domain import text as text_utils
 
 
 class FlatRetrievalBaseline:
@@ -59,7 +39,7 @@ class FlatRetrievalBaseline:
                 )
             )
             self._texts[concept.id] = text
-            self._vectors[concept.id] = _bigrams(text)
+            self._vectors[concept.id] = text_utils.bigrams(text)
 
     def similar(self, kp_id: str, top_k: int = 5, include_self: bool = True) -> List[str]:
         """按文本相似度召回。`include_self=False` 用于只找"别处"的相关点。"""
@@ -70,7 +50,7 @@ class FlatRetrievalBaseline:
         for other, vector in self._vectors.items():
             if other == kp_id and not include_self:
                 continue
-            scored.append((_cosine(base, vector), other))
+            scored.append((text_utils.cosine(base, vector), other))
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [kp for _, kp in scored[:top_k]]
 

@@ -17,6 +17,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from coach.domain import text as text_utils
 from coach.domain.models import EDGE_TYPES
 from coach.knowledge.governance import Governance, has_cycle
 from coach.knowledge.store import KnowledgeStore
@@ -114,18 +115,43 @@ def _parse_extraction(raw: Dict[str, Any], subject: Optional[str] = None) -> tup
     return concepts, edges
 
 
-def extract(llm, text: str, subject: Optional[str] = None, known_concepts=None) -> tuple:
+def select_relevant_concepts(text: str, concepts, limit: int = 60) -> list:
+    """从全量知识点里挑出与本文最相关的若干个,给 `extract` 复用 id 用。
+
+    为什么不全塞:知识点上千时 prompt 会爆。用字面相似度召回是便宜且可复现的做法
+    (不联网、不引依赖)。**局限**:同义词/上下位关系它看不出来 —— 真要做到位
+    需要 embedding,那时把 `domain/text.py` 换掉即可,调用方不用动。
+    """
+    if not concepts:
+        return []
+    if len(concepts) <= limit:
+        return list(concepts)
+
+    by_id = {c.id: c for c in concepts}
+    ranked = text_utils.rank_by_similarity(
+        text,
+        [(c.id, " ".join(filter(None, [c.id, c.name, c.description or ""]))) for c in concepts],
+        top_k=limit,
+    )
+    return [by_id[key] for _score, key in ranked]
+
+
+def extract(llm, text: str, subject: Optional[str] = None, known_concepts=None, max_known: int = 60) -> tuple:
     """调 LLM 抽取,返回 (concepts, edges) 两个 payload 列表。**不写库**。
 
     优先取 tool_call 的结构化参数;模型没走工具调用时,退化到解析 content 里的 JSON。
 
     known_concepts: 图中已有的知识点(id + name)。喂给模型要求**复用已有 id**,
-    从源头减少 id 漂移。注意这是把清单整个塞进 prompt,知识点多了会撑爆上下文——
-    到那时要换成"按文本检索相关概念"再喂。当前 22 个点没问题。
+    从源头减少 id 漂移。
+
+    ★ **不整个塞进 prompt**:知识点一多会撑爆上下文。这里先用文本相似度
+    (`domain/text.py`,零依赖)从全量里**召回与本文最相关的 max_known 个**再喂。
+    只有一二十个点时召回结果就是全集,行为不变;上千个点时它是必要的。
     """
     hint = f"\n\n所属学科:{subject}" if subject else ""
-    if known_concepts:
-        listing = "、".join(f"{c.id}={c.name}" for c in known_concepts)
+    selected = select_relevant_concepts(text, known_concepts, limit=max_known)
+    if selected:
+        listing = "、".join(f"{c.id}={c.name}" for c in selected)
         hint += (
             "\n\n图中已有这些知识点,**请优先复用它们的 id,不要另起新 id**"
             f"(确实不在其中的才新建):\n{listing}"
@@ -336,136 +362,16 @@ def seed_graph(governance: Governance, limit: Optional[int] = None) -> IngestRep
 
 # 题目不经过治理流程(治理是给"LLM 抽的知识"用的,题目来自公开题库,是事实)。
 # test_cases 的**最后一条**视为提交用例 —— 学生交的 answer_text 跟它比。
-GOLDEN_PROBLEMS: List[Dict[str, Any]] = [
-    {
-        "id": "lc.1", "title": "两数之和", "source": "leetcode:1", "difficulty": 2.0,
-        "kp_ids": ["ds.hash_table", "ds.array"],
-        "test_cases": [
-            {"input": "nums=[2,7,11,15], target=9", "expected": "[0,1]"},
-            {"input": "nums=[3,2,4], target=6", "expected": "[1,2]"},
-        ],
-    },
-    {
-        "id": "lc.704", "title": "二分查找", "source": "leetcode:704", "difficulty": 2.0,
-        "kp_ids": ["algo.binary_search", "ds.array"],
-        "test_cases": [
-            {"input": "nums=[-1,0,3,5,9,12], target=9", "expected": "4"},
-            {"input": "nums=[-1,0,3,5,9,12], target=2", "expected": "-1"},
-        ],
-    },
-    {
-        "id": "lc.206", "title": "反转链表", "source": "leetcode:206", "difficulty": 2.5,
-        "kp_ids": ["ds.linked_list"],
-        "test_cases": [
-            {"input": "head=[1,2,3,4,5]", "expected": "5 4 3 2 1"},
-        ],
-    },
-    {
-        "id": "lc.20", "title": "有效的括号", "source": "leetcode:20", "difficulty": 2.0,
-        "kp_ids": ["ds.stack"],
-        "test_cases": [
-            {"input": "s=\"()[]{}\"", "expected": "true"},
-            {"input": "s=\"([)]\"", "expected": "false"},
-        ],
-    },
-    {
-        "id": "lc.232", "title": "用栈实现队列", "source": "leetcode:232", "difficulty": 2.5,
-        "kp_ids": ["ds.queue", "ds.stack"],
-        "test_cases": [
-            {"input": "push(1);push(2);peek();pop();empty()", "expected": "ok"},
-        ],
-    },
-    {
-        "id": "lc.70", "title": "爬楼梯", "source": "leetcode:70", "difficulty": 2.0,
-        "kp_ids": ["algo.dp", "algo.recursion"],
-        "test_cases": [
-            {"input": "n=3", "expected": "3"},
-            {"input": "n=5", "expected": "8"},
-        ],
-    },
-    {
-        "id": "lc.509", "title": "斐波那契数", "source": "leetcode:509", "difficulty": 1.5,
-        "kp_ids": ["algo.recursion", "algo.memoization"],
-        "test_cases": [
-            {"input": "n=4", "expected": "3"},
-            {"input": "n=5", "expected": "5"},
-        ],
-    },
-    {
-        "id": "lc.46", "title": "全排列", "source": "leetcode:46", "difficulty": 3.5,
-        "kp_ids": ["algo.backtracking", "algo.recursion"],
-        "test_cases": [
-            {"input": "nums=[1,2,3]", "expected": "6"},
-        ],
-    },
-    {
-        "id": "lc.200", "title": "岛屿数量", "source": "leetcode:200", "difficulty": 3.0,
-        "kp_ids": ["algo.dfs", "ds.stack"],
-        "test_cases": [
-            {"input": "grid=3x5 见题面", "expected": "3"},
-        ],
-    },
-    {
-        "id": "lc.102", "title": "二叉树的层序遍历", "source": "leetcode:102", "difficulty": 3.0,
-        "kp_ids": ["algo.bfs", "ds.queue"],
-        "test_cases": [
-            {"input": "root=[3,9,20,null,null,15,7]", "expected": "[3,9,20,15,7]"},
-        ],
-    },
-    {
-        "id": "lc.53", "title": "最大子数组和", "source": "leetcode:53", "difficulty": 3.0,
-        "kp_ids": ["algo.dp", "ds.array"],
-        "test_cases": [
-            {"input": "nums=[-2,1,-3,4,-1,2,1,-5,4]", "expected": "6"},
-        ],
-    },
-    {
-        "id": "lc.455", "title": "分发饼干", "source": "leetcode:455", "difficulty": 2.5,
-        "kp_ids": ["algo.greedy", "algo.sorting"],
-        "test_cases": [
-            {"input": "g=[1,2,3], s=[1,1]", "expected": "1"},
-            {"input": "g=[1,2], s=[1,2,3]", "expected": "2"},
-        ],
-    },
-    {
-        "id": "lc.209", "title": "长度最小的子数组", "source": "leetcode:209", "difficulty": 3.0,
-        "kp_ids": ["algo.sliding_window", "algo.two_pointers"],
-        "test_cases": [
-            {"input": "target=7, nums=[2,3,1,2,4,3]", "expected": "2"},
-        ],
-    },
-]
-
-
 def seed_problems(knowledge) -> int:
-    """灌题目。引用不到知识点的题目直接跳过,不留悬空引用。返回实际写入数。"""
-    from coach.domain.models import Problem
+    """灌题目。**数据在 `data/coach/problems/dsa_seed.json`**,不写死在这里。
 
-    written = 0
-    for payload in GOLDEN_PROBLEMS:
-        if not all(knowledge.has_concept(kp) for kp in payload["kp_ids"]):
-            continue
-        knowledge.upsert_problem(
-            Problem(
-                id=payload["id"],
-                title=payload["title"],
-                source=payload.get("source"),
-                difficulty=payload.get("difficulty"),
-                judge_type=payload.get("judge_type", "exact_output"),
-                test_cases=payload["test_cases"],
-                kp_ids=payload["kp_ids"],
-            )
-        )
-        written += 1
-    return written
+    这么分是为了让"内置题库"和"从外部导题库"走**同一条代码路径**
+    (`problem_bank.import_problems`)—— 换更全的外部题库只是换个文件/URL,
+    不需要改这里的逻辑。引用了不存在知识点的题目会被跳过。
+    """
+    from coach.knowledge import problem_bank
 
-
-def expected_answer(problem_id: str) -> Optional[str]:
-    """取某题的"正确提交",方便演示和测试。"""
-    for payload in GOLDEN_PROBLEMS:
-        if payload["id"] == problem_id:
-            return str(payload["test_cases"][-1]["expected"])
-    return None
+    return problem_bank.seed_from_bank(knowledge)["written"]
 
 
 # ---------------------------------------------------------------- CLI

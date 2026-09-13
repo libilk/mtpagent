@@ -3,7 +3,7 @@
 import pytest
 
 from coach import config
-from coach.profile import bkt, sm2
+from coach.profile import bkt, errors, sm2
 
 
 class TestBKT:
@@ -225,3 +225,39 @@ class TestProfileStore:
         assert profile.list_errors("u1") == [
             {"kp_id": "algo.dp", "error_type": "wrong", "count": 2}
         ]
+
+
+class TestErrorPatterns:
+    """易错模式分析(profile/errors.py)。
+
+    区分「某个知识点不会」和「某类错误在好多知识点上重复犯」——
+    后者的对策不是补单点,而是查系统性误解。
+    """
+
+    def test_top_errors_sorted_by_count(self, profile):
+        for _ in range(3):
+            profile.bump_error("u1", "a", "wrong")
+        profile.bump_error("u1", "b", "wrong")
+
+        top = errors.top_errors(profile, "u1")
+
+        assert [t["count"] for t in top] == [3, 1]
+
+    def test_recurring_detects_cross_kp_pattern(self, profile):
+        profile.bump_error("u1", "a", "wrong")
+        profile.bump_error("u1", "b", "wrong")
+        profile.bump_error("u1", "c", "careless")
+
+        recurring = errors.recurring_types(profile, "u1")
+
+        assert [r["error_type"] for r in recurring] == ["wrong"]
+        assert sorted(recurring[0]["kp_ids"]) == ["a", "b"]
+
+    def test_single_kp_error_is_not_recurring(self, profile):
+        profile.bump_error("u1", "a", "wrong")
+        assert errors.recurring_types(profile, "u1") == []
+
+    def test_summary_shape(self, profile):
+        profile.bump_error("u1", "a", "wrong")
+        summary = errors.summary(profile, "u1")
+        assert set(summary) == {"top", "recurring"}
