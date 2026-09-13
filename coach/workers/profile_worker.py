@@ -16,15 +16,13 @@
 
 import asyncio
 import logging
-import time
 from typing import Any, Dict, Optional
 
 from coach import config
-from coach.domain.grading import grade
 from coach.events import schema as events
 from coach.events.schema import Event
-from coach.profile import bkt, sm2
 from coach.profile.store import ProfileStore
+from coach.workflow.pipeline import AnswerPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +38,9 @@ class ProfileWorker:
         knowledge,
         journal,
         bus=None,
+        llm=None,
+        pipeline: Optional[AnswerPipeline] = None,
+        checkpointer=None,
         stream: str = config.STREAM_ANSWER,
         group: str = config.GROUP_COACH,
         consumer: str = "profile-1",
@@ -52,6 +53,9 @@ class ProfileWorker:
         self.group = group
         self.consumer = consumer
         self._stop = asyncio.Event()
+        self.pipeline = pipeline or AnswerPipeline(
+            knowledge, profile, journal, llm=llm, bus=bus, checkpointer=checkpointer
+        )
 
     # ---------------- 业务 ----------------
 
@@ -73,95 +77,12 @@ class ProfileWorker:
         return {"status": "ignored", "type": event.type}
 
     def handle_answer(self, event: Event) -> Dict[str, Any]:
-        payload = event.payload
-        learner_id = event.learner_id
-        problem_id = payload.get("problem_id", "")
-        answer_text = payload.get("answer_text", "")
-        elapsed_ms = int(payload.get("elapsed_ms", 0))
+        """整条处理链交给 workflow/pipeline.py(P4 起由 LangGraph 承载)。
 
-        problem = self.knowledge.get_problem(problem_id)
-        if problem is None:
-            logger.warning("题目不存在:%s", problem_id)
-            return {"status": "problem_not_found", "problem_id": problem_id}
-
-        try:
-            correct = grade(problem, answer_text)
-        except ValueError as exc:
-            logger.warning("无法判分:%s", exc)
-            return {"status": "ungradeable", "reason": str(exc)}
-
-        kp_ids = list(problem.kp_ids)
-        now = time.time()
-        quality = sm2.quality_from_correct(correct)
-
-        # ★ 全部写操作放进**同一个事务**:答题记录 / 掌握度 / SM-2 / 易错计数
-        # 要么全成、要么全不成。否则进程在中间被杀,恢复重放会看到答题记录
-        # 已存在而直接跳过,掌握度就永远停在旧值。
-        with self.profile.transaction():
-            # 第二道幂等闸:answer_id 已存在说明这次答题已经计过画像
-            inserted = self.profile.record_answer(
-                answer_id=event.event_id,
-                learner_id=learner_id,
-                problem_id=problem_id,
-                kp_ids=kp_ids,
-                correct=correct,
-                answer_text=answer_text,
-                elapsed_ms=elapsed_ms,
-            )
-            if not inserted:
-                return {"status": "duplicate_answer"}
-
-            mastery = self.profile.get_mastery_map(learner_id, kp_ids)
-            due_at = {}
-            for kp_id in kp_ids:
-                new_p = bkt.update(mastery.get(kp_id), correct)
-                mastery[kp_id] = new_p
-                self.profile.set_mastery(learner_id, kp_id, new_p)
-
-                memory = sm2.review(
-                    sm2.SM2State.from_row(self.profile.get_memory(learner_id, kp_id)),
-                    quality,
-                    now,
-                )
-                self._save_memory(learner_id, kp_id, memory)
-                due_at[kp_id] = memory.due_at
-
-                if not correct:
-                    self.profile.bump_error(learner_id, kp_id, "wrong")
-
-        self._publish_profile_updated(event, kp_ids, mastery)
-        return {
-            "status": "updated",
-            "correct": correct,
-            "mastery": {k: round(v, 4) for k, v in mastery.items()},
-            "due_at": due_at,
-        }
-
-    def _save_memory(self, learner_id: str, kp_id: str, memory: sm2.SM2State) -> None:
-        self.profile.set_memory(
-            learner_id,
-            kp_id,
-            ease=memory.ease,
-            interval_days=memory.interval_days,
-            reps=memory.reps,
-            lapses=memory.lapses,
-            last_review=memory.last_review,
-            due_at=memory.due_at,
-        )
-
-    def _publish_profile_updated(self, event: Event, kp_ids, mastery) -> None:
-        if self.bus is None:
-            return
-        update = events.new_event(
-            events.PROFILE_UPDATED,
-            learner_id=event.learner_id,
-            payload={"kp_ids": list(kp_ids), "mastery": mastery, "source_event": event.event_id},
-            trace_id=event.trace_id,
-        )
-        try:
-            self.bus.publish(config.STREAM_PROFILE, update)
-        except Exception:  # noqa: BLE001 — 下游订阅失败不该影响答题处理
-            logger.exception("发布 profile.updated 失败")
+        这一层只负责「从流里取消息 → 交给链 → 按契约收尾」,
+        链内部的判分/BKT/SM-2/根因/解释/幂等全在 pipeline 里。
+        """
+        return self.pipeline.run(event)
 
     # ---------------- 消费循环 ----------------
 

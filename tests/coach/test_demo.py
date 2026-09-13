@@ -54,7 +54,9 @@ def system(db_conn, knowledge, profile, journal, fake_bus):
     service = QueryService(knowledge, profile)
     llm = FakeLLM()
     workers = {
-        "profile": ProfileWorker(profile, knowledge, journal, bus=fake_bus),
+        # P4 起,答题链(判分→BKT→SM-2→根因→LLM 解释)在 pipeline 里跑,
+        # 所以 llm 要从 profile_worker 传进去,planner 退化为「缓存过期才刷新」
+        "profile": ProfileWorker(profile, knowledge, journal, bus=fake_bus, llm=llm),
         "planner": PlannerWorker(
             knowledge, profile, journal, llm=llm, bus=fake_bus, service=service
         ),
@@ -105,8 +107,11 @@ class TestFullLoop:
         assert pump(system, "profile") == 1
         assert len(system["bus"].queues[config.STREAM_PROFILE]) == 1
 
-        # 3. planner_worker 消费 → 算根因 → 调 LLM 写解释
-        #    lc.70 挂在 algo.dp 和 algo.recursion 两个知识点上,每个各刷新一次
+        # 3. 解释已在 pipeline 的 explain 节点里生成
+        #    lc.70 挂在 algo.dp 和 algo.recursion 两个知识点上,每个各一次
+        assert len(system["llm"].calls) == 2
+
+        # 4. planner 收到 profile.updated,但缓存还新鲜 → 跳过,不重复调 LLM
         assert pump(system, "planner") == 1
         assert len(system["llm"].calls) == 2
 

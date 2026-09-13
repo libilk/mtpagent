@@ -39,6 +39,7 @@ from coach.profile.store import ProfileStore
 from coach.workers.planner_worker import PlannerWorker
 from coach.workers.profile_worker import ProfileWorker
 from coach.workers.scheduler_worker import SchedulerWorker
+from coach.workflow.pipeline import make_checkpointer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,7 +69,7 @@ def build_llm(enabled: bool):
         return None
 
 
-def build_workers(db_path=None, llm=None) -> tuple:
+def build_workers(db_path=None, llm=None, checkpoint_path=None) -> tuple:
     """装配全部 worker。连接按 worker 的跨线程用法开(check_same_thread=False)。"""
     conn = connect(db_path, check_same_thread=False)
     knowledge = KnowledgeStore(conn)
@@ -80,7 +81,14 @@ def build_workers(db_path=None, llm=None) -> tuple:
 
     service = QueryService(knowledge, profile)
     workers = [
-        ProfileWorker(profile, knowledge, journal, bus=bus),
+        ProfileWorker(
+            profile,
+            knowledge,
+            journal,
+            bus=bus,
+            llm=llm,
+            checkpointer=make_checkpointer(checkpoint_path),
+        ),
         PlannerWorker(knowledge, profile, journal, llm=llm, bus=bus, service=service),
         SchedulerWorker(knowledge, profile, journal, bus=bus, service=service),
     ]
@@ -122,7 +130,9 @@ async def tick_loop(bus: RedisBus, profile: ProfileStore, interval: float) -> No
 
 async def main_async(args) -> None:
     llm = build_llm(enabled=not args.no_llm)
-    workers, bus, conn, profile = build_workers(args.db, llm=llm)
+    workers, bus, conn, profile = build_workers(
+        args.db, llm=llm, checkpoint_path=args.checkpoint_db
+    )
 
     # 建档只碰 SQLite,不依赖 Redis —— 放在 ping 之前,免得没起 Redis 就建不了档案
     if args.init_learner:
@@ -184,6 +194,11 @@ async def main_async(args) -> None:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="coach.workers.run_all", description="拉起全部 worker + 定时 tick")
     parser.add_argument("--db", default=None, help="SQLite 路径,默认 data/coach/coach.db")
+    parser.add_argument(
+        "--checkpoint-db",
+        default=str(config.DATA_DIR / "checkpoints.db"),
+        help="LangGraph 检查点库(单独一个文件,避免和主库事务互相干扰)",
+    )
     parser.add_argument("--no-llm", action="store_true", help="不装配 LLM(解释退化为模板)")
     parser.add_argument("--init-learner", metavar="LEARNER_ID", help="建档一个学习者")
     parser.add_argument("--goal", default=None, help="目标知识点 id,如 algo.dp")

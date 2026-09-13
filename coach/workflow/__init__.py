@@ -1,1 +1,1 @@
-"""编排层:答题处理的线性 async 链(P4 换 LangGraph + checkpointer)。"""
+"""编排层:答题处理的 async 链(P4 起由 LangGraph + checkpointer 承载)。"""

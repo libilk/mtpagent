@@ -82,3 +82,6 @@ test_output/
 
 # 数据库文件（可由用户自行下载或初始化）
 database/chinook.db
+
+# coach 检查点库(LangGraph,可重建)
+data/coach/checkpoints.db

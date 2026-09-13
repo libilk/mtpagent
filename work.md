@@ -9,7 +9,7 @@
 > 3. 很久没碰之后,直接跳到 §9 恢复指南
 >
 > **最后更新:** 2026-09-13
-> **当前阶段:** **P3 已完成**(计划接口可用),下一步 P4 工作流(LangGraph + checkpointer)
+> **当前阶段:** **P4 已完成**(答题链上了 LangGraph + checkpointer),下一步 **P5 评测 ★**
 
 ---
 
@@ -18,8 +18,8 @@
 **一句话:** 用知识图谱多跳推理定位"学不会的根因"的学习 Agent,并以量化评测证明图推理相比扁平检索的增益。
 
 **当前状态:** **P0~P3 已完成**,并已补齐跑通所需的零件(题目库、tick 生产者、LLM 装配、学习者建档)。
-截至 2026-09-13:`coach/` 约 4k 行,coach 测试 186 项 / 全量 336 项。
-未做:P4 工作流(换 LangGraph)、P5 评测、P6 交付。
+截至 2026-09-13:`coach/` 约 4.5k 行,coach 测试 204 项 / 全量 354 项。
+未做:P5 评测、P6 交付。
 
 **唯一还没验的:**
 - **P1 的端到端验收欠一次真 Redis 实跑**(开发机 Docker 未启动)。目前 `<50ms` 是进程内
@@ -98,16 +98,16 @@
   │ → 幂等检查(processed_events)
   │ → 写 journal(append-only)
   ▼
-[workflow] 线性链开始
+[workflow] pipeline.py 的 LangGraph 链开始(P4 起带 checkpointer)
   │
-  ├─[1] grade          规则比对 test_cases → correct: bool
-  ├─[2] update_mastery BKT 更新 P(known)
-  ├─[3] update_memory  SM-2 更新 stability + due_at
-  ├─[4] detect_gap     ★ 递归 CTE 查前置闭包 ∩ 掌握度 < 0.4
-  │      ├─ 有缺口 → remedial(补救路径)
-  │      └─ 无缺口 → advance(推进下一节点)
-  ├─[5] plan           合成今日计划
-  └─[6] enqueue        异步出题(publish coach:generate)
+  ├─[1] grade            规则比对 test_cases → correct: bool
+  ├─[2] update_profile   BKT + SM-2 + 答题记录(★ 同一事务)
+  ├─[3] detect_gap       ★ 递归 CTE 查前置闭包 ∩ 掌握度 < 0.4
+  │      ├─ 有缺口 → [4] explain(调 LLM 写人话;产出先落检查点)
+  │      └─ 无缺口 → 直接 finalize
+  └─[5] finalize         写幂等标记 + journal.mark_done + 发 profile.updated
+  │
+  │  (今日计划不在这条链上:由 scheduler_worker 按 tick 生成,见 P3)
   │
   ▼
 [coord] ACK;失败 → attempt+1;>3 → 死信 + 告警
@@ -125,7 +125,7 @@ commit_offset → 完成
 | `workers/` | 常驻消费、编排调用 | HTTP |
 | `knowledge/` | 图的存取、遍历、写入治理 | 画像 |
 | `profile/` | 掌握度、记忆、易错、持久化 | 图 |
-| `workflow/` | 步骤编排、状态流转 | 存储细节 |
+| `workflow/` | 步骤编排、状态流转(P4 起 = `pipeline.py` 的 LangGraph 链 + `query.py` 只读门面) | 存储细节 |
 | `evaluation/` | 模拟学生、指标、跑分 | 生产逻辑 |
 
 **硬规矩:依赖只能向下,`api/` 不许 import `knowledge/` 或 `profile/`。**
@@ -144,10 +144,10 @@ commit_offset → 完成
 | 可靠投递 | **journal + recovery**(自实现) | 保证"不丢"的关键 | — |
 | 掌握度 | **BKT** | 可解释、可评测 | DKT(需要更多数据) |
 | 间隔重复 | **SM-2** | WeSmartFlow 验证过,够用 | FSRS(优化项) |
-| 工作流 | 线性 async 链 → **LangGraph** | 先跑通,断点恢复是 P4 的需求 | Temporal(工业级) |
+| 工作流 | ~~线性 async 链~~ → **LangGraph + SqliteSaver**(P4 已上) | 先跑通,断点恢复是 P4 的需求 | Temporal(工业级) |
 | LLM | 复用 `llm/llm_client.py` | 已修好协议 | — |
 | 测试 | pytest | 已有 | — |
-| 新增依赖 | `fastapi` `uvicorn[standard]` `redis` | 仅此三样(已装) | P4 需要 `langgraph` —— 待确认是否加第 4 样 |
+| 新增依赖 | `fastapi` `uvicorn[standard]` `redis` + **P4:** `langgraph` `langgraph-checkpoint-sqlite` | 前三是原计划;langgraph 是 P4 明确要求 | 已全部装好 |
 
 > **P0~P3 不引入**:图库、工作流框架、向量库、前端、Docker。
 
@@ -422,13 +422,13 @@ coach/
 │   ├── journal.py               # ✅ ★ append-only
 │   └── recovery.py              # ✅ ★ 重启恢复(按事件类型分流)
 ├── workers/
-│   ├── profile_worker.py        # ✅ 判分 → BKT → SM-2
-│   ├── planner_worker.py        # ✅ ★ 根因定位 + LLM 解释
+│   ├── profile_worker.py        # ✅ 消费答题 → 交给 pipeline
+│   ├── planner_worker.py        # ✅ 解释缓存过期时刷新(答题链已自带解释)
 │   ├── scheduler_worker.py      # ✅ SM-2 到期扫描 → 计划
-│   └── run_all.py               # ✅ 开发期单进程拉起
+│   └── run_all.py               # ✅ 开发期单进程拉起 + 定时 tick
 ├── workflow/
 │   ├── query.py                 # ✅ 只读门面(api 依赖它,不直接依赖图/画像)
-│   └── pipeline.py              # —  P4 做
+│   └── pipeline.py              # ✅ ★ LangGraph 链 + checkpointer(P4)
 ├── evaluation/                  # —  P5 做
 │   ├── simulated_student.py
 │   ├── metrics.py
@@ -568,11 +568,35 @@ coach/
 
 **目标:** 把线性链换成带 checkpointer 的工作流,支持中断恢复。
 
-- [ ] P4.1 抽出 `workflow/pipeline.py` 的 State 定义
-- [ ] P4.2 LangGraph 图:节点 = §2.2 的 [1]~[6],条件边在 `detect_gap`
-- [ ] P4.3 checkpointer(先 SqliteSaver 或 RedisSaver)
-- [ ] P4.4 测试:`kill -9` 后从断点恢复,**不重跑已完成的 LLM 调用**(用调用计数断言)
-- [ ] P4.5 记录迁移过程(面试素材)
+- [x] P4.1 抽出 `workflow/pipeline.py` 的 State 定义(`AnswerState`)
+- [x] P4.2 LangGraph 图:节点 `grade → update_profile → detect_gap`,条件边在 `detect_gap`(有缺口 → `explain` → `finalize`;无缺口 → 直接 `finalize`)
+- [x] P4.3 checkpointer:测试用 `InMemorySaver`,生产用 `SqliteSaver`(**单独一个库文件**)
+- [x] P4.4 测试:崩溃后从检查点恢复,**不重跑已完成的 LLM 调用**(用调用计数断言)
+- [x] P4.5 迁移记录见下方「P4 迁移记录」
+
+#### P4 迁移记录(面试素材)
+
+**为什么 P0~P3 不上 LangGraph:** 链短,「事件 + 每个 worker 自己做几步」就够了 ——
+少一个依赖、少一层抽象、出问题好查。
+
+**什么时候非上不可:** 链一长就暴露问题 —— 进程在链中间被杀,恢复是**从事件头重放**,
+前面算过的东西全白算。最亏的是 LLM 那一步:几百毫秒到几秒,而且花钱。
+`explain` 单独成节点,就是为了让它的产出先落检查点,后面崩了不用重调。
+
+**与文档的三处出入(都是实现时才发现必须这样):**
+1. §2.2 把 [2] BKT 和 [3] SM-2 列为两步。这里**合成 `update_profile` 一个节点** ——
+   它们必须原子(见 `profile/store.py` 的事务),拆成两个节点会让"BKT 写了、SM-2 没写"
+   变成可能。
+2. §2.2 的 [5] 是"生成今日计划"。这里把 **LLM 生成根因解释**放进了链(`explain` 节点),
+   它是链里唯一"贵且非幂等"的一步,也正是 checkpointer 的价值所在。计划仍由
+   scheduler 按 tick 生成。
+3. 检查点**单独一个库文件**(`data/coach/checkpoints.db`)。SqliteSaver 自己会 commit,
+   跟图/画像/journal 共用一个连接的话,它的提交会把我们事务里的半成品一起提交掉,
+   原子性就没了。
+
+**踩到的坑(值得讲):** langgraph 记住的是「下一步该跑谁」,要接着跑必须
+`graph.invoke(None, config=cfg)`。传一份新的 state 会让它**从头开始**,检查点就白存了。
+第一版 `run()` 就是这么写的 —— 崩溃后重跑,LLM 被调了两次,是测试的调用计数把它抓出来的。
 
 **交付物:** 可恢复的工作流
 **验收标准:** 在 `detect_gap` 中途杀进程,恢复后 trace 显示前序节点未重跑
@@ -683,7 +707,7 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | P1 入口+队列+画像 | 🟡 代码完成 | 2026-09-13 | — | 78 项测试通过;**真 Redis 端到端未验**(Docker 未起) |
 | P2 根因定位 ★ | ✅ 完成 | 2026-09-13 | 2026-09-13 | 123 项 coach 测试通过;验收场景(函数调用为根因)已断言 |
 | P3 遗忘+调度 | ✅ 完成 | 2026-09-13 | 2026-09-13 | 156 项 coach 测试通过;到期项进计划已断言 |
-| P4 工作流 | ⬜ 未开始 | — | — | — |
+| P4 工作流 | ✅ 完成 | 2026-09-13 | 2026-09-13 | LangGraph + SqliteSaver;崩溃恢复不重调 LLM 已用调用计数断言 |
 | P5 评测 ★ | ⬜ 未开始 | — | — | 差异化所在 |
 | P6 交付 | ⬜ 未开始 | — | — | — |
 
@@ -745,3 +769,5 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | 2026-09-13 | **P4/P5 前置补齐**:① 题目种子 13 道(`GOLDEN_PROBLEMS`,覆盖 13 个知识点),`--build` 一并灌入;② `tick.scheduled` 有了生产者(run_all 定时 + `--tick-once` 手动);③ run_all 装配真 LLM(没 key 或 `--no-llm` 自动降级为模板);④ 学习者建档 `--init-learner`(只碰 SQLite,不依赖 Redis)。新增 `tests/coach/test_demo.py` 端到端测试:POST /answer → 判分 → profile.updated → planner 写解释 → GET /gap 读得到。全量 323 passed |
 | 2026-09-13 | ★ 实测发现:真实 LLM 调用(qwen-plus)抽取可用,但 **id 与人工金标准对不上**(LLM 给 `algo.merge_sort`,金标准是 `algo.mergesort`)。治理按 id 判重 → 会产生重复概念。已入 §11,**未解决** |
 | 2026-09-13 | **修复(id 漂移)**:① `builder.extract(known_concepts=...)` 把已有概念清单喂给 LLM 要求复用 id;② 治理层新增第 5 条规则「同名归并」(`normalize_name` 去空白+小写,同名提案拒绝入库并记别名,引用别名的边自动改指规范 id)。observation 保留 LLM 原始输出以便追溯。真实调用复验:22→22 个节点,无重复;新增 13 项测试(`test_id_drift.py`)。coach 186 项 / 全量 336 passed |
+| 2026-09-13 | **P4 完成**:`workflow/pipeline.py` 用 LangGraph 承载答题链(`grade → update_profile → detect_gap → [explain] → finalize`),带 checkpointer。踩到的坑:langgraph 要接着跑必须 `invoke(None, config)`,传新 state 会从头开始 —— 第一版就是这么写的,LLM 被重复调用,是测试的调用计数抓出来的。新增 `test_pipeline.py` 18 项;coach 204 项 / 全量 354 passed |
+| 2026-09-13 | 偏离记录(P4):① §2.2 的 [2]BKT 与 [3]SM-2 合并为 `update_profile` 一个节点(必须原子);② LLM 生成解释进了链(`explain` 节点),plan 仍归 scheduler;③ 检查点单独一个库文件 `data/coach/checkpoints.db`(SqliteSaver 自带 commit,共用连接会破坏事务原子性);④ `planner_worker` 的解释职责降级为「缓存过期才刷新」(避免同一次答题调两遍 LLM);⑤ 第 4/5 个依赖:`langgraph` `langgraph-checkpoint-sqlite` |

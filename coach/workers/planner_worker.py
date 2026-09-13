@@ -16,15 +16,10 @@ from typing import Any, Dict, Optional
 from coach import config
 from coach.events import schema as events
 from coach.events.schema import Event
+from coach.workflow.pipeline import refresh_explanation
 from coach.workflow.query import QueryService
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = (
-    "你是一位算法课老师。请用 2~3 句中文,直接告诉学生他真正薄弱的前置基础是什么,"
-    "为什么这个基础会导致他当前学不下去,以及应该先补哪一个。"
-    "像跟人说话一样,不要罗列数据,不要用表格,不要复述题目。"
-)
 
 
 class PlannerWorker:
@@ -79,7 +74,12 @@ class PlannerWorker:
 
     def handle_profile_updated(self, event: Event) -> Dict[str, Any]:
         kp_ids = list(event.payload.get("kp_ids") or [])
-        refreshed = [kp for kp in kp_ids if self.refresh_explanation(event.learner_id, kp)]
+        # since = 原始答题时间。答题链(P4 的 pipeline)若已经写过解释,
+        # 这里的缓存就是新的,直接跳过 —— 否则一次答题会调两遍 LLM。
+        since = event.payload.get("since")
+        refreshed = [
+            kp for kp in kp_ids if self.refresh_explanation(event.learner_id, kp, not_before=since)
+        ]
         return {"status": "ok", "refreshed": refreshed, "checked": kp_ids}
 
     def handle_tick(self, event: Event) -> Dict[str, Any]:
@@ -92,44 +92,16 @@ class PlannerWorker:
         refreshed = [kp for kp in kp_ids if self.refresh_explanation(event.learner_id, kp)]
         return {"status": "ok", "refreshed": refreshed}
 
-    def refresh_explanation(self, learner_id: str, kp_id: str) -> bool:
-        """重算根因并（有缺口且配了 LLM 时）写入人话解释。返回是否写了缓存。"""
-        try:
-            view = self.service.gap_view(learner_id, kp_id)
-        except KeyError:
-            logger.warning("知识点不存在,跳过:%s", kp_id)
-            return False
+    def refresh_explanation(
+        self, learner_id: str, kp_id: str, not_before: Optional[float] = None
+    ) -> bool:
+        """重算根因并(有缺口且配了 LLM 时)写入人话解释。返回是否写了缓存。
 
-        if not view["root_causes"]:
-            return False  # 没有缺口就没什么可解释的
-        if self.llm is None:
-            return False  # 没配 LLM 时由 GET /gap 用模板兜底
-
-        try:
-            explanation = self._explain_with_llm(view)
-        except Exception:  # noqa: BLE001 — LLM 失败不该拖垮消费循环
-            logger.exception("生成根因解释失败:%s/%s", learner_id, kp_id)
-            return False
-
-        self.profile.set_gap_explanation(learner_id, kp_id, explanation)
-        return True
-
-    def _explain_with_llm(self, view: Dict) -> str:
-        lines = [
-            f"目标知识点:{view['name']}(当前掌握度 {view['mastery']:.2f})",
-            "前置缺口(按重要度排序):",
-        ]
-        for i, gap in enumerate(view["root_causes"], 1):
-            chain = " → ".join(gap.get("path") or [])
-            lines.append(
-                f"{i}. {gap['name']} 掌握度 {gap['mastery']:.2f}"
-                + (f",依赖路径 {chain}" if chain else "")
-            )
-        return self.llm.chat(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": "\n".join(lines)},
-            ]
+        not_before:答题链已经写过一次解释时,pipeline 会把事件时间戳带过来,
+        这里看到缓存够新就直接跳过 —— 否则同一次答题会调两遍 LLM。
+        """
+        return refresh_explanation(
+            self.service, self.profile, self.llm, learner_id, kp_id, not_before=not_before
         )
 
     # ---------------- 消费循环 ----------------

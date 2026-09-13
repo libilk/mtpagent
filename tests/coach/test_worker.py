@@ -84,49 +84,71 @@ class TestIdempotency:
         assert profile.get_mastery("u1", "algo.dp") == mastery_after_first
         assert len(profile.list_answers("u1")) == 1
 
-    def test_answer_id_uniqueness_blocks_double_counting_on_replay(self, worker, profile, problem):
-        """第二道闸:即使 processed_events 丢了(模拟恢复重放),画像也不会更新两次。"""
+    def test_answer_id_uniqueness_blocks_double_counting_on_replay(self, db_conn, profile, problem):
+        """第二道闸:processed_events 丢了(模拟恢复重放)时,answers 唯一键兜底。
+
+        注意要**不带 checkpointer** 才能测到这道闸 —— 带检查点时第二次执行会在
+        图层面直接跳到末尾,根本走不到判重那段(那是另一层保护,见 test_pipeline.py)。
+        """
+        from coach.coordination.journal import Journal
+        from coach.knowledge.store import KnowledgeStore
+        from coach.workers.profile_worker import ProfileWorker
+
+        worker = ProfileWorker(
+            profile, KnowledgeStore(db_conn), Journal(db_conn), bus=None, checkpointer=None
+        )
         event = answer_event()
         worker.handle(event)
         mastery_after_first = profile.get_mastery("u1", "algo.dp")
 
-        replay = worker.handle(event)  # 绕过 processed_events 直接重放
+        # 模拟幂等标记丢失(它没落盘、或者被清了),此时只剩 answers 唯一键兜底
+        profile.conn.execute(
+            "DELETE FROM processed_events WHERE event_id = ?", (event.event_id,)
+        )
+        profile.conn.commit()
+
+        replay = worker.handle(event)
 
         assert replay["status"] == "duplicate_answer"
         assert profile.get_mastery("u1", "algo.dp") == mastery_after_first
+        assert len(profile.list_answers("u1")) == 1
 
 
 class TestAtomicity:
     """★ 一次答题的写操作必须全成或全不成(见 profile/store.py transaction)。"""
 
     @staticmethod
-    def _crash_after_answer_insert(worker, monkeypatch):
-        """模拟:答题记录已写、掌握度还没写时进程被杀。"""
-        def boom(_learner_id, _kp_id, _memory):
+    def _crash_mid_transaction(profile, monkeypatch):
+        """模拟:答题记录已写、SM-2 还没写时进程被杀。"""
+
+        def boom(*_args, **_kwargs):
             raise RuntimeError("模拟进程被杀")
 
-        monkeypatch.setattr(worker, "_save_memory", boom)
+        monkeypatch.setattr(profile, "set_memory", boom)
 
     def test_partial_failure_rolls_back_everything(self, worker, profile, problem, monkeypatch):
-        self._crash_after_answer_insert(worker, monkeypatch)
+        self._crash_mid_transaction(profile, monkeypatch)
 
         with pytest.raises(RuntimeError):
             worker.process(answer_event())
+        monkeypatch.undo()
 
         # 答题记录必须一起回滚,否则恢复重放会以为已经处理过而跳过
         assert profile.list_answers("u1") == []
         assert profile.get_memory("u1", "algo.dp") is None
         assert profile.get_mastery("u1", "algo.dp") == config.BKT_P_INIT
 
-    def test_recovery_after_crash_applies_everything(self, worker, profile, journal, problem, monkeypatch):
+    def test_recovery_after_crash_applies_everything(
+        self, worker, profile, journal, problem, monkeypatch
+    ):
         event = answer_event()
-        self._crash_after_answer_insert(worker, monkeypatch)
+        self._crash_mid_transaction(profile, monkeypatch)
         with pytest.raises(RuntimeError):
             worker.process(event)
+        monkeypatch.undo()
         assert profile.get_mastery("u1", "algo.dp") == config.BKT_P_INIT
 
-        # 进程重启:关掉故障,走正常恢复路径
-        monkeypatch.undo()
+        # 进程重启:故障已排除,走正常恢复路径
         replayed = Recovery(journal).replay(worker.process)
 
         assert replayed == [event.event_id]
