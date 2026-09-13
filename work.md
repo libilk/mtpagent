@@ -9,7 +9,7 @@
 > 3. 很久没碰之后,直接跳到 §9 恢复指南
 >
 > **最后更新:** 2026-09-13
-> **当前阶段:** **P4 已完成**(答题链上了 LangGraph + checkpointer),下一步 **P5 评测 ★**
+> **当前阶段:** **P5 已完成**(四张表已产出,含负面结果),下一步 **P6 交付**
 
 ---
 
@@ -17,9 +17,10 @@
 
 **一句话:** 用知识图谱多跳推理定位"学不会的根因"的学习 Agent,并以量化评测证明图推理相比扁平检索的增益。
 
-**当前状态:** **P0~P3 已完成**,并已补齐跑通所需的零件(题目库、tick 生产者、LLM 装配、学习者建档)。
-截至 2026-09-13:`coach/` 约 4.5k 行,coach 测试 204 项 / 全量 354 项。
-未做:P5 评测、P6 交付。
+**当前状态:** **P0~P5 已完成**(只剩 P6 交付)。
+截至 2026-09-13:`coach/` 约 6k 行,coach 测试 235 项 / 全量 385 项。
+四张评测表已产出:**两张是负面结果**(BKT 预测不可用、规划没跑赢随机),已如实写进
+[evaluation/results/RESULTS.md](coach/evaluation/results/RESULTS.md) 的 Limitations。
 
 **唯一还没验的:**
 - **P1 的端到端验收欠一次真 Redis 实跑**(开发机 Docker 未启动)。目前 `<50ms` 是进程内
@@ -33,7 +34,7 @@
 | LLM 客户端 | [llm/llm_client.py](llm/llm_client.py) | 含 `chat_structured()`(返回 tool_calls + usage) |
 | JSON 解析 | [llm/output_parser.py](llm/output_parser.py) | 解析 LLM 抽取结果 |
 | 重试 | [core/error_handler.py](core/error_handler.py) | worker 内重试 |
-| 向量(暂不用) | [rag_core/chroma_store.py](rag_core/chroma_store.py) | P5 若需要再加 |
+| 向量(暂不用) | [rag_core/chroma_store.py](rag_core/chroma_store.py) | P5 的对照组若要升级成真 embedding 可用它 |
 | 归档参考 | [zanshibuyong/](zanshibuyong/) | 旧 orchestrator / MCP 实现,可参考 |
 
 **环境:** Python 虚拟环境在 `.venv/`(当前 3.14.5)。Redis 需单独启动。
@@ -63,10 +64,10 @@
                          ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ ③ 常驻 worker  coach/workers/  (asyncio,可水平扩展)            │
-│   profile_worker    判分(规则) → BKT → SM-2                   │
-│   planner_worker    ★ 根因定位(多跳图查询)/ 路径规划           │
+│   profile_worker    消费答题 → 交给 workflow/pipeline 跑完整链  │
+│   planner_worker    解释缓存过期时刷新(P4 起答题链自带解释)      │
 │   scheduler_worker  SM-2 到期扫描 → 生成复习计划                │
-│   run_all.py        开发期单进程拉起全部                        │
+│   run_all.py        开发期单进程拉起全部 + 定时发 tick           │
 └───────┬────────────────────┬─────────────────────────────────┘
         │                    │
         ▼                    ▼
@@ -80,8 +81,9 @@
 │   → proposal      │
 │   → aggregator    │  ┌──────────────────────────────────────┐
 └──────────────────┘  │ ⑥ 编排层  coach/workflow/             │
-                      │   pipeline.py 线性 async 链(P4 换      │
-                      │   LangGraph + checkpointer)           │
+                      │   pipeline.py LangGraph 答题链          │
+                      │   + checkpointer(断点恢复)             │
+                      │   query.py    只读门面(给 api 用)      │
                       └──────────────────────────────────────┘
 ```
 
@@ -429,7 +431,7 @@ coach/
 ├── workflow/
 │   ├── query.py                 # ✅ 只读门面(api 依赖它,不直接依赖图/画像)
 │   └── pipeline.py              # ✅ ★ LangGraph 链 + checkpointer(P4)
-├── evaluation/                  # —  P5 做
+├── evaluation/                  # ✅ P5 评测
 │   ├── simulated_student.py
 │   ├── metrics.py
 │   └── run_eval.py
@@ -609,18 +611,32 @@ coach/
 
 **目标:** 四张表,其中一张回答"图 vs 向量强多少"。
 
-- [ ] P5.1 `evaluation/simulated_student.py`:
-  - [ ] 给每个知识点预设"真实掌握度"(ground truth)
-  - [ ] 按掌握度概率生成答题结果(掌握了有 90% 答对)
-  - [ ] 支持生成 N 个学生 × M 次答题的轨迹
-- [ ] P5.2 `evaluation/metrics.py`:
-  - [ ] AUC / Brier(掌握度预测)
-  - [ ] 校准曲线(遗忘预测)
-  - [ ] 提升幅度(规划 vs 随机)
-  - [ ] ★ 根因定位准确率(图遍历 vs 纯向量召回)
-- [ ] P5.3 `evaluation/run_eval.py`:一键跑出四张表
-- [ ] P5.4 **对照组实现**:纯向量版根因定位(用 Chroma 或简单相似度)
-- [ ] P5.5 结果落 `evaluation/results/*.json` + 生成 markdown 表
+- [x] P5.1 `evaluation/simulated_student.py`:
+  - [x] 给每个知识点预设"真实掌握度"(ground truth)
+  - [x] 按掌握度概率生成答题结果
+  - [x] 支持生成 N 个学生 × M 次答题的轨迹
+  - [x] ★ **生成模型与 BKT 不同**(前置拖累 + 逻辑函数 + 遗忘),避免 §11 的循环论证
+- [x] P5.2 `evaluation/metrics.py`:
+  - [x] AUC / Brier(掌握度预测)
+  - [x] 校准曲线 + ECE(遗忘预测)
+  - [x] 提升幅度(规划 vs 随机)
+  - [x] ★ 根因定位准确率(图遍历 vs 扁平召回)
+- [x] P5.3 `evaluation/run_eval.py`:一键跑出四张表
+- [x] P5.4 **对照组实现**:`evaluation/baselines.py` 文本相似度版根因定位
+  - [x] 加「闭包内随机排序」第三臂,把「候选集大小」和「排序逻辑」分开
+- [x] P5.5 结果落 `evaluation/results/results.json` + `RESULTS.md`(含 Limitations)
+
+#### P5 结果与结论(种子 0,30 个模拟学生)
+
+| 表 | 结果 | 结论 |
+|---|---|---|
+| 1 掌握度预测 | AUC **0.5353**,Brier **0.2688** vs 基准率 0.25 | ❌ **负面**:比恒定预测基准率还差 |
+| 2 遗忘预测 | 隔 30 天 ECE 0.2397 → **0.3632**,平均预测 0.44 / 实际 0.08 | ✅ 印证 BKT 不建模遗忘 |
+| 3 规划增益 | 修掉"推荐无题项"后相对随机 **-1.19%** | ❌ **负面**:计划没跑赢随机 |
+| 4 ★ 根因定位(充分) | 图 **0.6267** / 闭包内随机 0.5067 / 扁平 **0.0667** | ✅ 图明显强于扁平召回 |
+| 4 ★ 根因定位(稀疏) | 图 **0.4933** / 闭包内随机 **0.6267** | ❌ **负面**:稀疏时排序反而有害 |
+
+完整数字与 8 条 Limitations 见 [coach/evaluation/results/RESULTS.md](coach/evaluation/results/RESULTS.md)。
 
 **交付物:** 四张评测表
 **验收标准:**
@@ -708,7 +724,7 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | P2 根因定位 ★ | ✅ 完成 | 2026-09-13 | 2026-09-13 | 123 项 coach 测试通过;验收场景(函数调用为根因)已断言 |
 | P3 遗忘+调度 | ✅ 完成 | 2026-09-13 | 2026-09-13 | 156 项 coach 测试通过;到期项进计划已断言 |
 | P4 工作流 | ✅ 完成 | 2026-09-13 | 2026-09-13 | LangGraph + SqliteSaver;崩溃恢复不重调 LLM 已用调用计数断言 |
-| P5 评测 ★ | ⬜ 未开始 | — | — | 差异化所在 |
+| P5 评测 ★ | ✅ 完成 | 2026-09-13 | 2026-09-13 | 四张表已产出;**两张是负面结果,已如实写进 Limitations** |
 | P6 交付 | ⬜ 未开始 | — | — | — |
 
 **图例:** ⬜ 未开始 · 🟡 进行中 · ✅ 完成 · ⛔ 阻塞
@@ -723,8 +739,11 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | 知识点数量贪多 | P0 拖长 | 严格卡 15 个,P1 再扩 | — |
 | Redis 环境没装 | P1 阻塞 | Docker 一行起 | — |
 | SM-2 参数凭感觉 | P3 效果差 | 先用经典默认值,评测阶段再调 | — |
-| 模拟学生 = 循环论证 | P5 结果不可信 | 模拟学生的生成模型要与 BKT 假设**不同**;诚实写 Limitations | 需注意 |
-| 图可能不比向量强 | 卖点站不住 | **这本身就是结论**,写进 Limitations | 待 P5 验证 |
+| 模拟学生 = 循环论证 | P5 结果不可信 | 已做:生成模型与 BKT 不同(前置拖累 + 逻辑函数 + 遗忘) | ✅ 已缓解 |
+| 图可能不比向量强 | 卖点站不住 | **已测**:作答充分时图 0.6267 vs 扁平 0.0667,图明显强 | ✅ 站住了 |
+| ★ **BKT 预测基本不可用** | 掌握度预测 AUC 0.5353 / Brier 比基准率还差 | 已测出并如实写进 Limitations;要改得动 §5.3 的参数或公式 | **新发现,未解决** |
+| ★ **规划没跑赢随机** | 计划的卖点未被验证 | 已测出(-1.19%);先修「推荐必须可落地」再重跑 | **新发现,未解决** |
+| ★ **证据稀疏时排序有害** | 图遍历 0.4933 反低于闭包内随机 0.6267 | 根因:未观测的点(掌握度停在 0.1)被当成缺口排到前面。修法方向:区分「未观测」与「已观测且弱」 | **新发现,未解决** |
 | **BKT 全对时饱和到 1.0**(约 10 次) | P5 校准曲线/置信度会失真 | 照抄 §5.3 不改公式;P5 若校准差,再考虑加参数或改公式并记录 | 已发现 |
 | **没作答记录的前置会被算成缺口** | 根因列表被"从没考过的点"挤占,学生见过的真缺口排到后面 | 这是 §5.5 的既定行为(未记录 = 掌握度初始值 0.1 < 0.4);P5 评测时要么用有作答轨迹的学生,要么显式区分"未观测"与"已观测且弱" | 需注意 |
 | ~~LLM 抽取的 id 与人工金标准对不上~~ | 治理按 id 判重会让同一概念长成两个节点,污染前置闭包 | **已解决(2026-09-13)**:① 抽取时把已有概念清单喂给 LLM 要求复用 id;② 治理层按**名字**归并 —— 同名提案不新增节点,引用别名的边改指规范 id。真实调用复验:修复前 LLM 给 `algo.merge_sort` / 22→23 个节点;修复后给 `algo.mergesort` / 22→22 | ✅ 已解决 |
@@ -771,3 +790,5 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | 2026-09-13 | **修复(id 漂移)**:① `builder.extract(known_concepts=...)` 把已有概念清单喂给 LLM 要求复用 id;② 治理层新增第 5 条规则「同名归并」(`normalize_name` 去空白+小写,同名提案拒绝入库并记别名,引用别名的边自动改指规范 id)。observation 保留 LLM 原始输出以便追溯。真实调用复验:22→22 个节点,无重复;新增 13 项测试(`test_id_drift.py`)。coach 186 项 / 全量 336 passed |
 | 2026-09-13 | **P4 完成**:`workflow/pipeline.py` 用 LangGraph 承载答题链(`grade → update_profile → detect_gap → [explain] → finalize`),带 checkpointer。踩到的坑:langgraph 要接着跑必须 `invoke(None, config)`,传新 state 会从头开始 —— 第一版就是这么写的,LLM 被重复调用,是测试的调用计数抓出来的。新增 `test_pipeline.py` 18 项;coach 204 项 / 全量 354 passed |
 | 2026-09-13 | 偏离记录(P4):① §2.2 的 [2]BKT 与 [3]SM-2 合并为 `update_profile` 一个节点(必须原子);② LLM 生成解释进了链(`explain` 节点),plan 仍归 scheduler;③ 检查点单独一个库文件 `data/coach/checkpoints.db`(SqliteSaver 自带 commit,共用连接会破坏事务原子性);④ `planner_worker` 的解释职责降级为「缓存过期才刷新」(避免同一次答题调两遍 LLM);⑤ 第 4/5 个依赖:`langgraph` `langgraph-checkpoint-sqlite` |
+| 2026-09-13 | **P5 完成**:模拟学生(生成模型与 BKT 不同)+ 指标 + 扁平召回对照组 + 一键跑四张表。**结论是混合的**:根因定位图 0.6267 vs 扁平 0.0667(赢);但表 1 BKT 预测比基准率还差、表 3 计划相对随机 -1.19%、表 4 稀疏条件下排序反而有害。全部如实写进 RESULTS.md 的 8 条 Limitations。coach 235 项 / 全量 385 passed |
+| 2026-09-13 | 评测实现中修掉三处**自身的方法论错误**(若不修,数字就是假的):① 忘了 `mark_practiced`,导致遗忘实验整段失效;② 规划实验的"白费步数"没计数,**83% 的步数浪费在"推荐了没有题目的知识点"上**;③ 扁平基线把"未观测"当成 mastery 0.0,比真值还低,于是专挑毫无证据的点(那个 0.0 的假结果就是这么来的) |
