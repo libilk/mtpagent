@@ -90,3 +90,18 @@ def init_schema(conn: sqlite3.Connection) -> None:
     """建表(幂等)。"""
     conn.executescript(DDL)
     conn.commit()
+
+
+def open_db(
+    path: Optional[Union[str, Path]] = None,
+    check_same_thread: bool = True,
+) -> sqlite3.Connection:
+    """连接 + 建表,一步到位。
+
+    **新代码请用这个,别直接用 `connect()`** —— `connect` 只连接不建表,
+    对着一个全新的库文件直接写会报 "no such table"。这个坑踩过两次
+    (demo 和 run_all 各自在全新库上挂过),所以在这里统一掉。
+    """
+    conn = connect(path, check_same_thread=check_same_thread)
+    init_schema(conn)
+    return conn

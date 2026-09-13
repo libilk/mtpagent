@@ -17,7 +17,7 @@ from typing import Dict, List, Optional
 
 from coach import config
 from coach.knowledge import queries
-from coach.knowledge.schema import connect
+from coach.knowledge.schema import open_db
 from coach.knowledge.store import KnowledgeStore
 from coach.profile import sm2
 from coach.profile.store import ProfileStore
@@ -289,5 +289,5 @@ def build_default_query_service(db_path=None) -> QueryService:
     从而满足「api 不许 import knowledge/profile」的硬约束。
     连接用 check_same_thread=False:FastAPI 的同步路由跑在线程池里。
     """
-    conn = connect(db_path, check_same_thread=False)
+    conn = open_db(db_path, check_same_thread=False)
     return QueryService(KnowledgeStore(conn), ProfileStore(conn))

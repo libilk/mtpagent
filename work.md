@@ -9,7 +9,7 @@
 > 3. 很久没碰之后,直接跳到 §9 恢复指南
 >
 > **最后更新:** 2026-09-13
-> **当前阶段:** **P5 已完成**(四张表已产出,含负面结果),下一步 **P6 交付**
+> **当前阶段:** **P0~P6 全部完成**。剩余是 §11.1 的待解决问题(计划链路、BKT、真 Redis 验收)
 
 ---
 
@@ -17,11 +17,11 @@
 
 **一句话:** 用知识图谱多跳推理定位"学不会的根因"的学习 Agent,并以量化评测证明图推理相比扁平检索的增益。
 
-**当前状态:** **P0~P5 已完成**(只剩 P6 交付)。
+**当前状态:** **P0~P6 全部完成**。
 截至 2026-09-13:`coach/` 约 6k 行,coach 测试 242 项 / 全量 392 项。
 四张评测表已产出:**两张是负面结果**(BKT 预测不可用、规划没跑赢随机),已如实写进
 [evaluation/results/RESULTS.md](coach/evaluation/results/RESULTS.md) 的 Limitations。
-根因定位那张(核心卖点)经两态区分修复后,**两个条件都反超对照组**(0.6935 / 0.6290)。
+根因定位那张(核心卖点)经两态区分修复后,**两个条件都反超对照组**(0.6774 / 0.7258;详见 §7 P5)。
 
 **唯一还没验的:**
 - **P1 的端到端验收欠一次真 Redis 实跑**(开发机 Docker 未启动)。目前 `<50ms` 是进程内
@@ -56,7 +56,7 @@
                          ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ ② 事件与协调层  coach/events/ + coach/coordination/            │
-│   bus.py       事件总线                                       │
+│   redis.py     Redis Stream / memory.py 进程内总线(demo 用)  │
 │   redis.py     Redis Stream(消费组)                          │
 │   journal.py   ★ append-only 事件日志(先记后做)               │
 │   recovery.py  ★ 重启后扫 journal + pending,补做未完成事件     │
@@ -405,6 +405,7 @@ def has_cycle(edges: list[tuple[str, str]]) -> bool:
 ```
 coach/
 ├── config.py                    # ✅ 路径 + 全部算法默认参数
+├── demo.py                      # ✅ 两分钟 demo(起真 uvicorn,零外部依赖)
 ├── domain/
 │   ├── models.py                # ✅ 领域模型
 │   ├── ids.py                   # ✅ ULID(§4.3 要求)
@@ -422,7 +423,7 @@ coach/
 │   └── store.py                 # ✅ §4.2 建表 + 读写 + 幂等表
 ├── events/
 │   ├── schema.py                # ✅ 事件信封 + 类型
-│   └── bus.py                   # —  暂无进程内总线需求(P3 用轮询)
+│   └── memory.py                # ✅ 进程内总线(demo / 测试,无持久化)
 ├── coordination/
 │   ├── redis.py                 # ✅ Redis Stream / 消费组 / 死信
 │   ├── journal.py               # ✅ ★ append-only
@@ -637,8 +638,8 @@ coach/
 | 1 掌握度预测 | AUC **0.5353**,Brier **0.2688** vs 基准率 0.25 | ❌ **负面**:比恒定预测基准率还差 |
 | 2 遗忘预测 | 隔 30 天 ECE 0.2397 → **0.3632**,平均预测 0.44 / 实际 0.08 | ✅ 印证 BKT 不建模遗忘 |
 | 3 规划增益 | 修掉"推荐无题项"后相对随机 **-8.0%** | ❌ **负面**:计划没跑赢随机 |
-| 4 ★ 根因定位(充分) | 两态 **0.6935** / 消融 0.6290 / 闭包内随机 0.6129 / 扁平 **0.2258** | ✅ 图最强 |
-| 4 ★ 根因定位(稀疏) | 两态 **0.6290** / 消融 0.5484 / 闭包内随机 0.5484 / 扁平 **0.1774** | ✅ 图最强 |
+| 4 ★ 根因定位(充分) | 两态 **0.6774** / 消融 0.6129 / 闭包内随机 0.6129 / 扁平 **0.1290** | ✅ 图最强 |
+| 4 ★ 根因定位(稀疏) | 两态 **0.7258** / 消融 0.6129 / 闭包内随机 0.5484 / 扁平 **0.1774** | ✅ 图最强 |
 
 > 表 4 的「消融」臂 = 同样候选集、同样排序公式,唯一差别是**不区分「未观测」与「已观测且弱」**
 > (即 2026-09-13 修复前的行为)。两态区分带来 **+6.5 / +11.3 个点**,是实测不是声称。
@@ -657,12 +658,29 @@ coach/
 
 ### P6 — 交付
 
-- [ ] P6.1 README(结构参考 [mainconten.md](mainconten.md) §7 的叙事)
-- [ ] P6.2 `docker-compose.yml`(redis + api + worker)
-- [ ] P6.3 录 2 分钟 demo
-- [ ] P6.4 把评测结果表放进 README 最前面
+- [x] P6.1 README(叙事参考 [mainconten.md](mainconten.md) §7):[README.md](README.md)
+- [ ] ~~P6.2 `docker-compose.yml`~~ **主动跳过**,理由见下
+- [x] P6.3 2 分钟 demo:**改成可复跑的脚本**而非录像 —— [coach/demo.py](coach/demo.py) + [demo.sh](demo.sh)
+- [x] P6.4 评测结果表放进 README 最前面
+- [x] P6.5 额外:`coordination/memory.py`(进程内总线)+ `run_all --bus/--seed-only`
+- [x] P6.6 额外:`requirements-coach.txt`(与作品集 A 的重依赖分开)
 
-**验收标准:** 别人 `git clone` + 2 条命令能跑起来
+**验收标准:** 别人 `git clone` + 装依赖 + 一条 `./demo.sh` 能跑起来 ✅ **已实测**
+
+#### P6.2 为什么跳过 docker-compose
+
+`docker-compose.yml` 我**没法验证** —— 开发机 Docker daemon 没启动。交付物里放一个
+"我没跑过"的 compose 文件,和这个项目一贯的标准冲突(所有数字都要求有实测出处)。
+所以选择**不写**,并在 README 里如实说明容器化未做,而不是塞一个没人验证过的配置。
+
+作为补偿,把**本地路径**做到真的跑得起来:demo 不依赖 Redis / Docker / LLM key,
+任何 `git clone` 之后都能看到完整链路。
+
+#### P6.3 为什么是脚本不是录像
+
+录像看完就完了;脚本可以被复跑、被 diff、被 CI 跑,README 里贴的是它的真实输出。
+`coach/demo.py` 起的是**真实的 uvicorn 服务**、打的是**真 HTTP 请求**,不是内部函数调用
+—— 所以它同时验证了 API 层真的能工作。
 
 ---
 
@@ -691,6 +709,10 @@ docker run -d -p 6379:6379 --name coach-redis redis:7-alpine
 .venv/Scripts/python.exe -m uvicorn coach.api.main:app --reload --port 8000
 .venv/Scripts/python.exe -m coach.workers.run_all        # 另开终端
 
+# P6:两分钟 demo(不需要 Redis / Docker / LLM key)
+./demo.sh
+.venv/Scripts/python.exe -m coach.demo --learner u1 --goal algo.dp
+
 # 测试
 .venv/Scripts/python.exe -m pytest tests/coach/ -q
 
@@ -708,7 +730,7 @@ docker run -d -p 6379:6379 --name coach-redis redis:7-alpine
 2. **看 §10 进度台账** —— 知道停在哪
 3. **跑 `pytest tests/coach/ -q`** —— 确认当前代码是绿的
 4. **看 §11.1 待解决问题** —— 按优先级挑一条开工(每条都带证据和该改哪个文件)
-5. **从台账里第一个未完成阶段继续**(目前只剩 P6)
+5. **从 §11.1 挑一条开工**(P0~P6 已全部完成,剩下的是待解决问题清单)
 
 **如果连环境都忘了:**
 ```bash
@@ -732,7 +754,7 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | P3 遗忘+调度 | ✅ 完成 | 2026-09-13 | 2026-09-13 | 156 项 coach 测试通过;到期项进计划已断言 |
 | P4 工作流 | ✅ 完成 | 2026-09-13 | 2026-09-13 | LangGraph + SqliteSaver;崩溃恢复不重调 LLM 已用调用计数断言 |
 | P5 评测 ★ | ✅ 完成 | 2026-09-13 | 2026-09-13 | 四张表已产出;**两张是负面结果,已如实写进 Limitations** |
-| P6 交付 | ⬜ 未开始 | — | — | — |
+| P6 交付 | ✅ 完成 | 2026-09-13 | 2026-09-13 | README + demo.sh + memory 总线;**跳过 docker-compose(无法验证)** |
 
 **图例:** ⬜ 未开始 · 🟡 进行中 · ✅ 完成 · ⛔ 阻塞
 
@@ -772,7 +794,7 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | # | 问题 | 说明 |
 |---|---|---|
 | ✅ | ~~四类关系里三类是死的~~ | **已解决(2026-09-13)**:读源码确认"四类"是错记(WeSmartFlow 实为 8 类 + embedding 探针,且无 per-type 分支)。决定**只留 PREREQUISITE 做深**,`EDGE_TYPES` 收窄,种子里 7 条非前置边移除,抽取提示词同步改掉。见 §11.3 |
-| 9 | `profile/errors.py`、`events/bus.py` | §6 目录树里列了,至今是空壳 |
+| 9 | `profile/errors.py` | §6 目录树里列了,至今是空壳(易错计数目前直接在 store.py 里) |
 | 10 | `next_to_learn` 有 N+1 查询 | 循环里逐个 `store.ancestors(kp, 1)`。22 个点无所谓,P5 放大规模时会疼 |
 | 11 | 概念上千后 prompt 塞不下 | `known_concepts` 是全量塞;要改成按相似度召回相关概念 |
 
@@ -780,7 +802,7 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 
 | # | 问题 | 说明 |
 |---|---|---|
-| 12 | P6 交付 | README(结构与叙事参考 mainconten §7)| `docker-compose.yml` | 2 分钟 demo | **评测表放进 README 最前面** |
+| ✅ | ~~P6 交付~~ | **已完成(2026-09-13)**:README(评测表放最前)+ `demo.sh`(零外部依赖、可复跑)+ `requirements-coach.txt`。`docker-compose.yml` 主动跳过 —— 无法验证的东西不进交付物 |
 
 ### 11.3 对标调研发现(2026-09-13,读源码,非 README)
 
@@ -829,10 +851,10 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | ~~Redis 环境没装~~ | P1 阻塞 | Docker 一行起 —— **但开发机 Docker 至今没启动,端到端验收仍欠** | ⚠️ 见 #6 |
 | SM-2 参数凭感觉 | P3 效果差 | 用了经典默认值 + 自定的 q 映射(答对=4/答错=1),**评测阶段没调** | 需注意 |
 | 模拟学生 = 循环论证 | P5 结果不可信 | 已做:生成模型与 BKT 不同(前置拖累 + 逻辑函数 + 遗忘) | ✅ 已缓解 |
-| 图可能不比向量强 | 卖点站不住 | **已测**:作答充分时图 0.6267 vs 扁平 0.0667,图明显强 | ✅ 站住了 |
+| 图可能不比向量强 | 卖点站不住 | **已测**:作答充分时图 0.6774 vs 扁平 0.1290,图明显强 | ✅ 站住了 |
 | ★ **BKT 预测基本不可用** | 掌握度预测 AUC 0.5353 / Brier 比基准率还差 | 已测出并如实写进 Limitations;要改得动 §5.3 的参数或公式 | **未解决**(见 §11.1 #3) |
 | ★ **规划没跑赢随机** | 计划的卖点未被验证 | 已测出(-8.0%);先修「推荐必须可落地」再重跑 | **未解决**(见 §11.1 #2/#4) |
-| ~~证据稀疏时排序有害~~ | 图遍历 0.4933 反低于闭包内随机 0.6267 | **已解决(2026-09-13)**:两态区分后稀疏条件 0.6290 > 0.5484 | ✅ |
+| ~~证据稀疏时排序有害~~ | 图遍历 0.4933 反低于闭包内随机 0.6267 | **已解决(2026-09-13)**:两态区分后稀疏条件 0.7258 > 0.5484 | ✅ |
 | **BKT 全对时饱和到 1.0**(约 10 次) | P5 校准曲线/置信度会失真 | 照抄 §5.3 不改公式;P5 若校准差,再考虑加参数或改公式并记录 | 已发现 |
 | ~~没作答记录的前置会被算成缺口~~ | 根因列表被"从没考过的点"挤占 | **已解决(2026-09-13)**:见 §11.1 #1 | ✅ |
 | ~~LLM 抽取的 id 与人工金标准对不上~~ | 治理按 id 判重会让同一概念长成两个节点,污染前置闭包 | **已解决(2026-09-13)**:① 抽取时把已有概念清单喂给 LLM 要求复用 id;② 治理层按**名字**归并 —— 同名提案不新增节点,引用别名的边改指规范 id。真实调用复验:修复前 LLM 给 `algo.merge_sort` / 22→23 个节点;修复后给 `algo.mergesort` / 22→22 | ✅ 已解决 |
@@ -886,3 +908,6 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | 2026-09-13 | **修复 §11.1 #1(未观测当缺口)**:`ProfileStore.observed_kp_ids()` 让画像能表达"无记录";`detect_gaps` 加 `observed` + `status`,排序改 `(status_rank, depth, mastery)`。新增**消融臂**做对照:同样候选集/排序公式,只是不区分两态 —— 实测 +6.5 / +11.3 个点,两个条件都反超闭包内随机。同步修了评测的一处**度量效度问题**(ground truth 选到了没题的知识点,系统原理上不可能定位到) |
 | 2026-09-13 | **收窄为只做 PREREQUISITE**:`EDGE_TYPES` 只剩一种,种子里 7 条 RELATED/EXTENDS/CONTRASTS 移除(图 22 点 / 27 → **20 边**),**抽取提示词同步改掉**(否则 LLM 输出的三类会被治理层拒,是隐藏的功能牵连)。`edges.type` 列保留(CTE 过滤键 + 索引,删列收益不抵风险),已在 §4.1 注明是有意取舍 |
 | 2026-09-13 | 新发现局限已写进 RESULTS.md:没有题目的知识点永远无法被观测 → **原理上无法被定位为根因**;这类点标 `unobserved` 并提示"该去测",不伪装成"已确认薄弱" |
+| 2026-09-13 | **P6 完成**:`README.md`(评测表放最前 + 7 条 Limitations)+ `demo.sh`/`coach/demo.py`(起真 uvicorn、打真 HTTP、**零外部依赖**)+ `requirements-coach.txt`。**主动跳过 `docker-compose.yml`** —— 开发机 Docker daemon 未启动,写一个没验证过的交付物与本项目标准冲突,README 里已如实说明 |
+| 2026-09-13 | 修复(全新库踩坑):`schema.connect()` 只连接不建表,导致 `demo` 与 `run_all` 在全新数据库上都会报 `no such table`。新增 `schema.open_db()` = 连接 + 建表,demo / run_all / query 工厂统一改用它 |
+| 2026-09-13 | `coach/coordination/memory.py`:把测试里的 `FakeBus` 收编为正式代码 `InMemoryBus`,测试与 demo 共用一份实现,避免两套漂移 |

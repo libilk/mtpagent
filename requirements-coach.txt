@@ -1,0 +1,28 @@
+# coach 项目的依赖(work.md §3)
+#
+# 安装:
+#   uv pip install --python .venv/Scripts/python.exe -r requirements-coach.txt
+#   # 或(venv 里有 pip 时)
+#   .venv/bin/pip install -r requirements-coach.txt
+#
+# 注意:仓库根目录的 requirements.txt 是**作品集 A(合同审查 Agent)**的,
+# 装了 torch / chromadb 等一堆重依赖;跑 coach 不需要它们。
+
+# Web 入口(api/)
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
+# 队列(coordinator/)。P1 起需要,没有 Redis 时可用 --bus memory 跑 demo
+redis>=5.0
+
+# 答题链的断点恢复(P4)
+langgraph>=0.2
+langgraph-checkpoint-sqlite>=2.0
+
+# 测试与 demo:fastapi.testclient 依赖它
+pytest>=7.0
+httpx>=0.27
+
+# LLM(可选):复用仓库已有的 llm/llm_client.py,需要 openai 客户端
+# 不装也能跑 —— 根因解释会退化成模板文案
+openai>=1.0.0

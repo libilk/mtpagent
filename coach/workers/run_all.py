@@ -33,7 +33,8 @@ from coach.coordination.journal import Journal
 from coach.coordination.redis import RedisBus
 from coach.coordination.recovery import Recovery
 from coach.events import schema as events
-from coach.knowledge.schema import connect
+from coach.knowledge import builder
+from coach.knowledge.schema import open_db
 from coach.knowledge.store import KnowledgeStore
 from coach.profile.store import ProfileStore
 from coach.workers.planner_worker import PlannerWorker
@@ -69,13 +70,22 @@ def build_llm(enabled: bool):
         return None
 
 
-def build_workers(db_path=None, llm=None, checkpoint_path=None) -> tuple:
+def make_bus(kind: str = "redis"):
+    """总线实现。memory 只用于离线 demo / 本地跑通,不具备消费组与持久化。"""
+    if kind == "memory":
+        from coach.coordination.memory import InMemoryBus
+
+        return InMemoryBus()
+    return RedisBus()
+
+
+def build_workers(db_path=None, llm=None, checkpoint_path=None, bus=None) -> tuple:
     """装配全部 worker。连接按 worker 的跨线程用法开(check_same_thread=False)。"""
-    conn = connect(db_path, check_same_thread=False)
+    conn = open_db(db_path, check_same_thread=False)
     knowledge = KnowledgeStore(conn)
     profile = ProfileStore(conn)
     journal = Journal(conn)
-    bus = RedisBus()
+    bus = bus if bus is not None else RedisBus()
 
     from coach.workflow.query import QueryService
 
@@ -93,6 +103,35 @@ def build_workers(db_path=None, llm=None, checkpoint_path=None) -> tuple:
         SchedulerWorker(knowledge, profile, journal, bus=bus, service=service),
     ]
     return workers, bus, conn, profile
+
+
+def seed(db_path=None, learner_id: Optional[str] = None, goal: Optional[str] = None,
+         daily_minutes: int = 30) -> dict:
+    """把图、题目、学习者都准备好。只碰 SQLite,不依赖 Redis。
+
+    `--seed-only` 走这条路,给 docker-compose 的一次性初始化用。
+    """
+    conn = open_db(db_path, check_same_thread=False)
+    try:
+        knowledge = KnowledgeStore(conn)
+        profile = ProfileStore(conn)
+
+        from coach.knowledge.governance import Governance
+
+        report = builder.seed_graph(Governance(knowledge))
+        problems = builder.seed_problems(knowledge)
+        if learner_id:
+            init_learner(profile, learner_id, goal, daily_minutes)
+
+        return {
+            "concepts": len(knowledge.list_concepts()),
+            "edges": len(knowledge.list_edges()),
+            "problems": len(knowledge.list_problems()),
+            "seed_report": report.summary(),
+            "seeded_problems": problems,
+        }
+    finally:
+        conn.close()
 
 
 def init_learner(
@@ -129,9 +168,15 @@ async def tick_loop(bus: RedisBus, profile: ProfileStore, interval: float) -> No
 
 
 async def main_async(args) -> None:
+    # `--seed-only`:只把图/题目/学习者准备好就退出。给容器初始化用,不碰 Redis。
+    if args.seed_only:
+        stats = seed(args.db, args.init_learner, args.goal, args.daily_minutes)
+        logger.info("初始化完成:%s", stats)
+        return
+
     llm = build_llm(enabled=not args.no_llm)
     workers, bus, conn, profile = build_workers(
-        args.db, llm=llm, checkpoint_path=args.checkpoint_db
+        args.db, llm=llm, checkpoint_path=args.checkpoint_db, bus=make_bus(args.bus)
     )
 
     # 建档只碰 SQLite,不依赖 Redis —— 放在 ping 之前,免得没起 Redis 就建不了档案
@@ -200,6 +245,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="LangGraph 检查点库(单独一个文件,避免和主库事务互相干扰)",
     )
     parser.add_argument("--no-llm", action="store_true", help="不装配 LLM(解释退化为模板)")
+    parser.add_argument(
+        "--bus",
+        choices=("redis", "memory"),
+        default="redis",
+        help="总线实现。memory = 进程内、无持久化,只给离线 demo 用",
+    )
+    parser.add_argument(
+        "--seed-only",
+        action="store_true",
+        help="只建图/灌题/建档然后退出(容器初始化用,不依赖 Redis)",
+    )
     parser.add_argument("--init-learner", metavar="LEARNER_ID", help="建档一个学习者")
     parser.add_argument("--goal", default=None, help="目标知识点 id,如 algo.dp")
     parser.add_argument("--daily-minutes", type=int, default=30, help="每日学习预算(分钟)")
