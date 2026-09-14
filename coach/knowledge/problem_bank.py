@@ -36,6 +36,10 @@ BKT**(错误答案被判对,BKT 就学到假信号)。
     python -m coach.knowledge.problem_bank --from-file my_bank.json
     python -m coach.knowledge.problem_bank --from-url https://example.com/problems.json
     python -m coach.knowledge.problem_bank --coverage      # 看哪些知识点还没有题
+    python -m coach.knowledge.problem_bank --from-leetcode top-100-liked   # 直接从 LeetCode 题单导入
+
+(想先把映射过一遍再入库,用 `coach.knowledge.leetcode_import` 生成 JSON,
+它只写文件不碰库,产物可以用 `--from-file` 再导入。)
 """
 
 import argparse
@@ -166,6 +170,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--db", default=None, help="SQLite 路径,默认 data/coach/coach.db")
     parser.add_argument("--from-file", help="从本地 JSON 文件导入")
     parser.add_argument("--from-url", help="从 URL 拉取并导入")
+    parser.add_argument("--from-leetcode", metavar="PLAN", help="从 LeetCode 学习计划导入,如 top-100-liked")
     parser.add_argument("--seed", action="store_true", help="导入内置题库")
     parser.add_argument("--list", action="store_true", help="列出当前库里的题目")
     parser.add_argument("--coverage", action="store_true", help="看哪些知识点还没有题")
@@ -201,6 +206,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             batches.append((args.from_file, import_problems(knowledge, load_from_file(args.from_file))))
         if args.from_url:
             batches.append((args.from_url, import_problems(knowledge, fetch_remote(args.from_url))))
+        if args.from_leetcode:
+            from coach.knowledge import leetcode_import
+
+            bank, report = leetcode_import.to_bank(args.from_leetcode, sleep=0.25)
+            print(leetcode_import.format_report(report))
+            batches.append(
+                (f"leetcode:{args.from_leetcode}", import_problems(knowledge, parse_bank(bank)))
+            )
 
         for label, result in batches:
             print(f"\n{label}:写入 {result['written']} 道")

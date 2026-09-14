@@ -1,0 +1,1932 @@
+{
+  "name": "LeetCode 学习计划 —— top-100-liked",
+  "note": "由 coach/knowledge/leetcode_import.py 从 leetcode.cn 公开接口生成。test_cases 是题面示例(最后一条当提交用例),不是官方判题数据。",
+  "problems": [
+    {
+      "id": "lc.128",
+      "title": "最长连续序列",
+      "source": "leetcode:128",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.hash_table"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[0,3,7,2,5,8,4,6,0,1]",
+          "expected": "9"
+        },
+        {
+          "input": "nums=[1,0,1,2]",
+          "expected": "3"
+        },
+        {
+          "input": "nums=[100,4,200,1,3,2]",
+          "expected": "4"
+        }
+      ]
+    },
+    {
+      "id": "lc.283",
+      "title": "移动零",
+      "source": "leetcode:283",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.two_pointers"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[0]",
+          "expected": "[0]"
+        },
+        {
+          "input": "nums=[0,1,0,3,12]",
+          "expected": "[1,3,12,0,0]"
+        }
+      ]
+    },
+    {
+      "id": "lc.11",
+      "title": "盛最多水的容器",
+      "source": "leetcode:11",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.two_pointers"
+      ],
+      "test_cases": [
+        {
+          "input": "height=[1,1]",
+          "expected": "1"
+        },
+        {
+          "input": "height=[1,8,6,2,5,4,8,3,7]",
+          "expected": "49"
+        }
+      ]
+    },
+    {
+      "id": "lc.42",
+      "title": "接雨水",
+      "source": "leetcode:42",
+      "difficulty": 4.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.two_pointers"
+      ],
+      "test_cases": [
+        {
+          "input": "height=[4,2,0,3,2,5]",
+          "expected": "9"
+        },
+        {
+          "input": "height=[0,1,0,2,1,0,1,3,2,1,2,1]",
+          "expected": "6"
+        }
+      ]
+    },
+    {
+      "id": "lc.3",
+      "title": "无重复字符的最长子串",
+      "source": "leetcode:3",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.sliding_window"
+      ],
+      "test_cases": [
+        {
+          "input": "s=\"bbbbb\"",
+          "expected": "1"
+        },
+        {
+          "input": "s=\"pwwkew\"",
+          "expected": "3"
+        },
+        {
+          "input": "s=\"abcabcbb\"",
+          "expected": "3"
+        }
+      ]
+    },
+    {
+      "id": "lc.438",
+      "title": "找到字符串中所有字母异位词",
+      "source": "leetcode:438",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.sliding_window"
+      ],
+      "test_cases": [
+        {
+          "input": "s=\"abab\", p=\"ab\"",
+          "expected": "[0,1,2]"
+        },
+        {
+          "input": "s=\"cbaebabacd\", p=\"abc\"",
+          "expected": "[0,6]"
+        }
+      ]
+    },
+    {
+      "id": "lc.560",
+      "title": "和为 K 的子数组",
+      "source": "leetcode:560",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.sliding_window"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[1,2,3], k=3",
+          "expected": "2"
+        },
+        {
+          "input": "nums=[1,1,1], k=2",
+          "expected": "2"
+        }
+      ]
+    },
+    {
+      "id": "lc.239",
+      "title": "滑动窗口最大值",
+      "source": "leetcode:239",
+      "difficulty": 4.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.sliding_window"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[1], k=1",
+          "expected": "[1]"
+        },
+        {
+          "input": "nums=[1,3,-1,-3,5,3,6,7], k=3",
+          "expected": "[3,3,5,5,6,7]"
+        }
+      ]
+    },
+    {
+      "id": "lc.76",
+      "title": "最小覆盖子串",
+      "source": "leetcode:76",
+      "difficulty": 4.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.sliding_window"
+      ],
+      "test_cases": [
+        {
+          "input": "s=\"a\", t=\"a\"",
+          "expected": "\"a\""
+        },
+        {
+          "input": "s=\"a\", t=\"aa\"",
+          "expected": "\"\""
+        },
+        {
+          "input": "s=\"ADOBECODEBANC\", t=\"ABC\"",
+          "expected": "\"BANC\""
+        }
+      ]
+    },
+    {
+      "id": "lc.53",
+      "title": "最大子数组和",
+      "source": "leetcode:53",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.array"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[1]",
+          "expected": "1"
+        },
+        {
+          "input": "nums=[5,4,-1,7,8]",
+          "expected": "23"
+        },
+        {
+          "input": "nums=[-2,1,-3,4,-1,2,1,-5,4]",
+          "expected": "6"
+        }
+      ]
+    },
+    {
+      "id": "lc.189",
+      "title": "轮转数组",
+      "source": "leetcode:189",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.array"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[-1,-100,3,99], k=2",
+          "expected": "[3,99,-1,-100]"
+        },
+        {
+          "input": "nums=[1,2,3,4,5,6,7], k=3",
+          "expected": "[5,6,7,1,2,3,4]"
+        }
+      ]
+    },
+    {
+      "id": "lc.238",
+      "title": "除了自身以外数组的乘积",
+      "source": "leetcode:238",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.array"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[-1,1,0,-3,3]",
+          "expected": "[0,0,9,0,0]"
+        },
+        {
+          "input": "nums=[1,2,3,4]",
+          "expected": "[24,12,8,6]"
+        }
+      ]
+    },
+    {
+      "id": "lc.41",
+      "title": "缺失的第一个正数",
+      "source": "leetcode:41",
+      "difficulty": 4.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.array"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[3,4,-1,1]",
+          "expected": "2"
+        },
+        {
+          "input": "nums=[7,8,9,11,12]",
+          "expected": "1"
+        },
+        {
+          "input": "nums=[1,2,0]",
+          "expected": "3"
+        }
+      ]
+    },
+    {
+      "id": "lc.73",
+      "title": "矩阵置零",
+      "source": "leetcode:73",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.array"
+      ],
+      "test_cases": [
+        {
+          "input": "matrix=[[0,1,2,0],[3,4,5,2],[1,3,1,5]]",
+          "expected": "[[0,0,0,0],[0,4,5,0],[0,3,1,0]]"
+        },
+        {
+          "input": "matrix=[[1,1,1],[1,0,1],[1,1,1]]",
+          "expected": "[[1,0,1],[0,0,0],[1,0,1]]"
+        }
+      ]
+    },
+    {
+      "id": "lc.54",
+      "title": "螺旋矩阵",
+      "source": "leetcode:54",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.array"
+      ],
+      "test_cases": [
+        {
+          "input": "matrix=[[1,2,3,4],[5,6,7,8],[9,10,11,12]]",
+          "expected": "[1,2,3,4,8,12,11,10,9,5,6,7]"
+        },
+        {
+          "input": "matrix=[[1,2,3],[4,5,6],[7,8,9]]",
+          "expected": "[1,2,3,6,9,8,7,4,5]"
+        }
+      ]
+    },
+    {
+      "id": "lc.48",
+      "title": "旋转图像",
+      "source": "leetcode:48",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.array"
+      ],
+      "test_cases": [
+        {
+          "input": "matrix=[[5,1,9,11],[2,4,8,10],[13,3,6,7],[15,14,12,16]]",
+          "expected": "[[15,13,2,5],[14,3,4,1],[12,6,8,9],[16,7,10,11]]"
+        },
+        {
+          "input": "matrix=[[1,2,3],[4,5,6],[7,8,9]]",
+          "expected": "[[7,4,1],[8,5,2],[9,6,3]]"
+        }
+      ]
+    },
+    {
+      "id": "lc.240",
+      "title": "搜索二维矩阵 II",
+      "source": "leetcode:240",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.array"
+      ],
+      "test_cases": [
+        {
+          "input": "matrix=[[1,4,7,11,15],[2,5,8,12,19],[3,6,9,16,22],[10,13,14,17,24],[18,21,23,26,30]], target=20",
+          "expected": "false"
+        },
+        {
+          "input": "matrix=[[1,4,7,11,15],[2,5,8,12,19],[3,6,9,16,22],[10,13,14,17,24],[18,21,23,26,30]], target=5",
+          "expected": "true"
+        }
+      ]
+    },
+    {
+      "id": "lc.160",
+      "title": "相交链表",
+      "source": "leetcode:160",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.linked_list"
+      ],
+      "test_cases": [
+        {
+          "input": "intersectVal=2, listA=[1,9,1,2,4], listB=[3,2,4], skipA=3, skipB=1",
+          "expected": "Intersected at '2'"
+        },
+        {
+          "input": "intersectVal=0, listA=[2,6,4], listB=[1,5], skipA=3, skipB=2",
+          "expected": "No intersection"
+        },
+        {
+          "input": "intersectVal=8, listA=[4,1,8,4,5], listB=[5,6,1,8,4,5], skipA=2, skipB=3",
+          "expected": "Intersected at '8'"
+        }
+      ]
+    },
+    {
+      "id": "lc.206",
+      "title": "反转链表",
+      "source": "leetcode:206",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.linked_list"
+      ],
+      "test_cases": [
+        {
+          "input": "head=[1,2]",
+          "expected": "[2,1]"
+        },
+        {
+          "input": "head=[1,2,3,4,5]",
+          "expected": "[5,4,3,2,1]"
+        }
+      ]
+    },
+    {
+      "id": "lc.234",
+      "title": "回文链表",
+      "source": "leetcode:234",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.linked_list"
+      ],
+      "test_cases": [
+        {
+          "input": "head=[1,2]",
+          "expected": "false"
+        },
+        {
+          "input": "head=[1,2,2,1]",
+          "expected": "true"
+        }
+      ]
+    },
+    {
+      "id": "lc.141",
+      "title": "环形链表",
+      "source": "leetcode:141",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.linked_list"
+      ],
+      "test_cases": [
+        {
+          "input": "head=[1,2], pos=0",
+          "expected": "true"
+        },
+        {
+          "input": "head=[1], pos=-1",
+          "expected": "false"
+        },
+        {
+          "input": "head=[3,2,0,-4], pos=1",
+          "expected": "true"
+        }
+      ]
+    },
+    {
+      "id": "lc.142",
+      "title": "环形链表 II",
+      "source": "leetcode:142",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.linked_list"
+      ],
+      "test_cases": [
+        {
+          "input": "head=[1,2], pos=0",
+          "expected": "tail connects to node index 0"
+        },
+        {
+          "input": "head=[1], pos=-1",
+          "expected": "no cycle"
+        },
+        {
+          "input": "head=[3,2,0,-4], pos=1",
+          "expected": "tail connects to node index 1"
+        }
+      ]
+    },
+    {
+      "id": "lc.21",
+      "title": "合并两个有序链表",
+      "source": "leetcode:21",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.linked_list",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "list1=[1,2,4], list2=[1,3,4]",
+          "expected": "[1,1,2,3,4,4]"
+        }
+      ]
+    },
+    {
+      "id": "lc.2",
+      "title": "两数相加",
+      "source": "leetcode:2",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.linked_list"
+      ],
+      "test_cases": [
+        {
+          "input": "l1=[0], l2=[0]",
+          "expected": "[0]"
+        },
+        {
+          "input": "l1=[9,9,9,9,9,9,9], l2=[9,9,9,9]",
+          "expected": "[8,9,9,9,0,0,0,1]"
+        },
+        {
+          "input": "l1=[2,4,3], l2=[5,6,4]",
+          "expected": "[7,0,8]"
+        }
+      ]
+    },
+    {
+      "id": "lc.19",
+      "title": "删除链表的倒数第 N 个结点",
+      "source": "leetcode:19",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.linked_list"
+      ],
+      "test_cases": [
+        {
+          "input": "head=[1], n=1",
+          "expected": "[]"
+        },
+        {
+          "input": "head=[1,2], n=1",
+          "expected": "[1]"
+        },
+        {
+          "input": "head=[1,2,3,4,5], n=2",
+          "expected": "[1,2,3,5]"
+        }
+      ]
+    },
+    {
+      "id": "lc.24",
+      "title": "两两交换链表中的节点",
+      "source": "leetcode:24",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.linked_list"
+      ],
+      "test_cases": [
+        {
+          "input": "head=[1]",
+          "expected": "[1]"
+        },
+        {
+          "input": "head=[1,2,3,4]",
+          "expected": "[2,1,4,3]"
+        }
+      ]
+    },
+    {
+      "id": "lc.25",
+      "title": "K 个一组翻转链表",
+      "source": "leetcode:25",
+      "difficulty": 4.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.linked_list"
+      ],
+      "test_cases": [
+        {
+          "input": "head=[1,2,3,4,5], k=3",
+          "expected": "[3,2,1,4,5]"
+        },
+        {
+          "input": "head=[1,2,3,4,5], k=2",
+          "expected": "[2,1,4,3,5]"
+        }
+      ]
+    },
+    {
+      "id": "lc.138",
+      "title": "随机链表的复制",
+      "source": "leetcode:138",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.linked_list"
+      ],
+      "test_cases": [
+        {
+          "input": "head=[[1,1],[2,1]]",
+          "expected": "[[1,1],[2,1]]"
+        },
+        {
+          "input": "head=[[3,null],[3,0],[3,null]]",
+          "expected": "[[3,null],[3,0],[3,null]]"
+        },
+        {
+          "input": "head=[[7,null],[13,0],[11,4],[10,2],[1,0]]",
+          "expected": "[[7,null],[13,0],[11,4],[10,2],[1,0]]"
+        }
+      ]
+    },
+    {
+      "id": "lc.148",
+      "title": "排序链表",
+      "source": "leetcode:148",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.mergesort",
+        "ds.linked_list"
+      ],
+      "test_cases": [
+        {
+          "input": "head=[-1,5,3,4,0]",
+          "expected": "[-1,0,3,4,5]"
+        },
+        {
+          "input": "head=[4,2,1,3]",
+          "expected": "[1,2,3,4]"
+        }
+      ]
+    },
+    {
+      "id": "lc.23",
+      "title": "合并 K 个升序链表",
+      "source": "leetcode:23",
+      "difficulty": 4.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.mergesort",
+        "ds.linked_list"
+      ],
+      "test_cases": [
+        {
+          "input": "lists=[[]]",
+          "expected": "[]"
+        },
+        {
+          "input": "lists=[[1,4,5],[1,3,4],[2,6]]",
+          "expected": "[1,1,2,3,4,4,5,6]"
+        }
+      ]
+    },
+    {
+      "id": "lc.94",
+      "title": "二叉树的中序遍历",
+      "source": "leetcode:94",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "root=[1,2,3,4,5,null,8,null,null,6,7,9]",
+          "expected": "[4,2,6,5,7,1,3,9,8]"
+        },
+        {
+          "input": "root=[1,null,2,3]",
+          "expected": "[1,3,2]"
+        }
+      ]
+    },
+    {
+      "id": "lc.104",
+      "title": "二叉树的最大深度",
+      "source": "leetcode:104",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "root=[1,null,2]",
+          "expected": "2"
+        },
+        {
+          "input": "root=[3,9,20,null,null,15,7]",
+          "expected": "3"
+        }
+      ]
+    },
+    {
+      "id": "lc.226",
+      "title": "翻转二叉树",
+      "source": "leetcode:226",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "root=[2,1,3]",
+          "expected": "[2,3,1]"
+        },
+        {
+          "input": "root=[4,2,7,1,3,6,9]",
+          "expected": "[4,7,2,9,6,3,1]"
+        }
+      ]
+    },
+    {
+      "id": "lc.101",
+      "title": "对称二叉树",
+      "source": "leetcode:101",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "root=[1,2,2,null,3,null,3]",
+          "expected": "false"
+        },
+        {
+          "input": "root=[1,2,2,3,4,4,3]",
+          "expected": "true"
+        }
+      ]
+    },
+    {
+      "id": "lc.543",
+      "title": "二叉树的直径",
+      "source": "leetcode:543",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "root=[1,2]",
+          "expected": "1"
+        },
+        {
+          "input": "root=[1,2,3,4,5]",
+          "expected": "3"
+        }
+      ]
+    },
+    {
+      "id": "lc.102",
+      "title": "二叉树的层序遍历",
+      "source": "leetcode:102",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "root=[1]",
+          "expected": "[[1]]"
+        },
+        {
+          "input": "root=[3,9,20,null,null,15,7]",
+          "expected": "[[3],[9,20],[15,7]]"
+        }
+      ]
+    },
+    {
+      "id": "lc.108",
+      "title": "将有序数组转换为二叉搜索树",
+      "source": "leetcode:108",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[1,3]",
+          "expected": "[3,1]"
+        },
+        {
+          "input": "nums=[-10,-3,0,5,9]",
+          "expected": "[0,-3,9,-10,null,5]"
+        }
+      ]
+    },
+    {
+      "id": "lc.98",
+      "title": "验证二叉搜索树",
+      "source": "leetcode:98",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "root=[5,1,4,null,null,3,6]",
+          "expected": "false"
+        },
+        {
+          "input": "root=[2,1,3]",
+          "expected": "true"
+        }
+      ]
+    },
+    {
+      "id": "lc.230",
+      "title": "二叉搜索树中第 K 小的元素",
+      "source": "leetcode:230",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "root=[5,3,6,2,4,null,null,1], k=3",
+          "expected": "3"
+        },
+        {
+          "input": "root=[3,1,4,null,2], k=1",
+          "expected": "1"
+        }
+      ]
+    },
+    {
+      "id": "lc.199",
+      "title": "二叉树的右视图",
+      "source": "leetcode:199",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "root=[1,2,3,4,null,null,null,5]",
+          "expected": "[1,3,4,5]"
+        },
+        {
+          "input": "root=[1,null,3]",
+          "expected": "[1,3]"
+        },
+        {
+          "input": "root=[1,2,3,null,5,null,4]",
+          "expected": "[1,3,4]"
+        }
+      ]
+    },
+    {
+      "id": "lc.114",
+      "title": "二叉树展开为链表",
+      "source": "leetcode:114",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "root=[0]",
+          "expected": "[0]"
+        },
+        {
+          "input": "root=[1,2,5,3,4,null,6]",
+          "expected": "[1,null,2,null,3,null,4,null,5,null,6]"
+        }
+      ]
+    },
+    {
+      "id": "lc.105",
+      "title": "从前序与中序遍历序列构造二叉树",
+      "source": "leetcode:105",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "preorder=[-1], inorder=[-1]",
+          "expected": "[-1]"
+        },
+        {
+          "input": "preorder=[3,9,20,15,7], inorder=[9,3,15,20,7]",
+          "expected": "[3,9,20,null,null,15,7]"
+        }
+      ]
+    },
+    {
+      "id": "lc.437",
+      "title": "路径总和 III",
+      "source": "leetcode:437",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "root=[5,4,8,11,null,13,4,7,2,null,null,5,1], targetSum=22",
+          "expected": "3"
+        },
+        {
+          "input": "root=[10,5,-3,3,2,null,11,3,-2,null,1], targetSum=8",
+          "expected": "3"
+        }
+      ]
+    },
+    {
+      "id": "lc.236",
+      "title": "二叉树的最近公共祖先",
+      "source": "leetcode:236",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "root=[3,5,1,6,2,0,8,null,null,7,4], p=5, q=4",
+          "expected": "5"
+        },
+        {
+          "input": "root=[1,2], p=1, q=2",
+          "expected": "1"
+        },
+        {
+          "input": "root=[3,5,1,6,2,0,8,null,null,7,4], p=5, q=1",
+          "expected": "3"
+        }
+      ]
+    },
+    {
+      "id": "lc.124",
+      "title": "二叉树中的最大路径和",
+      "source": "leetcode:124",
+      "difficulty": 4.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dfs",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "root=[-10,9,20,null,null,15,7]",
+          "expected": "42"
+        },
+        {
+          "input": "root=[1,2,3]",
+          "expected": "6"
+        }
+      ]
+    },
+    {
+      "id": "lc.200",
+      "title": "岛屿数量",
+      "source": "leetcode:200",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.bfs",
+        "algo.dfs"
+      ],
+      "test_cases": [
+        {
+          "input": "grid=[[\"1\",\"1\",\"0\",\"0\",\"0\"],[\"1\",\"1\",\"0\",\"0\",\"0\"],[\"0\",\"0\",\"1\",\"0\",\"0\"],[\"0\",\"0\",\"0\",\"1\",\"1\"]]",
+          "expected": "3"
+        },
+        {
+          "input": "grid=[[\"1\",\"1\",\"1\",\"1\",\"0\"],[\"1\",\"1\",\"0\",\"1\",\"0\"],[\"1\",\"1\",\"0\",\"0\",\"0\"],[\"0\",\"0\",\"0\",\"0\",\"0\"]]",
+          "expected": "1"
+        }
+      ]
+    },
+    {
+      "id": "lc.994",
+      "title": "腐烂的橘子",
+      "source": "leetcode:994",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.bfs",
+        "algo.dfs"
+      ],
+      "test_cases": [
+        {
+          "input": "grid=[[2,1,1],[0,1,1],[1,0,1]]",
+          "expected": "-1"
+        },
+        {
+          "input": "grid=[[0,2]]",
+          "expected": "0"
+        },
+        {
+          "input": "grid=[[2,1,1],[1,1,0],[0,1,1]]",
+          "expected": "4"
+        }
+      ]
+    },
+    {
+      "id": "lc.207",
+      "title": "课程表",
+      "source": "leetcode:207",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.topological_sort",
+        "algo.dfs"
+      ],
+      "test_cases": [
+        {
+          "input": "numCourses=2, prerequisites=[[1,0],[0,1]]",
+          "expected": "false"
+        },
+        {
+          "input": "numCourses=2, prerequisites=[[1,0]]",
+          "expected": "true"
+        }
+      ]
+    },
+    {
+      "id": "lc.22",
+      "title": "括号生成",
+      "source": "leetcode:22",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.backtracking",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "n=1",
+          "expected": "[\"()\"]"
+        },
+        {
+          "input": "n=3",
+          "expected": "[\"((()))\",\"(()())\",\"(())()\",\"()(())\",\"()()()\"]"
+        }
+      ]
+    },
+    {
+      "id": "lc.79",
+      "title": "单词搜索",
+      "source": "leetcode:79",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.backtracking",
+        "algo.recursion"
+      ],
+      "test_cases": [
+        {
+          "input": "board=[[\"A\",\"B\",\"C\",\"E\"],[\"S\",\"F\",\"C\",\"S\"],[\"A\",\"D\",\"E\",\"E\"]], word=\"SEE\"",
+          "expected": "true"
+        },
+        {
+          "input": "board=[[\"A\",\"B\",\"C\",\"E\"],[\"S\",\"F\",\"C\",\"S\"],[\"A\",\"D\",\"E\",\"E\"]], word=\"ABCB\"",
+          "expected": "false"
+        },
+        {
+          "input": "board=[[\"A\",\"B\",\"C\",\"E\"],[\"S\",\"F\",\"C\",\"S\"],[\"A\",\"D\",\"E\",\"E\"]], word=\"ABCCED\"",
+          "expected": "true"
+        }
+      ]
+    },
+    {
+      "id": "lc.35",
+      "title": "搜索插入位置",
+      "source": "leetcode:35",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.binary_search"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[1,3,5,6], target=2",
+          "expected": "1"
+        },
+        {
+          "input": "nums=[1,3,5,6], target=7",
+          "expected": "4"
+        },
+        {
+          "input": "nums=[1,3,5,6], target=5",
+          "expected": "2"
+        }
+      ]
+    },
+    {
+      "id": "lc.74",
+      "title": "搜索二维矩阵",
+      "source": "leetcode:74",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.binary_search"
+      ],
+      "test_cases": [
+        {
+          "input": "matrix=[[1,3,5,7],[10,11,16,20],[23,30,34,60]], target=13",
+          "expected": "false"
+        },
+        {
+          "input": "matrix=[[1,3,5,7],[10,11,16,20],[23,30,34,60]], target=3",
+          "expected": "true"
+        }
+      ]
+    },
+    {
+      "id": "lc.34",
+      "title": "在排序数组中查找元素的第一个和最后一个位置",
+      "source": "leetcode:34",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.binary_search"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[5,7,7,8,8,10], target=6",
+          "expected": "[-1,-1]"
+        },
+        {
+          "input": "nums=[5,7,7,8,8,10], target=8",
+          "expected": "[3,4]"
+        }
+      ]
+    },
+    {
+      "id": "lc.33",
+      "title": "搜索旋转排序数组",
+      "source": "leetcode:33",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.binary_search"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[4,5,6,7,0,1,2], target=3",
+          "expected": "-1"
+        },
+        {
+          "input": "nums=[1], target=0",
+          "expected": "-1"
+        },
+        {
+          "input": "nums=[4,5,6,7,0,1,2], target=0",
+          "expected": "4"
+        }
+      ]
+    },
+    {
+      "id": "lc.153",
+      "title": "寻找旋转排序数组中的最小值",
+      "source": "leetcode:153",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.binary_search"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[4,5,6,7,0,1,2]",
+          "expected": "0"
+        },
+        {
+          "input": "nums=[11,13,15,17]",
+          "expected": "11"
+        },
+        {
+          "input": "nums=[3,4,5,1,2]",
+          "expected": "1"
+        }
+      ]
+    },
+    {
+      "id": "lc.4",
+      "title": "寻找两个正序数组的中位数",
+      "source": "leetcode:4",
+      "difficulty": 4.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.binary_search",
+        "algo.divide_conquer"
+      ],
+      "test_cases": [
+        {
+          "input": "nums1=[1,2], nums2=[3,4]",
+          "expected": "2.50000"
+        },
+        {
+          "input": "nums1=[1,3], nums2=[2]",
+          "expected": "2.00000"
+        }
+      ]
+    },
+    {
+      "id": "lc.20",
+      "title": "有效的括号",
+      "source": "leetcode:20",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.stack"
+      ],
+      "test_cases": [
+        {
+          "input": "s=\"()[]{}\"",
+          "expected": "true"
+        },
+        {
+          "input": "s=\"(]\"",
+          "expected": "false"
+        },
+        {
+          "input": "s=\"()\"",
+          "expected": "true"
+        }
+      ]
+    },
+    {
+      "id": "lc.394",
+      "title": "字符串解码",
+      "source": "leetcode:394",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.stack"
+      ],
+      "test_cases": [
+        {
+          "input": "s=\"3[a2[c]]\"",
+          "expected": "\"accaccacc\""
+        },
+        {
+          "input": "s=\"2[abc]3[cd]ef\"",
+          "expected": "\"abcabccdcdcdef\""
+        },
+        {
+          "input": "s=\"3[a]2[bc]\"",
+          "expected": "\"aaabcbc\""
+        }
+      ]
+    },
+    {
+      "id": "lc.739",
+      "title": "每日温度",
+      "source": "leetcode:739",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.stack"
+      ],
+      "test_cases": [
+        {
+          "input": "temperatures=[30,40,50,60]",
+          "expected": "[1,1,1,0]"
+        },
+        {
+          "input": "temperatures=[30,60,90]",
+          "expected": "[1,1,0]"
+        },
+        {
+          "input": "temperatures=[73,74,75,71,69,72,76,73]",
+          "expected": "[1,1,4,2,1,1,0,0]"
+        }
+      ]
+    },
+    {
+      "id": "lc.84",
+      "title": "柱状图中最大的矩形",
+      "source": "leetcode:84",
+      "difficulty": 4.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "ds.stack"
+      ],
+      "test_cases": [
+        {
+          "input": "heights=[2,4]",
+          "expected": "4"
+        },
+        {
+          "input": "heights=[2,1,5,6,2,3]",
+          "expected": "10"
+        }
+      ]
+    },
+    {
+      "id": "lc.215",
+      "title": "数组中的第K个最大元素",
+      "source": "leetcode:215",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.quicksort",
+        "algo.divide_conquer",
+        "algo.sorting"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[3,2,3,1,2,4,5,5,6], k=4",
+          "expected": "4"
+        },
+        {
+          "input": "nums=[3,2,1,5,6,4], k=2",
+          "expected": "5"
+        }
+      ]
+    },
+    {
+      "id": "lc.121",
+      "title": "买卖股票的最佳时机",
+      "source": "leetcode:121",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.greedy"
+      ],
+      "test_cases": [
+        {
+          "input": "prices=[7,6,4,3,1]",
+          "expected": "0"
+        },
+        {
+          "input": "prices=[7,1,5,3,6,4]",
+          "expected": "5"
+        }
+      ]
+    },
+    {
+      "id": "lc.55",
+      "title": "跳跃游戏",
+      "source": "leetcode:55",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.greedy"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[3,2,1,0,4]",
+          "expected": "false"
+        },
+        {
+          "input": "nums=[2,3,1,1,4]",
+          "expected": "true"
+        }
+      ]
+    },
+    {
+      "id": "lc.45",
+      "title": "跳跃游戏 II",
+      "source": "leetcode:45",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.greedy"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[2,3,0,1,4]",
+          "expected": "2"
+        },
+        {
+          "input": "nums=[2,3,1,1,4]",
+          "expected": "2"
+        }
+      ]
+    },
+    {
+      "id": "lc.763",
+      "title": "划分字母区间",
+      "source": "leetcode:763",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.greedy"
+      ],
+      "test_cases": [
+        {
+          "input": "s=\"eccbbbbdec\"",
+          "expected": "[10]"
+        },
+        {
+          "input": "s=\"ababcbacadefegdehijhklij\"",
+          "expected": "[9,7,8]"
+        }
+      ]
+    },
+    {
+      "id": "lc.70",
+      "title": "爬楼梯",
+      "source": "leetcode:70",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dp"
+      ],
+      "test_cases": [
+        {
+          "input": "n=3",
+          "expected": "3"
+        },
+        {
+          "input": "n=2",
+          "expected": "2"
+        }
+      ]
+    },
+    {
+      "id": "lc.118",
+      "title": "杨辉三角",
+      "source": "leetcode:118",
+      "difficulty": 1.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dp"
+      ],
+      "test_cases": [
+        {
+          "input": "numRows=1",
+          "expected": "[[1]]"
+        },
+        {
+          "input": "numRows=5",
+          "expected": "[[1],[1,1],[1,2,1],[1,3,3,1],[1,4,6,4,1]]"
+        }
+      ]
+    },
+    {
+      "id": "lc.198",
+      "title": "打家劫舍",
+      "source": "leetcode:198",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dp"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[2,7,9,3,1]",
+          "expected": "12"
+        },
+        {
+          "input": "nums=[1,2,3,1]",
+          "expected": "4"
+        }
+      ]
+    },
+    {
+      "id": "lc.279",
+      "title": "完全平方数",
+      "source": "leetcode:279",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dp"
+      ],
+      "test_cases": [
+        {
+          "input": "n=13",
+          "expected": "2"
+        },
+        {
+          "input": "n=12",
+          "expected": "3"
+        }
+      ]
+    },
+    {
+      "id": "lc.322",
+      "title": "零钱兑换",
+      "source": "leetcode:322",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dp"
+      ],
+      "test_cases": [
+        {
+          "input": "coins=[2], amount=3",
+          "expected": "-1"
+        },
+        {
+          "input": "coins=[1], amount=0",
+          "expected": "0"
+        },
+        {
+          "input": "coins=[1,2,5], amount=11",
+          "expected": "3"
+        }
+      ]
+    },
+    {
+      "id": "lc.139",
+      "title": "单词拆分",
+      "source": "leetcode:139",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dp"
+      ],
+      "test_cases": [
+        {
+          "input": "s=\"applepenapple\", wordDict=[\"apple\",\"pen\"]",
+          "expected": "true"
+        },
+        {
+          "input": "s=\"catsandog\", wordDict=[\"cats\",\"dog\",\"sand\",\"and\",\"cat\"]",
+          "expected": "false"
+        },
+        {
+          "input": "s=\"leetcode\", wordDict=[\"leet\",\"code\"]",
+          "expected": "true"
+        }
+      ]
+    },
+    {
+      "id": "lc.300",
+      "title": "最长递增子序列",
+      "source": "leetcode:300",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dp"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[0,1,0,3,2,3]",
+          "expected": "4"
+        },
+        {
+          "input": "nums=[7,7,7,7,7,7,7]",
+          "expected": "1"
+        },
+        {
+          "input": "nums=[10,9,2,5,3,7,101,18]",
+          "expected": "4"
+        }
+      ]
+    },
+    {
+      "id": "lc.152",
+      "title": "乘积最大子数组",
+      "source": "leetcode:152",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dp"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[-2,0,-1]",
+          "expected": "0"
+        },
+        {
+          "input": "nums=[2,3,-2,4]",
+          "expected": "6"
+        }
+      ]
+    },
+    {
+      "id": "lc.416",
+      "title": "分割等和子集",
+      "source": "leetcode:416",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dp"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[1,2,3,5]",
+          "expected": "false"
+        },
+        {
+          "input": "nums=[1,5,11,5]",
+          "expected": "true"
+        }
+      ]
+    },
+    {
+      "id": "lc.32",
+      "title": "最长有效括号",
+      "source": "leetcode:32",
+      "difficulty": 4.5,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dp"
+      ],
+      "test_cases": [
+        {
+          "input": "s=\")()())\"",
+          "expected": "4"
+        },
+        {
+          "input": "s=\"(()\"",
+          "expected": "2"
+        }
+      ]
+    },
+    {
+      "id": "lc.62",
+      "title": "不同路径",
+      "source": "leetcode:62",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dp"
+      ],
+      "test_cases": [
+        {
+          "input": "m=3, n=2",
+          "expected": "3"
+        },
+        {
+          "input": "m=3, n=7",
+          "expected": "28"
+        }
+      ]
+    },
+    {
+      "id": "lc.64",
+      "title": "最小路径和",
+      "source": "leetcode:64",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dp"
+      ],
+      "test_cases": [
+        {
+          "input": "grid=[[1,2,3],[4,5,6]]",
+          "expected": "12"
+        },
+        {
+          "input": "grid=[[1,3,1],[1,5,1],[4,2,1]]",
+          "expected": "7"
+        }
+      ]
+    },
+    {
+      "id": "lc.1143",
+      "title": "最长公共子序列",
+      "source": "leetcode:1143",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dp"
+      ],
+      "test_cases": [
+        {
+          "input": "text1=\"abc\", text2=\"abc\"",
+          "expected": "3"
+        },
+        {
+          "input": "text1=\"abc\", text2=\"def\"",
+          "expected": "0"
+        },
+        {
+          "input": "text1=\"abcde\", text2=\"ace\"",
+          "expected": "3"
+        }
+      ]
+    },
+    {
+      "id": "lc.72",
+      "title": "编辑距离",
+      "source": "leetcode:72",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.dp"
+      ],
+      "test_cases": [
+        {
+          "input": "word1=\"intention\", word2=\"execution\"",
+          "expected": "5"
+        },
+        {
+          "input": "word1=\"horse\", word2=\"ros\"",
+          "expected": "3"
+        }
+      ]
+    },
+    {
+      "id": "lc.75",
+      "title": "颜色分类",
+      "source": "leetcode:75",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.sorting",
+        "algo.two_pointers"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[2,0,1]",
+          "expected": "[0,1,2]"
+        },
+        {
+          "input": "nums=[2,0,2,1,1,0]",
+          "expected": "[0,0,1,1,2,2]"
+        }
+      ]
+    },
+    {
+      "id": "lc.287",
+      "title": "寻找重复数",
+      "source": "leetcode:287",
+      "difficulty": 3.0,
+      "judge_type": "exact_output",
+      "kp_ids": [
+        "algo.binary_search",
+        "algo.two_pointers"
+      ],
+      "test_cases": [
+        {
+          "input": "nums=[3,1,3,4,2]",
+          "expected": "3"
+        },
+        {
+          "input": "nums=[3,3,3,3,3]",
+          "expected": "3"
+        },
+        {
+          "input": "nums=[1,3,4,2,2]",
+          "expected": "2"
+        }
+      ]
+    }
+  ],
+  "import_report": {
+    "plan": "top-100-liked",
+    "total_in_plan": 100,
+    "imported": 81,
+    "skipped": {
+      "design": [
+        {
+          "slug": "lru-cache",
+          "no": "146",
+          "title": "LRU 缓存",
+          "group": "链表"
+        },
+        {
+          "slug": "implement-trie-prefix-tree",
+          "no": "208",
+          "title": "实现 Trie (前缀树)",
+          "group": "图论"
+        },
+        {
+          "slug": "min-stack",
+          "no": "155",
+          "title": "最小栈",
+          "group": "栈"
+        }
+      ],
+      "multi_answer": [
+        {
+          "slug": "two-sum",
+          "no": "1",
+          "title": "两数之和",
+          "group": "哈希"
+        },
+        {
+          "slug": "group-anagrams",
+          "no": "49",
+          "title": "字母异位词分组",
+          "group": "哈希"
+        },
+        {
+          "slug": "3sum",
+          "no": "15",
+          "title": "三数之和",
+          "group": "双指针"
+        },
+        {
+          "slug": "merge-intervals",
+          "no": "56",
+          "title": "合并区间",
+          "group": "普通数组"
+        },
+        {
+          "slug": "permutations",
+          "no": "46",
+          "title": "全排列",
+          "group": "回溯"
+        },
+        {
+          "slug": "subsets",
+          "no": "78",
+          "title": "子集",
+          "group": "回溯"
+        },
+        {
+          "slug": "letter-combinations-of-a-phone-number",
+          "no": "17",
+          "title": "电话号码的字母组合",
+          "group": "回溯"
+        },
+        {
+          "slug": "combination-sum",
+          "no": "39",
+          "title": "组合总和",
+          "group": "回溯"
+        },
+        {
+          "slug": "palindrome-partitioning",
+          "no": "131",
+          "title": "分割回文串",
+          "group": "回溯"
+        },
+        {
+          "slug": "n-queens",
+          "no": "51",
+          "title": "N 皇后",
+          "group": "回溯"
+        },
+        {
+          "slug": "top-k-frequent-elements",
+          "no": "347",
+          "title": "前 K 个高频元素",
+          "group": "堆"
+        },
+        {
+          "slug": "longest-palindromic-substring",
+          "no": "5",
+          "title": "最长回文子串",
+          "group": "多维动态规划"
+        }
+      ],
+      "unmapped": [
+        {
+          "slug": "find-median-from-data-stream",
+          "no": "295",
+          "title": "数据流的中位数",
+          "group": "堆"
+        },
+        {
+          "slug": "single-number",
+          "no": "136",
+          "title": "只出现一次的数字",
+          "group": "技巧"
+        },
+        {
+          "slug": "majority-element",
+          "no": "169",
+          "title": "多数元素",
+          "group": "技巧"
+        },
+        {
+          "slug": "next-permutation",
+          "no": "31",
+          "title": "下一个排列",
+          "group": "技巧"
+        }
+      ],
+      "parse_failed": []
+    },
+    "in_place": [
+      {
+        "slug": "flatten-binary-tree-to-linked-list",
+        "title": "二叉树展开为链表"
+      },
+      {
+        "slug": "merge-intervals",
+        "title": "合并区间"
+      },
+      {
+        "slug": "move-zeroes",
+        "title": "移动零"
+      },
+      {
+        "slug": "next-permutation",
+        "title": "下一个排列"
+      },
+      {
+        "slug": "remove-nth-node-from-end-of-list",
+        "title": "删除链表的倒数第 N 个结点"
+      },
+      {
+        "slug": "reverse-linked-list",
+        "title": "反转链表"
+      },
+      {
+        "slug": "reverse-nodes-in-k-group",
+        "title": "K 个一组翻转链表"
+      },
+      {
+        "slug": "rotate-array",
+        "title": "轮转数组"
+      },
+      {
+        "slug": "rotate-image",
+        "title": "旋转图像"
+      },
+      {
+        "slug": "set-matrix-zeroes",
+        "title": "矩阵置零"
+      },
+      {
+        "slug": "sort-colors",
+        "title": "颜色分类"
+      },
+      {
+        "slug": "swap-nodes-in-pairs",
+        "title": "两两交换链表中的节点"
+      }
+    ]
+  }
+}
