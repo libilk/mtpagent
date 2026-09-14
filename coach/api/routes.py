@@ -52,7 +52,9 @@ def submit_answer(payload: AnswerRequest, request: Request) -> AnswerAccepted:
     description=(
         "沿知识图谱反向遍历前置依赖,找出学生真正欠缺的基础知识点。\n\n"
         "解释文本由 planner_worker 异步生成;若还没生成,返回模板文案并置 "
-        "`explanation_pending=true`。"
+        "`explanation_pending=true`。\n\n"
+        "`mode=agent` 走 agent 诊断(LLM 自己决定调哪些工具)。它**只读缓存**,\n"
+        "由 worker 异步生成 —— 未生成时 `root_causes` 为空且 `explanation_pending=true`。"
     ),
 )
 def get_gap(
@@ -61,9 +63,12 @@ def get_gap(
     request: Request,
     top_k: int = Query(default=config.ROOT_CAUSE_TOP_K, ge=1, le=10),
     depth: int = Query(default=config.MAX_PREREQ_DEPTH, ge=1, le=5),
+    mode: str = Query(default="graph", pattern="^(graph|agent)$", description="graph=确定性图遍历,agent=LLM 自主诊断"),
 ) -> GapResponse:
     service = request.app.state.query_service
     try:
+        if mode == "agent":
+            return service.agent_gap_view(learner_id, kp_id, top_k=top_k, depth=depth)
         return service.gap_view(learner_id, kp_id, top_k=top_k, depth=depth)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"知识点不存在:{kp_id}")

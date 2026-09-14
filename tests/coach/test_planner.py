@@ -190,6 +190,108 @@ class TestPlannerConsumption:
         assert planner.process(event)["status"] == "ignored"
 
 
+class AgentLLM:
+    """假 LLM:一轮就交卷。agent 诊断走 `chat_structured`,解释走 `chat`。"""
+
+    def __init__(self, kp_id="prog.func_call"):
+        self.kp_id = kp_id
+        self.calls = 0
+
+    def chat(self, messages, **_kwargs):
+        return "先把函数调用补上。"
+
+    def chat_structured(self, messages, tools=None, **_kwargs):
+        from llm.llm_client import LLMResponse, ToolCall
+
+        self.calls += 1
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id=f"c{self.calls}",
+                    name="submit_diagnosis",
+                    arguments={"root_causes": [{"kp_id": self.kp_id}], "summary": "先补函数调用。"},
+                )
+            ],
+        )
+
+
+class TestAgentDiagnosis:
+    """agent 诊断的异步生成(M5)。
+
+    ★ 默认必须是关的 —— 一次诊断要好几轮 LLM 调用,挂在每条 profile.updated 上会失控。
+    """
+
+    def _seed(self, profile):
+        profile.upsert_profile("u1", goal_kp_id="algo.dp")
+        set_mastery(profile, "u1", {"algo.dp": 0.3, "prog.func_call": 0.2, "algo.recursion": 0.9})
+
+    def _worker(self, knowledge, profile, journal, fake_bus, service, llm):
+        return PlannerWorker(
+            knowledge, profile, journal, llm=llm, bus=fake_bus, service=service, agent_diagnosis=True
+        )
+
+    def test_off_by_default(self, planner, profile):
+        self._seed(profile)
+
+        result = planner.process(profile_updated_event())
+
+        assert "agent_diagnosed" not in result
+        assert profile.get_agent_diagnosis("u1", "algo.dp", top_k=3, depth=3) is None
+
+    def test_writes_cache_when_enabled(self, knowledge, profile, journal, fake_bus, service):
+        self._seed(profile)
+        llm = AgentLLM()
+        worker = self._worker(knowledge, profile, journal, fake_bus, service, llm)
+
+        result = worker.process(profile_updated_event())
+
+        assert result["agent_diagnosed"] == "algo.dp"
+        assert llm.calls >= 1
+        cached = profile.get_agent_diagnosis("u1", "algo.dp", top_k=3, depth=3)
+        assert cached["payload"]["root_causes"][0]["kp_id"] == "prog.func_call"
+        assert cached["payload"]["explanation_source"] == "agent"
+
+    def test_only_diagnoses_the_goal_kp(self, knowledge, profile, journal, fake_bus, service):
+        """payload 里可能有多个 kp,但只对目标跑一次 —— 否则调用次数会失控。"""
+        self._seed(profile)
+        llm = AgentLLM()
+        worker = self._worker(knowledge, profile, journal, fake_bus, service, llm)
+        event = events.new_event(
+            events.PROFILE_UPDATED, "u1", payload={"kp_ids": ["algo.dp", "ds.array", "algo.recursion"]}
+        )
+
+        worker.process(event)
+
+        assert llm.calls == 1, "三个 kp 也只该跑一次 agent 诊断"
+
+    def test_no_goal_is_a_noop(self, knowledge, profile, journal, fake_bus, service):
+        set_mastery(profile, "u1", {"algo.dp": 0.3})
+        llm = AgentLLM()
+        worker = self._worker(knowledge, profile, journal, fake_bus, service, llm)
+
+        result = worker.process(profile_updated_event())
+
+        assert result["agent_diagnosed"] is None
+        assert llm.calls == 0
+
+    def test_llm_failure_does_not_break_the_event(self, knowledge, profile, journal, fake_bus, service):
+        """诊断失败只该让这一项跳过,不能把整条事件弄挂。"""
+        self._seed(profile)
+
+        class BoomAgentLLM(AgentLLM):
+            def chat_structured(self, messages, tools=None, **_kwargs):
+                raise RuntimeError("模型挂了")
+
+        worker = self._worker(knowledge, profile, journal, fake_bus, service, BoomAgentLLM())
+
+        result = worker.process(profile_updated_event())
+
+        assert result["status"] == "ok"  # 事件本身处理成功
+        assert result["agent_diagnosed"] is None
+        assert profile.get_agent_diagnosis("u1", "algo.dp", top_k=3, depth=3) is None
+
+
 class TestGraphView:
     def test_tree_structure_and_depth(self, service, seeded):
         view = service.graph_view("algo.dp", depth=2)

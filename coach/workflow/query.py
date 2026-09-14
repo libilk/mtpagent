@@ -75,6 +75,42 @@ class QueryService:
             "explanation_pending": bool(roots) and cached is None,
         }
 
+    def agent_gap_view(
+        self,
+        learner_id: str,
+        kp_id: str,
+        top_k: int = config.ROOT_CAUSE_TOP_K,
+        depth: int = config.MAX_PREREQ_DEPTH,
+    ) -> Dict:
+        """agent 版根因诊断,契约与 `gap_view` **逐字节相同**(同一个 8 键结构)。
+
+        ★ **只读缓存,不调 LLM。** agent 一次诊断要几秒到几十秒、还花钱,
+        绝不能放在入口的同步路径上(那条线是 < 50ms)。它由 `planner_worker`
+        在答题事件之后异步生成并落 `agent_diagnoses` 表。
+
+        缓存未命中时返回空 `root_causes` + `explanation_pending=True` ——
+        注意这里的 pending 指的是**整份诊断还没生成**,不只是解释文案。
+        参数(top_k/depth)对不上也算未命中:`agent_diagnoses` 里存了它们,
+        拿别的参数算出来的结果会误导人。
+        """
+        concept = self.knowledge.get_concept(kp_id)
+        if concept is None:
+            raise KeyError(kp_id)
+
+        cached = self.profile.get_agent_diagnosis(learner_id, kp_id, top_k=top_k, depth=depth)
+        if cached is None:
+            return {
+                "learner_id": learner_id,
+                "kp_id": kp_id,
+                "name": concept.name,
+                "mastery": self.profile.get_mastery(learner_id, kp_id),
+                "root_causes": [],
+                "explanation": "",
+                "explanation_source": "agent",
+                "explanation_pending": True,
+            }
+        return {"learner_id": learner_id, **cached["payload"]}
+
     def learn_next(
         self,
         learner_id: str,

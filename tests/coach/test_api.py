@@ -205,6 +205,86 @@ class TestGapEndpoint:
         assert client.get("/gap/u1/algo.dp?top_k=99").status_code == 422
 
 
+class TestGapAgentMode:
+    """`?mode=agent` 只读缓存、**不碰 LLM** —— 这是它能挂在入口层的前提。
+
+    agent 一次诊断要好几秒且花钱,所以入口只负责读 worker 预先写好的结果。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _seed(self, seeded, profile):
+        for kp_id, p in {"algo.dp": 0.3, "prog.func_call": 0.2, "algo.recursion": 0.9}.items():
+            profile.set_mastery("u1", kp_id, p)
+
+    @staticmethod
+    def _payload():
+        return {
+            "kp_id": "algo.dp",
+            "name": "动态规划",
+            "mastery": 0.3,
+            "root_causes": [
+                {
+                    "kp_id": "prog.func_call",
+                    "name": "函数调用",
+                    "depth": 2,
+                    "mastery": 0.2,
+                    "status": "gap",
+                    "path": ["algo.dp", "algo.recursion", "prog.func_call"],
+                    "reason": "唯一有证据且很弱的前置",
+                }
+            ],
+            "explanation": "先补函数调用。",
+            "explanation_source": "agent",
+            "explanation_pending": False,
+        }
+
+    def test_pending_when_cache_is_empty(self, client):
+        body = client.get("/gap/u1/algo.dp?mode=agent").json()
+
+        assert body["root_causes"] == []
+        assert body["explanation_pending"] is True
+        assert body["explanation_source"] == "agent"
+        assert body["name"] == "动态规划"
+        assert body["mastery"] == pytest.approx(0.3)
+
+    def test_reads_cached_diagnosis(self, client, profile):
+        profile.set_agent_diagnosis("u1", "algo.dp", self._payload(), top_k=3, depth=3)
+
+        body = client.get("/gap/u1/algo.dp?mode=agent").json()
+
+        assert body["root_causes"][0]["kp_id"] == "prog.func_call"
+        assert body["explanation"] == "先补函数调用。"
+        assert body["explanation_pending"] is False
+        assert body["learner_id"] == "u1"
+
+    def test_param_mismatch_is_a_miss_not_stale_data(self, client, profile):
+        """★ 缓存是拿别的 top_k 算出来的 → 当未命中。拿旧参数的结果糊弄会误导人。"""
+        profile.set_agent_diagnosis("u1", "algo.dp", self._payload(), top_k=5, depth=3)
+
+        body = client.get("/gap/u1/algo.dp?mode=agent").json()
+        assert body["explanation_pending"] is True
+        assert body["root_causes"] == []
+
+    def test_never_calls_llm(self, client, monkeypatch):
+        llm_module = pytest.importorskip("llm.llm_client")
+
+        def boom(*_args, **_kwargs):
+            raise AssertionError("入口层不许调 LLM")
+
+        monkeypatch.setattr(llm_module.LLM, "chat_structured", boom)
+        assert client.get("/gap/u1/algo.dp?mode=agent").status_code == 200
+
+    def test_unknown_kp_still_404(self, client):
+        assert client.get("/gap/u1/nope?mode=agent").status_code == 404
+
+    def test_invalid_mode_is_rejected(self, client):
+        assert client.get("/gap/u1/algo.dp?mode=bogus").status_code == 422
+
+    def test_default_mode_is_graph(self, client):
+        """不加参数就是老行为 —— 确定性路径不许被这轮改动影响。"""
+        assert client.get("/gap/u1/algo.dp").json()["explanation_source"] == "template"
+
+
 class TestGraphEndpoint:
     @pytest.fixture(autouse=True)
     def _seed(self, seeded, profile):

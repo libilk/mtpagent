@@ -79,8 +79,14 @@ def make_bus(kind: str = "redis"):
     return RedisBus()
 
 
-def build_workers(db_path=None, llm=None, checkpoint_path=None, bus=None) -> tuple:
-    """装配全部 worker。连接按 worker 的跨线程用法开(check_same_thread=False)。"""
+def build_workers(
+    db_path=None, llm=None, checkpoint_path=None, bus=None, agent_diagnosis: bool = False
+) -> tuple:
+    """装配全部 worker。连接按 worker 的跨线程用法开(check_same_thread=False)。
+
+    `agent_diagnosis=True` 会让 planner_worker 在答题后额外跑一次 agent 诊断。
+    **默认关**:一次诊断是好几轮 LLM 调用(贵且慢),不能默认挂在每条事件上。
+    """
     conn = open_db(db_path, check_same_thread=False)
     knowledge = KnowledgeStore(conn)
     profile = ProfileStore(conn)
@@ -99,7 +105,15 @@ def build_workers(db_path=None, llm=None, checkpoint_path=None, bus=None) -> tup
             llm=llm,
             checkpointer=make_checkpointer(checkpoint_path),
         ),
-        PlannerWorker(knowledge, profile, journal, llm=llm, bus=bus, service=service),
+        PlannerWorker(
+            knowledge,
+            profile,
+            journal,
+            llm=llm,
+            bus=bus,
+            service=service,
+            agent_diagnosis=agent_diagnosis,
+        ),
         SchedulerWorker(knowledge, profile, journal, bus=bus, service=service),
     ]
     return workers, bus, conn, profile
@@ -175,8 +189,14 @@ async def main_async(args) -> None:
         return
 
     llm = build_llm(enabled=not args.no_llm)
+    if args.agent_diagnosis and llm is None:
+        logger.warning("要求了 --agent-diagnosis 但没有 LLM —— 这一项会静默跳过")
     workers, bus, conn, profile = build_workers(
-        args.db, llm=llm, checkpoint_path=args.checkpoint_db, bus=make_bus(args.bus)
+        args.db,
+        llm=llm,
+        checkpoint_path=args.checkpoint_db,
+        bus=make_bus(args.bus),
+        agent_diagnosis=args.agent_diagnosis,
     )
 
     # 建档只碰 SQLite,不依赖 Redis —— 放在 ping 之前,免得没起 Redis 就建不了档案
@@ -245,6 +265,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="LangGraph 检查点库(单独一个文件,避免和主库事务互相干扰)",
     )
     parser.add_argument("--no-llm", action="store_true", help="不装配 LLM(解释退化为模板)")
+    parser.add_argument(
+        "--agent-diagnosis",
+        action="store_true",
+        help="答题后额外跑 agent 诊断(LLM 自主调工具)。★ 贵:一次好几轮调用,默认关",
+    )
     parser.add_argument(
         "--bus",
         choices=("redis", "memory"),

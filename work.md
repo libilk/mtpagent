@@ -129,7 +129,7 @@ commit_offset → 完成
 | `workers/` | 常驻消费、编排调用 | HTTP |
 | `knowledge/` | 图的存取、遍历、写入治理 | 画像 |
 | `profile/` | 掌握度、记忆、易错、持久化 | 图 |
-| `workflow/` | 步骤编排、状态流转(P4 起 = `pipeline.py` 的 LangGraph 链 + `query.py` 只读门面) | 存储细节 |
+| `workflow/` | 步骤编排、状态流转(P4 起 = `pipeline.py` 的 LangGraph 链 + `query.py` 只读门面;另有 **agent 支线** `agent_tools.py` / `agent_diagnosis.py`,与确定性路径**并列**,默认不启用) | 存储细节 |
 | `evaluation/` | 模拟学生、指标、跑分 | 生产逻辑 |
 
 **硬规矩:依赖只能向下,`api/` 不许 import `knowledge/` 或 `profile/`。**
@@ -439,12 +439,14 @@ coach/
 │   └── run_all.py               # ✅ 开发期单进程拉起 + 定时 tick
 ├── workflow/
 │   ├── query.py                 # ✅ 只读门面(api 依赖它,不直接依赖图/画像)
-│   └── pipeline.py              # ✅ ★ LangGraph 链 + checkpointer(P4)
+│   ├── pipeline.py              # ✅ ★ LangGraph 链 + checkpointer(P4)
+│   ├── agent_tools.py           # ✅ agent 支线:把确定性内核包成 LLM 能调的工具
+│   └── agent_diagnosis.py       # ✅ agent 支线:手写 ReAct 循环 + checkpointer
 ├── evaluation/                  # ✅ P5 评测
 │   ├── simulated_student.py     # 模拟学生(生成模型刻意与 BKT 不同)
 │   ├── metrics.py               # AUC / Brier / 校准 / Top-1
 │   ├── baselines.py             # 对照组:扁平召回
-│   ├── run_eval.py              # 四张表 + RESULTS.md
+│   ├── run_eval.py              # 四张表(五臂)+ RESULTS.md
 │   └── results/                 # results.json + RESULTS.md
 └── api/
     ├── main.py                  # ✅ create_app(bus=, query_service=)
@@ -731,8 +733,20 @@ docker run -d -p 6379:6379 --name coach-redis redis:7-alpine
 # 测试
 .venv/Scripts/python.exe -m pytest tests/coach/ -q
 
-# P5:跑评测
-.venv/Scripts/python.exe -m coach.evaluation.run_eval --n 50
+# P5:跑评测(四张表)
+.venv/Scripts/python.exe -m coach.evaluation.run_eval --n 30
+
+# agent 支线:单个知识点的诊断冒烟(需 DASHSCOPE_API_KEY)
+.venv/Scripts/python.exe -m coach.workflow.agent_diagnosis --learner u1 --goal algo.dp
+
+# agent 支线:评测第五个臂(★ 要真调 LLM,贵且不可复现,默认关)
+.venv/Scripts/python.exe -m coach.evaluation.run_eval --n 30 --agent --agent-n 5
+
+# agent 支线:在真实系统里打开(答题后异步跑一次诊断,默认关)
+.venv/Scripts/python.exe -m coach.workers.run_all --init-learner u1 --goal algo.dp --agent-diagnosis
+
+# 入口读 agent 诊断结果(只读 worker 预先写好的缓存,不调 LLM)
+#   GET /gap/u1/algo.dp?mode=agent
 ```
 
 **注意:** 已有的两个测试失败([test_llm_mcp_client.py](tests/test_llm_mcp_client.py))是历史遗留,与 coach 无关。
@@ -928,4 +942,5 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | 2026-09-14 | **修完 §11.1 的 P0/P1/P2 大部分**。① **题库**:新增 `problem_bank.py`(文件/URL 导入)+ `data/coach/problems/dsa_seed.json`,**19 道题覆盖全部 22 个知识点**(原 13 道只覆盖 16 个 —— 没题的点永远产生不了证据,根因定位原理上够不着);题目数据从 `builder.py` 搬出,内置与外部导入走**同一条路径**。② **计划**:只推有题可做的点(白费步数 **82% → 0%**)+ 补上 §2.2 一直缺的 **advance 分支**(`next_to_learn` 只在前置闭包里找,**目标自己永远不在候选里**,导致前置补完后计划变空 —— 实测 24 步 18 步为空)。表 3 由 **-8.0% 转 +1.2%**,但幅度太小不足以声称有效。③ **冷启动**:`next_to_learn` 不再把"未观测的前置"当成"没准备好",改标 `probe`。④ **`GET /profile`** 补上(含 `error_patterns`,能识别跨知识点的系统性误解)。⑤ **`profile/errors.py`** 落地为分析层。⑥ 清掉 N+1(`prerequisite_adjacency`)与 prompt 容量问题(`select_relevant_concepts`,相似度抽到 `domain/text.py` 与评测基线共用)。⑦ **BKT 降级**:在 `bkt.py` 明确声明「只用于排序,不用于预测」。测试 274 项 / 全量 **424 通过** |
 | 2026-09-14 | 评测的 Limitations 改为**全部由数据触发**(问题修掉后对应限制自动消失,不留在文档里误导人);新增一条反过来的说明:题库覆盖是根因定位的**必要条件** |
 | 2026-09-14 | **题库新增 LeetCode 题单来源**:`coach/knowledge/leetcode_import.py`(抓取 leetcode.cn 公开 GraphQL + 转题库 JSON,**不写库**)+ `problem_bank.py` 的 `--from-leetcode` 分支。`top-100-liked` 实测 **100 题 → 81 题可导入**(跳过:答案不唯一 12 / 图里无对应知识点 4 / 设计题 3),已导入真库(21 → **92 题,22/22 知识点仍然全覆盖**)。转换里三处硬处理:①题单接口不给用例,逐题拼 `metaData`+`exampleTestcases`+`content`;②Output 有两种 HTML 形态,统一"块级标签换行 + 找 Output 行";③`grading` 是严格字符串相等,多解题不能收。**再修两处**(导入真库后才暴露):④`kth-largest` 的映射覆盖漏了 `algo.quicksort` —— 它是内置题库里 quicksort **唯一**的题源,覆盖种子题会把该知识点变成"没题"(覆盖率 22/22 → 21/22);⑤判分取**最后一条**用例当提交用例,而 LeetCode 示例按「典型→边界」排,末条常是 `head=[]` 这种边界样例 → 丢掉空集合用例并把首条转到末尾。产出 `data/coach/problems/top-100-liked.json`。测试 +21 项(注入假抓取,不打网络) |
+| 2026-09-14 | **`study.md` 补齐**:拿实际代码逐文件核对,发现漏了 **11 个文件**。补写 `knowledge/leetcode_import.py`(含今天踩的两个坑:映射覆盖丢 `quicksort`、提交用例落在边界样例上),以及 `domain/grading`(判分口径——"最后一条用例是提交用例"这条约定正是 `MULTI_ANSWER_SLUGS` 存在的原因)· `domain/ids` · `domain/text` · `coordination/memory` · `workers/planner_worker`/`scheduler_worker`(抽出三个 worker 共用的 `process()` 五行契约)· `workers/run_all`(装配顺序)· `api/main` · `api/schemas` · `demo`。阅读顺序表行数按实际重核(阶段 3 1060→1493、阶段 4 745→1468、阶段 5 352→432),并修正一处旧标题("三个路标"实际列了四条)。**33 个模块现已全部收录** |
 | 2026-09-14 | **文档与代码一致性审计**:拿实际文件核对三份文档里提到的每个模块和数字。修正 ①`mainconten.md` 页首状态(还写着"方向待确认")、架构图里的 `events/event_bus.py`(我们只做了 `schema.py`)、对比表的规模/编排/评测三行;**§3.3 的评测表补上实际结果**(含"规划这项没站住")。②`work.md` §6 目录树四处不准(`errors.py` 还标着空壳、`memory.py` 被放错到 `events/`、缺 `baselines.py`/`results/`/`GET /profile`)、§2.1 图的重复行、§2.3 `events/` 职责。③`README` 的过时数字(测试计数、7→6 条 Limitations)—— 并于 09-14 复核修正为 **274**(此前记的 269 是错的)。**现在三份文档里提到的 32 个模块文件全部能找到** |

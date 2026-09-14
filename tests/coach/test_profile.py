@@ -261,3 +261,38 @@ class TestErrorPatterns:
         profile.bump_error("u1", "a", "wrong")
         summary = errors.summary(profile, "u1")
         assert set(summary) == {"top", "recurring"}
+
+
+class TestAgentDiagnosisCache:
+    """agent 诊断缓存(agent 实验 M5)。
+
+    为什么单独一张表:迁移靠 `CREATE TABLE IF NOT EXISTS`,而给
+    `gap_explanations` 加 `mode` 列要连主键一起改 —— 那没法幂等迁移,
+    老库的主键不会变,两种模式会互相覆盖。
+    """
+
+    def test_round_trip(self, profile):
+        payload = {"kp_id": "algo.dp", "root_causes": [], "explanation": "先补函数调用"}
+        profile.set_agent_diagnosis("u1", "algo.dp", payload, top_k=3, depth=3)
+
+        got = profile.get_agent_diagnosis("u1", "algo.dp", top_k=3, depth=3)
+
+        assert got["payload"] == payload
+        assert got["generated_at"] > 0
+
+    def test_miss_returns_none(self, profile):
+        assert profile.get_agent_diagnosis("u1", "algo.dp", top_k=3, depth=3) is None
+
+    def test_param_mismatch_is_treated_as_a_miss(self, profile):
+        """★ 缓存是拿别的 top_k 算的 → 当未命中。拿旧参数的结果糊弄会误导人。"""
+        profile.set_agent_diagnosis("u1", "algo.dp", {"kp_id": "algo.dp"}, top_k=5, depth=3)
+
+        assert profile.get_agent_diagnosis("u1", "algo.dp", top_k=3, depth=3) is None
+        assert profile.get_agent_diagnosis("u1", "algo.dp", top_k=5, depth=1) is None
+        assert profile.get_agent_diagnosis("u1", "algo.dp", top_k=5, depth=3) is not None
+
+    def test_overwrite_replaces_payload(self, profile):
+        profile.set_agent_diagnosis("u1", "algo.dp", {"v": 1}, top_k=3, depth=3)
+        profile.set_agent_diagnosis("u1", "algo.dp", {"v": 2}, top_k=3, depth=3)
+
+        assert profile.get_agent_diagnosis("u1", "algo.dp", top_k=3, depth=3)["payload"] == {"v": 2}

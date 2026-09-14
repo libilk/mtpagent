@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 from coach import config
 from coach.events import schema as events
 from coach.events.schema import Event
+from coach.workflow.agent_diagnosis import refresh_agent_diagnosis
 from coach.workflow.pipeline import refresh_explanation
 from coach.workflow.query import QueryService
 
@@ -40,6 +41,7 @@ class PlannerWorker:
         stream: str = config.STREAM_PROFILE,
         group: str = config.GROUP_COACH,
         consumer: str = "planner-1",
+        agent_diagnosis: bool = False,
     ):
         self.knowledge = knowledge
         self.profile = profile
@@ -50,6 +52,9 @@ class PlannerWorker:
         self.stream = stream
         self.group = group
         self.consumer = consumer
+        # ★ 默认关。一次 agent 诊断要好几轮 LLM 调用(贵且慢),
+        #   挂在每条 profile.updated 上会失控 —— 要开必须显式说。
+        self.agent_diagnosis = agent_diagnosis
         self._stop = asyncio.Event()
 
     # ---------------- 业务 ----------------
@@ -80,7 +85,24 @@ class PlannerWorker:
         refreshed = [
             kp for kp in kp_ids if self.refresh_explanation(event.learner_id, kp, not_before=since)
         ]
-        return {"status": "ok", "refreshed": refreshed, "checked": kp_ids}
+        result: Dict[str, Any] = {"status": "ok", "refreshed": refreshed, "checked": kp_ids}
+        if self.agent_diagnosis:
+            result["agent_diagnosed"] = self.refresh_agent(event.learner_id, not_before=since)
+        return result
+
+    def refresh_agent(self, learner_id: str, not_before: Optional[float] = None) -> Optional[str]:
+        """对**学习者的目标知识点**跑一次 agent 诊断,写进缓存。
+
+        只跑目标这一个:一次诊断要好几轮 LLM 调用,对 payload 里每个 kp 都跑会失控。
+        没配目标就什么都不做。
+        """
+        goal = (self.profile.get_profile(learner_id) or {}).get("goal_kp_id")
+        if not goal:
+            return None
+        wrote = refresh_agent_diagnosis(
+            self.knowledge, self.profile, self.llm, learner_id, goal, not_before=not_before
+        )
+        return goal if wrote else None
 
     def handle_tick(self, event: Event) -> Dict[str, Any]:
         """定时巡检:对学习者目标知识点重算根因(P3 会在此基础上出计划)。"""

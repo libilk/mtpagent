@@ -20,8 +20,9 @@ import math
 import random
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from coach import config
 from coach.coordination.journal import Journal
@@ -332,8 +333,65 @@ def exp_planning_gain(
 
 # ================================================================ 表 4:根因定位 ★
 
+class AgentPredictor:
+    """把 agent 诊断器包成「给定 (目标, 掌握度, 观测集) → 排名列表」的预测器。
+
+    这样它和另外四个臂**共用同一份掌握度、同一个候选目标、同一条评分口径** ——
+    差别只剩「怎么选、怎么排」。顺带记录步数/工具次数,这些是确定性臂不存在的成本。
+
+    单次失败**不让整轮评测崩**:计数后返回空列表,最后如实报出来。
+    """
+
+    def __init__(self, llm, top_k: int = 3, tag: str = "full"):
+        self.llm = llm
+        self.top_k = top_k
+        self.tag = tag
+        self.steps: List[int] = []
+        self.tool_calls = 0
+        self.terminations: Counter = Counter()
+        self.failures = 0
+
+    def predict(self, knowledge, learner_id: str, target: str, mastery: Dict, observed: set) -> List[str]:
+        from coach.workflow.agent_diagnosis import DiagnosisAgent
+        from coach.workflow.agent_tools import DiagnosisContext
+
+        context = DiagnosisContext.from_maps(knowledge, learner_id, mastery, observed)
+        agent = DiagnosisAgent(knowledge, self.llm)
+        try:
+            result = agent.run(
+                learner_id,
+                target,
+                context,
+                top_k=self.top_k,
+                thread_id=f"eval:{self.tag}:{learner_id}:{target}",
+            )
+        except Exception:  # noqa: BLE001 —— 单例失败不该毁掉整轮评测
+            self.failures += 1
+            return []
+
+        meta = result["_agent"]
+        self.steps.append(meta["steps"])
+        self.tool_calls += len(meta["tools_used"])
+        self.terminations[meta["terminated"]] += 1
+        return [r["kp_id"] for r in result["root_causes"]]
+
+    def summary(self) -> Dict:
+        count = len(self.steps)
+        return {
+            "cases": count,
+            "failures": self.failures,
+            "mean_steps": round(sum(self.steps) / count, 2) if count else None,
+            "mean_tool_calls": round(self.tool_calls / count, 2) if count else None,
+            "terminations": dict(self.terminations),
+        }
+
+
 def exp_root_cause(
-    env: Env, n_students: int = 30, coverage: str = "full", top_k: int = 3
+    env: Env,
+    n_students: int = 30,
+    coverage: str = "full",
+    top_k: int = 3,
+    agent: Optional[AgentPredictor] = None,
 ) -> Dict:
     """图遍历 vs 扁平召回,谁更能指出真正的根因。
 
@@ -356,9 +414,14 @@ def exp_root_cause(
     **第四个臂 `graph_no_status` 是消融对照:** 用同一份候选集、同一套排序,
     但**不区分"未观测"与"已观测且弱"**(即 observed=None,修复前的行为)。
     有了它,"两态区分到底有没有用"就有数字可看,而不是靠嘴说。
+
+    **第五个臂 `agent`(可选,默认关):** 同一个目标、同一份掌握度,但由 LLM
+    自己决定调哪些工具、按什么排。传 `AgentPredictor` 才跑 —— 它要真调 LLM,
+    是五个臂里唯一**不可复现**且**要花钱**的一个。不传则行为和以前逐字节一致。
     """
     flat = baselines.FlatRetrievalBaseline(env.knowledge)
     graph_pred, flat_pred, closure_random_pred, no_status_pred = [], [], [], []
+    agent_pred: List[List[str]] = []
     truths = []
     skipped = 0
 
@@ -435,12 +498,14 @@ def exp_root_cause(
             graph_pred.append([r["kp_id"] for r in graph_roots])
             no_status_pred.append([r["kp_id"] for r in legacy_roots])
             flat_pred.append([r["kp_id"] for r in flat_roots])
+            if agent is not None:
+                agent_pred.append(agent.predict(env.knowledge, learner, target, mastery, observed))
             truths.append(weakness)
 
     if not truths:
         return {"error": "没有可评的样本"}
 
-    return {
+    result = {
         "n_cases": len(truths),
         "n_students": n_students,
         "coverage": coverage,
@@ -462,6 +527,13 @@ def exp_root_cause(
         "flat_recall_at_k": round(metrics.recall_at_k(flat_pred, truths), 4),
         "random_guess_top1": round(1.0 / max(1, len(env.knowledge.list_concepts())), 4),
     }
+    if agent is not None:
+        # ★ 样本数写进结果里 —— agent 臂默认只跑一个子集(它要花钱),
+        #   不写清楚就成了"拿 15 个样本的数字去和 90 个样本比"。
+        result["agent_top1_accuracy"] = round(metrics.top1_accuracy(agent_pred, truths), 4)
+        result["agent_recall_at_k"] = round(metrics.recall_at_k(agent_pred, truths), 4)
+        result["agent"] = {**agent.summary(), "n_truths": len(truths)}
+    return result
 
 
 # ================================================================ 输出
@@ -555,7 +627,68 @@ def render_markdown(results: Dict) -> str:
         "> 有了它,\"两态区分到底值多少\"就是数字而不是说法。",
         "> 「闭包内随机排序」则隔离掉「候选集大小」这个因素。",
         "",
+        render_agent_table(results),
         render_limitations(results),
+    ]
+    return "\n".join(lines)
+
+
+def render_agent_table(results: Dict) -> str:
+    """表 5:agent 诊断 vs 图遍历 —— **同一个子样本**上的对照。
+
+    单独成表而不并进表 4,是因为样本数不同。并进去会让人误以为可以横向比,
+    而实际上 agent 臂只跑了更小的 n(它要真调 LLM,花钱且慢)。
+    本表里**五个臂都在同一个 n 上重算**,所以横向比是成立的。
+    """
+    block = results.get("root_cause_agent")
+    if not block:
+        return ""
+    if block.get("skipped"):
+        return "\n".join(
+            [
+                "## 表 5 agent 诊断(第五个臂)",
+                "",
+                f"**未运行** —— {block['reason']}",
+                "",
+                "> 这一臂要真调 LLM,是五个臂里唯一**花钱且不可复现**的。",
+                "> 没有 key 时不跑,也不编数字。开法:`--agent`(另加 `--agent-n` 控制样本数)。",
+                "",
+            ]
+        )
+
+    lines = [
+        "## 表 5 agent 诊断:同样本对照",
+        "",
+        f"样本 n={block['n_students']} 个学生 / 每个条件下的目标知识点数见下表。",
+        "**本表所有臂都在同一个 n 上重算**,所以可以横向比。",
+        "",
+        "| 条件 | 样本 | 臂 | Top-1 | Recall@k |",
+        "|---|---|---|---|---|",
+    ]
+    for key, label in (("full", "作答覆盖充分"), ("sparse", "作答稀疏")):
+        arm = block[key]
+        lines += [
+            f"| {label} | {arm['n_cases']} | **图遍历(两态区分)** "
+            f"| **{arm['graph_top1_accuracy']}** | {arm['graph_recall_at_k']} |",
+            f"| | | 扁平召回 | {arm['flat_top1_accuracy']} | {arm['flat_recall_at_k']} |",
+            f"| | | **agent 诊断** | **{arm.get('agent_top1_accuracy')}** "
+            f"| {arm.get('agent_recall_at_k')} |",
+        ]
+
+    lines += ["", "代价(确定性臂不需要这一栏,它们恒为 0):", ""]
+    lines += ["| 条件 | 平均步数 | 平均工具调用 | 结束方式 | 失败 |", "|---|---|---|---|---|"]
+    for key, label in (("full", "充分"), ("sparse", "稀疏")):
+        meta = block[key].get("agent") or {}
+        lines.append(
+            f"| {label} | {meta.get('mean_steps')} | {meta.get('mean_tool_calls')} "
+            f"| {meta.get('terminations')} | {meta.get('failures')} |"
+        )
+    lines += [
+        "",
+        f"> agent 臂耗时 {block.get('elapsed_seconds')}s。",
+        "> 「结束方式」里 `submitted` 是正常交卷,`step_limit` 是跑满上限、"
+        "`no_submission` 是模型不调工具直接收尾 —— 后两者都按「没给出答案」计入。",
+        "",
     ]
     return "\n".join(lines)
 
@@ -709,6 +842,39 @@ def render_limitations(results: Dict) -> str:
             )
         )
 
+    agent_block = results.get("root_cause_agent")
+    if agent_block and not agent_block.get("skipped"):
+        full_arm = agent_block["full"]
+        verdict = (
+            "**agent 没有赢**"
+            if (full_arm.get("agent_top1_accuracy") or 0) <= full_arm["graph_top1_accuracy"]
+            else "**agent 赢了这一局**"
+        )
+        sections.append(
+            (
+                "★ 表 5 的 agent 臂:读数之前先看清它的三个前提",
+                [
+                    f"在同样的 {agent_block['n_students']} 个学生上,图遍历 "
+                    f"{full_arm['graph_top1_accuracy']} vs agent "
+                    f"{full_arm.get('agent_top1_accuracy')} —— {verdict}。",
+                    "**但这条结论的边界比其它表窄得多,有三个必须说清的前提:**",
+                    "1. **样本更小。** agent 要真调 LLM,慢且花钱,所以只跑了 "
+                    f"{agent_block['n_students']} 个学生;主表的 n 更大。"
+                    "本表内部五个臂同分母,可以横向比,但**不要拿它和表 4 比**。",
+                    "2. **不可复现。** 循环里已强制 `temperature=0`,但那只是「尽量确定」,"
+                    "采样抖动仍在。同一个被测对象重跑,数字会动;其它四个臂是纯函数,不会。",
+                    "3. **工具集足以重建确定性算法。** agent 拿到的"
+                    "「前置闭包 + 掌握度 + 是否观测过」其实已经**够它自己算出**"
+                    "`detect_gaps` 的结果了(阈值 0.4 写在提示词的推理里)。"
+                    "所以它若表现接近图遍历,那是**它在用工具复现那套算法**,"
+                    "不是它独立发现了新东西 —— 这不是作弊,但也不能读成「图推理被超越」。",
+                    "反过来,agent 的实际弱点是**会凑数**:实测里它为了填满 top_k,"
+                    "把掌握度 0.8+ 的点也列进根因,而确定性版只返回低于阈值的点。"
+                    "这是 `top_k` 口径下的真实差别,值得在上面的数字里记一笔。",
+                ],
+            )
+        )
+
     sections.append(
         (
             "规模小",
@@ -735,8 +901,16 @@ def run_all(
     plan_students: Optional[int] = None,
     plan_steps: int = 24,
     root_students: Optional[int] = None,
+    with_agent: bool = False,
+    agent_students: int = 5,
+    llm=None,
 ) -> Dict:
-    """跑四张表。`plan_*` / `root_students` 是为了让测试能用很小的规模跑通。"""
+    """跑四张表。`plan_*` / `root_students` 是为了让测试能用很小的规模跑通。
+
+    `with_agent` 打开第五个臂(agent 诊断)。**它单独跑一个更小的样本**,
+    并且**五个臂都在这个子样本上重算一遍** —— 这样对照才同分母。
+    把 agent 塞进主表会变成"拿 15 个样本的数字跟 90 个比",那是错的。
+    """
     env = Env(seed=seed)
     try:
         started = time.time()
@@ -762,9 +936,47 @@ def run_all(
             ),
             "elapsed_seconds": round(time.time() - started, 2),
         }
+
+        if with_agent:
+            if llm is None:
+                results["root_cause_agent"] = {
+                    "skipped": True,
+                    "reason": "没有可用的 LLM(未配 key 或未传 --agent);agent 臂未运行。",
+                }
+            else:
+                agent_started = time.time()
+                # 学生由固定种子生成,所以 n=5 的前 5 个与 n=90 的前 5 个**是同一批** —— 子样本严格可比
+                results["root_cause_agent"] = {
+                    "n_students": agent_students,
+                    "full": exp_root_cause(
+                        env,
+                        n_students=agent_students,
+                        coverage="full",
+                        agent=AgentPredictor(llm, tag="full"),
+                    ),
+                    "sparse": exp_root_cause(
+                        env,
+                        n_students=agent_students,
+                        coverage="sparse",
+                        agent=AgentPredictor(llm, tag="sparse"),
+                    ),
+                    "elapsed_seconds": round(time.time() - agent_started, 2),
+                }
         return results
     finally:
         env.close()
+
+
+def build_agent_llm(temperature: float = 0.0):
+    """构建 agent 臂要用的 LLM。**没 key 就返回 None**(而不是抛)——
+    调用方据此把这一臂记成"未运行",绝不编数字。"""
+    import os
+
+    if not os.getenv("DASHSCOPE_API_KEY"):
+        return None
+    from llm.llm_client import LLM
+
+    return LLM(temperature=temperature)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -772,10 +984,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--n", type=int, default=20, help="模拟学生数")
     parser.add_argument("--seed", type=int, default=0, help="随机种子")
     parser.add_argument("--out", default=str(RESULTS_DIR), help="结果输出目录")
+    parser.add_argument(
+        "--agent", action="store_true", help="加跑第五个臂:agent 诊断(要真调 LLM,花钱且不可复现)"
+    )
+    parser.add_argument("--agent-n", type=int, default=5, help="agent 臂的模拟学生数(默认 5,别开大)")
     args = parser.parse_args(argv)
 
-    print(f"开始评测:n={args.n} seed={args.seed}")
-    results = run_all(n_students=args.n, seed=args.seed)
+    llm = build_agent_llm() if args.agent else None
+    if args.agent and llm is None:
+        print("★ 要求了 --agent 但没有 DASHSCOPE_API_KEY —— 这一臂会如实记成「未运行」。")
+
+    print(f"开始评测:n={args.n} seed={args.seed} agent={bool(llm)}")
+    results = run_all(n_students=args.n, seed=args.seed, with_agent=args.agent, agent_students=args.agent_n, llm=llm)
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)

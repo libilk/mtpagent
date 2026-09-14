@@ -267,3 +267,118 @@ class TestRunEvalIntegration:
         markdown = render_markdown(report)
         assert "根因定位" in markdown
         assert "扁平召回" in markdown
+
+    def test_no_agent_arm_by_default(self, report):
+        """默认不跑 agent 臂 —— 确定性那四张表的产出必须和以前一模一样。"""
+        assert "root_cause_agent" not in report
+
+        from coach.evaluation.run_eval import render_markdown
+
+        assert "表 5" not in render_markdown(report)
+
+
+class SubmittingLLM:
+    """假 LLM:第一轮就交卷。不联网、不花钱,只用来验证接线。"""
+
+    def __init__(self, kp_id="algo.dp"):
+        self.kp_id = kp_id
+        self.calls = 0
+
+    def chat_structured(self, messages, tools=None, **kwargs):
+        from llm.llm_client import LLMResponse, ToolCall
+
+        self.calls += 1
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id=f"c{self.calls}",
+                    name="submit_diagnosis",
+                    arguments={"root_causes": [{"kp_id": self.kp_id}], "summary": "假的"},
+                )
+            ],
+        )
+
+
+def _small_run(**overrides):
+    from coach.evaluation.run_eval import run_all
+
+    base = dict(n_students=1, seed=0, plan_students=1, plan_steps=1, root_students=1)
+    return run_all(**{**base, **overrides})
+
+
+@pytest.fixture(scope="module")
+def agent_report():
+    return _small_run(with_agent=True, agent_students=1, llm=SubmittingLLM())
+
+
+@pytest.fixture(scope="module")
+def agent_skipped_report():
+    """要求了 --agent 但没有 LLM —— 这一臂必须如实记成「未运行」,不许编数字。"""
+    return _small_run(with_agent=True, agent_students=1, llm=None)
+
+
+class TestAgentArm:
+    def test_skipped_honestly_when_no_llm(self, agent_skipped_report):
+        block = agent_skipped_report["root_cause_agent"]
+        assert block["skipped"] is True
+        assert "未运行" in block["reason"]
+        assert "agent_top1_accuracy" not in str(block)
+
+    def test_skipped_markdown_says_not_run(self, agent_skipped_report):
+        from coach.evaluation.run_eval import render_markdown
+
+        markdown = render_markdown(agent_skipped_report)
+        assert "**未运行**" in markdown
+        assert "表 5 的 agent 臂" not in markdown, "没跑就不该出现那条限制说明"
+
+    def test_runs_and_produces_scores(self, agent_report):
+        block = agent_report["root_cause_agent"]
+        assert "skipped" not in block
+        for key in ("full", "sparse"):
+            arm = block[key]
+            assert 0.0 <= arm["agent_top1_accuracy"] <= 1.0
+            assert 0.0 <= arm["agent_recall_at_k"] <= 1.0
+
+    def test_all_five_arms_share_the_same_sample(self, agent_report):
+        """★ agent 臂单独跑小样本,但**五个臂必须同一个 n** —— 否则对照不成立。"""
+        for key in ("full", "sparse"):
+            arm = agent_report["root_cause_agent"][key]
+            assert arm["agent"]["cases"] == arm["n_cases"]
+            assert arm["agent"]["failures"] == 0
+
+    def test_records_cost_metrics(self, agent_report):
+        """步数/工具调用是确定性臂恒为 0 的东西,必须一起报出来。"""
+        meta = agent_report["root_cause_agent"]["full"]["agent"]
+        assert meta["mean_steps"] >= 1
+        assert meta["mean_tool_calls"] >= 1  # 至少调了 submit_diagnosis
+        assert meta["terminations"] == {"submitted": meta["cases"]}
+
+    def test_markdown_renders_agent_table_and_limitation(self, agent_report):
+        from coach.evaluation.run_eval import render_markdown
+
+        markdown = render_markdown(agent_report)
+        assert "表 5 agent 诊断" in markdown
+        assert "同样本对照" in markdown
+        assert "表 5 的 agent 臂" in markdown, "跑了就该带出那条限制说明"
+        assert "不可复现" in markdown
+
+    def test_single_failure_does_not_kill_the_run(self, knowledge):
+        """单例失败只计数,不让整轮评测崩 —— 评测崩了比数字难看严重得多。"""
+        from coach.evaluation.run_eval import AgentPredictor
+        from coach.knowledge import builder
+        from coach.knowledge.governance import Governance
+
+        builder.seed_graph(Governance(knowledge))
+
+        class ExplodingLLM:
+            def chat_structured(self, *args, **kwargs):
+                raise RuntimeError("模拟接口挂了")
+
+        predictor = AgentPredictor(ExplodingLLM(), tag="t")
+        assert predictor.predict(knowledge, "u1", "algo.dp", {}, set()) == []
+
+        summary = predictor.summary()
+        assert summary["failures"] == 1
+        assert summary["cases"] == 0
+        assert summary["mean_steps"] is None

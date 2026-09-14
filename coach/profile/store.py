@@ -50,6 +50,18 @@ CREATE TABLE IF NOT EXISTS gap_explanations (
     PRIMARY KEY (learner_id, kp_id)
 );
 
+-- ★ agent 诊断缓存(agent 实验 M5)。
+-- 为什么是**新表**而不是给 gap_explanations 加一列:
+-- 迁移靠 CREATE TABLE IF NOT EXISTS,加列要连主键一起改成
+-- (learner_id, kp_id, mode) —— 那就没法幂等迁移了:老库的主键不会变,两种模式会互相覆盖。
+-- top_k/depth 一起存是因为诊断结果依赖它们;读的时候对不上要当**未命中**,
+-- 而不是拿旧参数算出来的结果糊弄。
+CREATE TABLE IF NOT EXISTS agent_diagnoses (
+    learner_id TEXT, kp_id TEXT, payload TEXT,
+    top_k INTEGER, depth INTEGER, generated_at REAL,
+    PRIMARY KEY (learner_id, kp_id)
+);
+
 CREATE TABLE IF NOT EXISTS answers (
     answer_id TEXT PRIMARY KEY, learner_id TEXT, problem_id TEXT,
     kp_ids TEXT, correct INTEGER, answer_text TEXT,
@@ -382,6 +394,54 @@ class ProfileStore:
             (learner_id, kp_id),
         ).fetchone()
         return dict(row) if row else None
+
+    # ---------------- agent 诊断缓存 ----------------
+
+    def set_agent_diagnosis(
+        self,
+        learner_id: str,
+        kp_id: str,
+        payload: Dict[str, Any],
+        top_k: int,
+        depth: int,
+        ts: Optional[float] = None,
+    ) -> None:
+        """写入一份 agent 诊断结果。`payload` 是完整的 view(不含 learner_id)。"""
+        self._write(
+            """
+            INSERT INTO agent_diagnoses (learner_id, kp_id, payload, top_k, depth, generated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(learner_id, kp_id) DO UPDATE SET
+                payload = excluded.payload,
+                top_k = excluded.top_k,
+                depth = excluded.depth,
+                generated_at = excluded.generated_at
+            """,
+            (
+                learner_id,
+                kp_id,
+                json.dumps(payload, ensure_ascii=False),
+                top_k,
+                depth,
+                time.time() if ts is None else ts,
+            ),
+        )
+
+    def get_agent_diagnosis(
+        self, learner_id: str, kp_id: str, top_k: int, depth: int
+    ) -> Optional[Dict[str, Any]]:
+        """读缓存。**参数对不上就当没有** —— 拿别的 top_k/depth 算出来的结果会误导人。"""
+        row = self.conn.execute(
+            "SELECT payload, top_k, depth, generated_at FROM agent_diagnoses "
+            "WHERE learner_id = ? AND kp_id = ?",
+            (learner_id, kp_id),
+        ).fetchone()
+        if not row or row["top_k"] != top_k or row["depth"] != depth:
+            return None
+        return {
+            "payload": json.loads(row["payload"]),
+            "generated_at": row["generated_at"],
+        }
 
     # ---------------- 幂等 ----------------
 
