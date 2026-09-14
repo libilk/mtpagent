@@ -222,7 +222,7 @@ python -m coach.evaluation.run_eval --n 30
 **跑测试:**
 
 ```bash
-python -m pytest tests/coach/ -q     # 269 项
+python -m pytest tests/coach/ -q     # 274 项
 ```
 
 **依赖**:`fastapi` `uvicorn[standard]` `redis` `langgraph` `langgraph-checkpoint-sqlite`

@@ -18,7 +18,7 @@
 **一句话:** 用知识图谱多跳推理定位"学不会的根因"的学习 Agent,并以量化评测证明图推理相比扁平检索的增益。
 
 **当前状态:** **P0~P6 全部完成**。
-截至 2026-09-14:`coach/` 约 7k 行,coach 测试 269 项 / 全量 424 项。
+截至 2026-09-14:`coach/` 约 6.3k 行,coach 测试 **274 项** / 全量 **424 项**(426 收集,2 个历史失败)。
 四张评测表已产出:**两张是负面结果**(BKT 预测不可用、规划没跑赢随机),已如实写进
 [evaluation/results/RESULTS.md](coach/evaluation/results/RESULTS.md) 的 Limitations。
 根因定位那张(核心卖点)经两态区分修复后,**两个条件都反超对照组**(0.6000 / 0.6667;详见 §7 P5)。
@@ -919,6 +919,6 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | 2026-09-13 | **P6 完成**:`README.md`(评测表放最前 + 7 条 Limitations)+ `demo.sh`/`coach/demo.py`(起真 uvicorn、打真 HTTP、**零外部依赖**)+ `requirements-coach.txt`。**主动跳过 `docker-compose.yml`** —— 开发机 Docker daemon 未启动,写一个没验证过的交付物与本项目标准冲突,README 里已如实说明 |
 | 2026-09-13 | 修复(全新库踩坑):`schema.connect()` 只连接不建表,导致 `demo` 与 `run_all` 在全新数据库上都会报 `no such table`。新增 `schema.open_db()` = 连接 + 建表,demo / run_all / query 工厂统一改用它 |
 | 2026-09-13 | `coach/coordination/memory.py`:把测试里的 `FakeBus` 收编为正式代码 `InMemoryBus`,测试与 demo 共用一份实现,避免两套漂移 |
-| 2026-09-14 | **修完 §11.1 的 P0/P1/P2 大部分**。① **题库**:新增 `problem_bank.py`(文件/URL 导入)+ `data/coach/problems/dsa_seed.json`,**19 道题覆盖全部 22 个知识点**(原 13 道只覆盖 16 个 —— 没题的点永远产生不了证据,根因定位原理上够不着);题目数据从 `builder.py` 搬出,内置与外部导入走**同一条路径**。② **计划**:只推有题可做的点(白费步数 **82% → 0%**)+ 补上 §2.2 一直缺的 **advance 分支**(`next_to_learn` 只在前置闭包里找,**目标自己永远不在候选里**,导致前置补完后计划变空 —— 实测 24 步 18 步为空)。表 3 由 **-8.0% 转 +1.2%**,但幅度太小不足以声称有效。③ **冷启动**:`next_to_learn` 不再把"未观测的前置"当成"没准备好",改标 `probe`。④ **`GET /profile`** 补上(含 `error_patterns`,能识别跨知识点的系统性误解)。⑤ **`profile/errors.py`** 落地为分析层。⑥ 清掉 N+1(`prerequisite_adjacency`)与 prompt 容量问题(`select_relevant_concepts`,相似度抽到 `domain/text.py` 与评测基线共用)。⑦ **BKT 降级**:在 `bkt.py` 明确声明「只用于排序,不用于预测」。测试 269 项 / 全量 **424 通过** |
+| 2026-09-14 | **修完 §11.1 的 P0/P1/P2 大部分**。① **题库**:新增 `problem_bank.py`(文件/URL 导入)+ `data/coach/problems/dsa_seed.json`,**19 道题覆盖全部 22 个知识点**(原 13 道只覆盖 16 个 —— 没题的点永远产生不了证据,根因定位原理上够不着);题目数据从 `builder.py` 搬出,内置与外部导入走**同一条路径**。② **计划**:只推有题可做的点(白费步数 **82% → 0%**)+ 补上 §2.2 一直缺的 **advance 分支**(`next_to_learn` 只在前置闭包里找,**目标自己永远不在候选里**,导致前置补完后计划变空 —— 实测 24 步 18 步为空)。表 3 由 **-8.0% 转 +1.2%**,但幅度太小不足以声称有效。③ **冷启动**:`next_to_learn` 不再把"未观测的前置"当成"没准备好",改标 `probe`。④ **`GET /profile`** 补上(含 `error_patterns`,能识别跨知识点的系统性误解)。⑤ **`profile/errors.py`** 落地为分析层。⑥ 清掉 N+1(`prerequisite_adjacency`)与 prompt 容量问题(`select_relevant_concepts`,相似度抽到 `domain/text.py` 与评测基线共用)。⑦ **BKT 降级**:在 `bkt.py` 明确声明「只用于排序,不用于预测」。测试 274 项 / 全量 **424 通过** |
 | 2026-09-14 | 评测的 Limitations 改为**全部由数据触发**(问题修掉后对应限制自动消失,不留在文档里误导人);新增一条反过来的说明:题库覆盖是根因定位的**必要条件** |
-| 2026-09-14 | **文档与代码一致性审计**:拿实际文件核对三份文档里提到的每个模块和数字。修正 ①`mainconten.md` 页首状态(还写着"方向待确认")、架构图里的 `events/event_bus.py`(我们只做了 `schema.py`)、对比表的规模/编排/评测三行;**§3.3 的评测表补上实际结果**(含"规划这项没站住")。②`work.md` §6 目录树四处不准(`errors.py` 还标着空壳、`memory.py` 被放错到 `events/`、缺 `baselines.py`/`results/`/`GET /profile`)、§2.1 图的重复行、§2.3 `events/` 职责。③`README` 的过时数字(242→269 项、7→6 条 Limitations)。**现在三份文档里提到的 32 个模块文件全部能找到** |
+| 2026-09-14 | **文档与代码一致性审计**:拿实际文件核对三份文档里提到的每个模块和数字。修正 ①`mainconten.md` 页首状态(还写着"方向待确认")、架构图里的 `events/event_bus.py`(我们只做了 `schema.py`)、对比表的规模/编排/评测三行;**§3.3 的评测表补上实际结果**(含"规划这项没站住")。②`work.md` §6 目录树四处不准(`errors.py` 还标着空壳、`memory.py` 被放错到 `events/`、缺 `baselines.py`/`results/`/`GET /profile`)、§2.1 图的重复行、§2.3 `events/` 职责。③`README` 的过时数字(测试计数、7→6 条 Limitations)—— 并于 09-14 复核修正为 **274**(此前记的 269 是错的)。**现在三份文档里提到的 32 个模块文件全部能找到** |
