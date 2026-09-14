@@ -294,14 +294,14 @@
     "coverage": "full",
     "top_k": 3,
     "skipped_no_successors": 0,
-    "graph_top1_accuracy": 0.6,
-    "graph_recall_at_k": 0.8933,
-    "graph_no_status_top1_accuracy": 0.6,
-    "graph_no_status_recall_at_k": 0.8933,
+    "graph_top1_accuracy": 0.5467,
+    "graph_recall_at_k": 0.84,
+    "graph_no_status_top1_accuracy": 0.5467,
+    "graph_no_status_recall_at_k": 0.84,
     "closure_random_top1_accuracy": 0.5067,
     "closure_random_recall_at_k": 0.96,
     "flat_top1_accuracy": 0.08,
-    "flat_recall_at_k": 0.2267,
+    "flat_recall_at_k": 0.1867,
     "random_guess_top1": 0.0455
   },
   "root_cause_sparse_coverage": {
@@ -310,15 +310,79 @@
     "coverage": "sparse",
     "top_k": 3,
     "skipped_no_successors": 0,
-    "graph_top1_accuracy": 0.6667,
-    "graph_recall_at_k": 0.8133,
-    "graph_no_status_top1_accuracy": 0.4933,
-    "graph_no_status_recall_at_k": 0.8133,
+    "graph_top1_accuracy": 0.68,
+    "graph_recall_at_k": 0.8933,
+    "graph_no_status_top1_accuracy": 0.52,
+    "graph_no_status_recall_at_k": 0.8933,
     "closure_random_top1_accuracy": 0.6267,
     "closure_random_recall_at_k": 0.96,
-    "flat_top1_accuracy": 0.12,
+    "flat_top1_accuracy": 0.1333,
     "flat_recall_at_k": 0.3067,
     "random_guess_top1": 0.0455
   },
-  "elapsed_seconds": 57.61
+  "elapsed_seconds": 52.97,
+  "root_cause_agent": {
+    "n_students": 5,
+    "full": {
+      "n_cases": 14,
+      "n_students": 5,
+      "coverage": "full",
+      "top_k": 3,
+      "skipped_no_successors": 0,
+      "graph_top1_accuracy": 0.3571,
+      "graph_recall_at_k": 0.3571,
+      "graph_no_status_top1_accuracy": 0.3571,
+      "graph_no_status_recall_at_k": 0.3571,
+      "closure_random_top1_accuracy": 0.5,
+      "closure_random_recall_at_k": 1.0,
+      "flat_top1_accuracy": 0.0714,
+      "flat_recall_at_k": 0.2143,
+      "random_guess_top1": 0.0455,
+      "agent_top1_accuracy": 0.4286,
+      "agent_recall_at_k": 0.6429,
+      "agent": {
+        "cases": 14,
+        "failures": 0,
+        "mean_steps": 6.64,
+        "mean_tool_calls": 7.07,
+        "terminations": {
+          "submitted": 11,
+          "step_limit": 2,
+          "no_submission": 1
+        },
+        "n_truths": 14
+      }
+    },
+    "sparse": {
+      "n_cases": 14,
+      "n_students": 5,
+      "coverage": "sparse",
+      "top_k": 3,
+      "skipped_no_successors": 0,
+      "graph_top1_accuracy": 0.4286,
+      "graph_recall_at_k": 0.5,
+      "graph_no_status_top1_accuracy": 0.2143,
+      "graph_no_status_recall_at_k": 0.5,
+      "closure_random_top1_accuracy": 0.6429,
+      "closure_random_recall_at_k": 1.0,
+      "flat_top1_accuracy": 0.0714,
+      "flat_recall_at_k": 0.2143,
+      "random_guess_top1": 0.0455,
+      "agent_top1_accuracy": 0.3571,
+      "agent_recall_at_k": 0.6429,
+      "agent": {
+        "cases": 14,
+        "failures": 0,
+        "mean_steps": 6.79,
+        "mean_tool_calls": 7.29,
+        "terminations": {
+          "submitted": 9,
+          "step_limit": 3,
+          "no_submission": 2
+        },
+        "n_truths": 14
+      }
+    },
+    "elapsed_seconds": 512.08
+  }
 }

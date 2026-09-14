@@ -461,7 +461,12 @@ def exp_root_cause(
             sampled = set(rng.sample(sorted(relevant), k=min(keep, len(relevant))))
             kps = sampled | {weakness}
 
-        for kp in kps:
+        # ★ 必须 sorted:之前直接迭代 set,而 Python 的字符串哈希是**逐进程随机**的
+        #   (`PYTHONHASHSEED`),于是同一份代码同一个种子,换个进程跑出来的数字就不同
+        #   —— 实测跨度 0.48~0.64。这里每次迭代都会调 simulator.answer() 抽随机数,
+        #   顺序一变,同一批随机数就分给了不同的知识点。
+        #   别的实验迭代的都是 dict/list(顺序稳定),只有这一处踩坑。
+        for kp in sorted(kps):
             for problem_id in problems_for_kp(env, kp):
                 problem = env.problems[problem_id]
                 correct = env.simulator.answer(student, problem)
