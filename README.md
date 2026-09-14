@@ -259,4 +259,5 @@ DeepTutor 列了十几种检索引擎,一个效果数字都没有。这个项目
 |---|---|
 | [mainconten.md](mainconten.md) | 定位与设计总纲(为什么做、做什么) |
 | [work.md](work.md) | 实施手册与进度台账(怎么做、做到哪、卡在哪) |
+| [study.md](study.md) | **代码阅读指南**(按什么顺序读、每个文件在干什么) |
 | [coach/evaluation/results/RESULTS.md](coach/evaluation/results/RESULTS.md) | 完整评测数字 + 6 条 Limitations |

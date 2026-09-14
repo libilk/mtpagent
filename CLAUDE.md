@@ -16,6 +16,7 @@
 |---|---|---|
 | [work.md](work.md) | **怎么做、做到哪了** | **每次开工先读 §9 §10** |
 | [mainconten.md](mainconten.md) | 为什么做、做什么 | 需要理解定位时读 §4 |
+| [study.md](study.md) | **代码怎么读**(意图→骨架→细节) | 要读懂代码思路时 |
 | [PLAN.md](PLAN.md) | 作品集 A 的改造计划 | 只做 coach 时不用读 |
 | `LEARNING_COACH*.md` | 过程记录,已被 mainconten.md 取代 | 一般不用读 |
 
