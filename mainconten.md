@@ -5,7 +5,9 @@
 > 保留那两份作过程记录,但**以本文为准**。
 >
 > **目标:** 一个能拿去找 AI 应用 / Agent 开发实习的作品集项目。
-> **状态:** 方向待确认。
+> **状态:** **P0~P6 已全部实现并合并**。实际规模:coach 约 6.3k 行 + 测试 3.1k 行;
+> 评测结果(含两个负面结论)见 [coach/evaluation/results/RESULTS.md](coach/evaluation/results/RESULTS.md)。
+> 本文保留**设计时的判断**,实现中若有出入,以 [work.md](work.md) §11.3 的更正为准。
 
 ---
 
@@ -141,13 +143,13 @@ capabilities/mastery/
 
 | | WeSmartFlow | DeepTutor | 我们的目标 |
 |---|---|---|---|
-| 规模 | 627 文件 | 3559 文件 / 200k 行 | **≤ 5k 行** |
+| 规模 | 627 文件 | 3559 文件 / 200k 行 | **6.3k 行 + 3.1k 行测试**(达成) |
 | 定位 | 学习框架 | 学习平台 | **单点做深** |
 | 图 | 自建 kg 模块 + SQLite | GraphRAG/LightRAG 多引擎 | **SQLite 表 + 递归 CTE** |
 | 记忆 | 图谱 + 画像 | L1/L2/L3 三层 | **BKT + SM-2** |
 | 队列 | 后台任务 + worker | Redis 协调 + journal | **Redis 协调(简化版)** |
-| 编排 | 自研 agent_core | capability 插件 + 统一 runtime | **单 loop + 线性工作流** |
-| 评测 | 未公开数字 | 未公开数字 | **★ 有量化数字** |
+| 编排 | 自研 agent_core | capability 插件 + 统一 runtime | **LangGraph 答题链 + checkpointer**(P4 从线性链升级) |
+| 评测 | 未公开数字 | 未公开数字 | **★ 四张表已跑出**(两张是负面结论,如实公开) |
 
 ---
 
@@ -224,15 +226,19 @@ capabilities/mastery/
 
 我们比两个大项目多的**只有一样东西:数字**。
 
-| 评测 | 指标 | 为什么两个大项目都没做/没公开 |
-|---|---|---|
-| **掌握度预测准不准** | AUC / Brier | 需要 ground truth,平台不做实验 |
-| **遗忘预测准不准** | 校准曲线 | 同上 |
-| **图相比向量的增益** ★ | 根因定位准确率 | 需要构造对照实验 |
-| **规划相比随机的增益** | 后续正确率提升 | 需要 A/B |
+| 评测 | 指标 | 为什么两个大项目都没做/没公开 | **实际结果** |
+|---|---|---|---|
+| **掌握度预测准不准** | AUC / Brier | 需要 ground truth,平台不做实验 | ❌ AUC 0.534、Brier 比基准率还差 → **已降级为「只用于排序」** |
+| **遗忘预测准不准** | 校准曲线 | 同上 | ✅ 隔 30 天 ECE 0.24→0.35,印证 BKT 不建模遗忘 |
+| **图相比向量的增益** ★ | 根因定位准确率 | 需要构造对照实验 | ✅ 图 0.60/0.67 vs 扁平 0.08/0.12 |
+| **规划相比随机的增益** | 后续正确率提升 | 需要 A/B | ⚠️ 仅 +1.2%,**不足以声称有效** |
 
-**最后两项是核心。** 它们能回答"你为什么要用图 / 为什么要用 BKT"——
-这是面试官**一定会问**的问题,而大多数人答不上来。
+**最后两项是核心**,它们回答"你为什么要用图 / 为什么要用 BKT"。
+
+> **诚实提示:** 这两项里**只有一项站住了**。图推理的增益明显(约 5~8 倍),
+> 但规划的价值**没有被实验证实** —— 诊断出的原因是计划作用域只有目标的前置闭包,
+> 目标达成后就无事可做。**这个负面结论和正面结论一样值钱**:它说明"有 A/B 数字"
+> 比"声称有效"更能暴露设计的真实边界。
 
 ---
 
@@ -268,8 +274,9 @@ capabilities/mastery/
                         │ publish
                         ▼
 ┌──────────────────────────────────────────────────────────┐
-│ events/         event_bus.py        (借鉴 DeepTutor)       │
-│ coordination/   redis.py   ← Redis Stream / Pub-Sub      │
+│ events/         schema.py           (事件信封;借鉴 DeepTutor)│
+│ coordination/   redis.py   ← Redis Stream / 消费组 / 死信 │
+│                 memory.py  ← 进程内总线(demo / 测试)      │
 │                 journal.py ← append-only 事件日志 ★       │
 │                 recovery.py← 重启后从 journal 恢复 ★      │
 └───────────────────────┬──────────────────────────────────┘
@@ -299,7 +306,7 @@ capabilities/mastery/
 | 层 | 职责 | 借鉴来源 |
 |---|---|---|
 | `api/` | 入口,只入队 | DeepTutor |
-| `events/` | 事件总线 | DeepTutor `events/event_bus.py` |
+| `events/` | 事件定义(信封 + 类型)。**没做独立事件总线模块** —— 需要跨进程投递的是 Redis Stream,进程内投递用 `coordination/memory.py` | DeepTutor `events/event_bus.py`(只借鉴了信封设计) |
 | `coordination/` | Redis 协调 + journal + recovery | DeepTutor `runtime/coordination/` |
 | `workers/` | 常驻消费 | WeSmartFlow `apply_worker` / `kg_background` |
 | `knowledge/` | 图谱 + 写入治理 | WeSmartFlow `backend/kg/` |
@@ -484,41 +491,46 @@ DFS + 队列 ─PREREQUISITE──►  拓扑排序
 
 ```
 coach/
-├── config.py
-├── domain/models.py              # 领域模型
+├── config.py                     # ✅ 路径 + 全部算法默认参数
+├── demo.py                       # ✅ 两分钟 demo(零外部依赖,起真 uvicorn)
+├── domain/                       # ✅ models / ids(ULID)/ grading / text(轻量相似度)
 ├── knowledge/                    # 知识图谱
-│   ├── schema.py                 # 建表 DDL
-│   ├── store.py                  # 存取 + 递归 CTE 查询
-│   ├── queries.py                # ★ 多跳查询 / 根因定位
-│   ├── governance.py             # ★ observation → proposal → aggregator
-│   └── builder.py                # 建图流程
+│   ├── schema.py                 # ✅ 建表 DDL + open_db()
+│   ├── store.py                  # ✅ 存取 + 递归 CTE + prerequisite_adjacency
+│   ├── queries.py                # ✅ ★ 多跳查询 / 根因定位(两态区分)
+│   ├── governance.py             # ✅ ★ observation → proposal → aggregator
+│   ├── builder.py                # ✅ LLM 抽取 + 环检测 + 种子建图
+│   └── problem_bank.py           # ✅ 题库导入(文件 / URL)
 ├── profile/                      # 学习者画像
-│   ├── bkt.py                    # 掌握度
-│   ├── sm2.py                    # 间隔重复
-│   ├── errors.py                 # 易错模式
-│   └── store.py
+│   ├── bkt.py                    # ✅ 掌握度(★ 只用于排序,不用于预测)
+│   ├── sm2.py                    # ✅ 间隔重复
+│   ├── errors.py                 # ✅ 易错模式(含跨知识点的系统性误解)
+│   └── store.py                  # ✅ 含事务、observed_kp_ids
 ├── events/
-│   ├── bus.py                    # 事件总线
-│   └── schema.py                 # 事件定义
+│   └── schema.py                 # ✅ 事件定义(信封 + 类型)
 ├── coordination/
-│   ├── redis.py                  # Redis Stream 封装
-│   ├── journal.py                # ★ append-only 日志
-│   └── recovery.py               # ★ 重启恢复
+│   ├── redis.py                  # ✅ Redis Stream 封装
+│   ├── memory.py                 # ✅ 进程内总线(demo / 测试;无持久化)
+│   ├── journal.py                # ✅ ★ append-only 日志
+│   └── recovery.py               # ✅ ★ 重启恢复(按事件类型分流)
 ├── workers/
-│   ├── profile_worker.py
-│   ├── planner_worker.py
-│   ├── scheduler_worker.py
-│   └── run_all.py
+│   ├── profile_worker.py         # ✅ 消费 → 交给 workflow/pipeline
+│   ├── planner_worker.py         # ✅ 解释缓存过期时刷新
+│   ├── scheduler_worker.py       # ✅ 到期扫描 → 计划
+│   └── run_all.py                # ✅ 单进程拉起 + 定时 tick + --seed-only
 ├── workflow/
-│   └── pipeline.py               # 线性 async 链(P4 换 LangGraph)
+│   ├── pipeline.py               # ✅ ★ LangGraph 答题链 + checkpointer(P4)
+│   └── query.py                  # ✅ 只读门面(api 依赖它,不直接依赖图/画像)
 ├── evaluation/                   # ★ 差异化所在
-│   ├── simulated_student.py      # 模拟学生(可控制 ground truth)
-│   ├── metrics.py                # AUC / Brier / 校准
-│   └── run_eval.py
+│   ├── simulated_student.py      # ✅ 模拟学生(生成模型刻意与 BKT 不同)
+│   ├── metrics.py                # ✅ AUC / Brier / 校准 / Top-1
+│   ├── baselines.py              # ✅ 对照组:扁平召回
+│   ├── run_eval.py               # ✅ 四张表 + RESULTS.md
+│   └── results/                  # ✅ 结果 JSON + markdown
 └── api/
-    ├── main.py
-    ├── routes.py
-    └── schemas.py
+    ├── main.py                   # ✅ create_app(bus=, query_service=)
+    ├── routes.py                 # ✅ /answer /gap /graph /plan /profile /health
+    └── schemas.py                # ✅
 ```
 
 ## 5.3 API 契约
@@ -532,7 +544,8 @@ GET /profile/{learner_id}
   resp: {goal, mastery_summary, due_now, error_patterns}
 
 GET /plan/{learner_id}
-  resp: {date, items: [{kp_id, action: review|learn|remedial, reason, est_minutes}]}
+  resp: {date, items: [{kp_id, action: review|remedial|probe|learn, reason, est_minutes}]}
+        # review=到期复习 remedial=补根因 probe=前置没测过先摸底 learn=推进新知识点
 
 GET /gap/{learner_id}/{kp_id}          # ★ 核心:根因定位
   resp: {root_causes: [{kp_id, name, mastery, depth, path}], explanation}

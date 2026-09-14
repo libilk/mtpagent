@@ -8,8 +8,8 @@
 > 2. 每完成一个阶段,更新 §7 进度台账,并在 §10 更新记录里加一行
 > 3. 很久没碰之后,直接跳到 §9 恢复指南
 >
-> **最后更新:** 2026-09-13
-> **当前阶段:** **P0~P6 全部完成**。剩余是 §11.1 的待解决问题(计划链路、BKT、真 Redis 验收)
+> **最后更新:** 2026-09-14
+> **当前阶段:** **P0~P6 全部完成**,§11.1 的待解决问题已清到只剩一条(真 Redis 验收,卡在 Docker)
 
 ---
 
@@ -57,8 +57,8 @@
                          ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ ② 事件与协调层  coach/events/ + coach/coordination/            │
-│   redis.py     Redis Stream / memory.py 进程内总线(demo 用)  │
-│   redis.py     Redis Stream(消费组)                          │
+│   redis.py     Redis Stream(消费组 / 死信 / PEL 认领)        │
+│   memory.py    进程内总线(demo / 测试用,无持久化)             │
 │   journal.py   ★ append-only 事件日志(先记后做)               │
 │   recovery.py  ★ 重启后扫 journal + pending,补做未完成事件     │
 └────────────────────────┬─────────────────────────────────────┘
@@ -124,7 +124,7 @@ commit_offset → 完成
 | 模块 | 职责 | 不负责 |
 |---|---|---|
 | `api/` | HTTP 入口、校验、入队 | LLM、判分、图查询 |
-| `events/` | 事件定义、总线 | 持久化 |
+| `events/` | 事件定义(信封 + 类型) | 投递、持久化(投递由 coordination 负责) |
 | `coordination/` | Redis 收发、幂等、journal、recovery | 业务逻辑 |
 | `workers/` | 常驻消费、编排调用 | HTTP |
 | `knowledge/` | 图的存取、遍历、写入治理 | 画像 |
@@ -151,7 +151,7 @@ commit_offset → 完成
 | 工作流 | ~~线性 async 链~~ → **LangGraph + SqliteSaver**(P4 已上) | 先跑通,断点恢复是 P4 的需求 | Temporal(工业级) |
 | LLM | 复用 `llm/llm_client.py` | 已修好协议 | — |
 | 测试 | pytest | 已有 | — |
-| 新增依赖 | `fastapi` `uvicorn[standard]` `redis` + **P4:** `langgraph` `langgraph-checkpoint-sqlite` | 前三是原计划;langgraph 是 P4 明确要求 | 已全部装好 |
+| 新增依赖 | `fastapi` `uvicorn[standard]` `redis` + **P4:** `langgraph` `langgraph-checkpoint-sqlite` | 前三是原计划;langgraph 是 P4 明确要求 | 已全部装好(见 [requirements-coach.txt](requirements-coach.txt)) |
 
 > **P0~P3 不引入**:图库、工作流框架、向量库、前端、Docker。
 
@@ -401,7 +401,7 @@ def has_cycle(edges: list[tuple[str, str]]) -> bool:
 
 ---
 
-## 6. 目录结构(目标形态)
+## 6. 目录结构(实际形态,✅ = 已实现)
 
 ```
 coach/
@@ -422,13 +422,13 @@ coach/
 ├── profile/
 │   ├── bkt.py                   # ✅ §5.3
 │   ├── sm2.py                   # ✅ §5.4
-│   ├── errors.py                # —  P2+ 视需要再拆,当前易错计数在 store.py
-│   └── store.py                 # ✅ §4.2 建表 + 读写 + 幂等表
+│   ├── errors.py                # ✅ 错题模式分析(含跨知识点的系统性误解)
+│   └── store.py                 # ✅ §4.2 建表 + 读写 + 幂等表 + 事务
 ├── events/
-│   ├── schema.py                # ✅ 事件信封 + 类型
-│   └── memory.py                # ✅ 进程内总线(demo / 测试,无持久化)
+│   └── schema.py                # ✅ 事件信封 + 类型
 ├── coordination/
 │   ├── redis.py                 # ✅ Redis Stream / 消费组 / 死信
+│   ├── memory.py                # ✅ 进程内总线(demo / 测试,无持久化)
 │   ├── journal.py               # ✅ ★ append-only
 │   └── recovery.py              # ✅ ★ 重启恢复(按事件类型分流)
 ├── workers/
@@ -440,12 +440,14 @@ coach/
 │   ├── query.py                 # ✅ 只读门面(api 依赖它,不直接依赖图/画像)
 │   └── pipeline.py              # ✅ ★ LangGraph 链 + checkpointer(P4)
 ├── evaluation/                  # ✅ P5 评测
-│   ├── simulated_student.py
-│   ├── metrics.py
-│   └── run_eval.py
+│   ├── simulated_student.py     # 模拟学生(生成模型刻意与 BKT 不同)
+│   ├── metrics.py               # AUC / Brier / 校准 / Top-1
+│   ├── baselines.py             # 对照组:扁平召回
+│   ├── run_eval.py              # 四张表 + RESULTS.md
+│   └── results/                 # results.json + RESULTS.md
 └── api/
     ├── main.py                  # ✅ create_app(bus=, query_service=)
-    ├── routes.py                # ✅ /answer /gap /graph /plan /health
+    ├── routes.py                # ✅ /answer /gap /graph /plan /profile /health
     └── schemas.py               # ✅
 ```
 
@@ -919,3 +921,4 @@ docker start coach-redis || docker run -d -p 6379:6379 --name coach-redis redis:
 | 2026-09-13 | `coach/coordination/memory.py`:把测试里的 `FakeBus` 收编为正式代码 `InMemoryBus`,测试与 demo 共用一份实现,避免两套漂移 |
 | 2026-09-14 | **修完 §11.1 的 P0/P1/P2 大部分**。① **题库**:新增 `problem_bank.py`(文件/URL 导入)+ `data/coach/problems/dsa_seed.json`,**19 道题覆盖全部 22 个知识点**(原 13 道只覆盖 16 个 —— 没题的点永远产生不了证据,根因定位原理上够不着);题目数据从 `builder.py` 搬出,内置与外部导入走**同一条路径**。② **计划**:只推有题可做的点(白费步数 **82% → 0%**)+ 补上 §2.2 一直缺的 **advance 分支**(`next_to_learn` 只在前置闭包里找,**目标自己永远不在候选里**,导致前置补完后计划变空 —— 实测 24 步 18 步为空)。表 3 由 **-8.0% 转 +1.2%**,但幅度太小不足以声称有效。③ **冷启动**:`next_to_learn` 不再把"未观测的前置"当成"没准备好",改标 `probe`。④ **`GET /profile`** 补上(含 `error_patterns`,能识别跨知识点的系统性误解)。⑤ **`profile/errors.py`** 落地为分析层。⑥ 清掉 N+1(`prerequisite_adjacency`)与 prompt 容量问题(`select_relevant_concepts`,相似度抽到 `domain/text.py` 与评测基线共用)。⑦ **BKT 降级**:在 `bkt.py` 明确声明「只用于排序,不用于预测」。测试 269 项 / 全量 **424 通过** |
 | 2026-09-14 | 评测的 Limitations 改为**全部由数据触发**(问题修掉后对应限制自动消失,不留在文档里误导人);新增一条反过来的说明:题库覆盖是根因定位的**必要条件** |
+| 2026-09-14 | **文档与代码一致性审计**:拿实际文件核对三份文档里提到的每个模块和数字。修正 ①`mainconten.md` 页首状态(还写着"方向待确认")、架构图里的 `events/event_bus.py`(我们只做了 `schema.py`)、对比表的规模/编排/评测三行;**§3.3 的评测表补上实际结果**(含"规划这项没站住")。②`work.md` §6 目录树四处不准(`errors.py` 还标着空壳、`memory.py` 被放错到 `events/`、缺 `baselines.py`/`results/`/`GET /profile`)、§2.1 图的重复行、§2.3 `events/` 职责。③`README` 的过时数字(242→269 项、7→6 条 Limitations)。**现在三份文档里提到的 32 个模块文件全部能找到** |
