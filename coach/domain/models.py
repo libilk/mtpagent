@@ -43,7 +43,11 @@ class KnowledgePoint:
 
 @dataclass
 class Edge:
-    """四类关系之一。from_id 是起点,PREREQUISITE 时 from 是 to 的前置。"""
+    """前置关系:from_id 是 to_id 的前置(学 to 之前必须先掌握 from)。
+
+    `type` 目前只有 `PREREQUISITE` 一种取值 —— 另外三类已主动砍掉,
+    理由见本文件顶部注释。
+    """
 
     from_id: str
     to_id: str
