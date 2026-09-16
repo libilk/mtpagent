@@ -248,8 +248,8 @@ async def lifespan(app: FastAPI):
 
 # 创建 FastAPI 应用
 app = FastAPI(
-    title="RAG Agent API",
-    description="多Agent协同编排RAG系统 - 基于LangGraph",
+    title="云集优选 · 售后助手 API",
+    description="电商售后多Agent协同系统 —— 售后政策问答、订单物流查询、退换货办理、投诉工单",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -654,7 +654,7 @@ async def health_check():
 
     return {
         "status": "healthy" if system else "initializing",
-        "service": "RAG Agent API",
+        "service": "云集优选 · 售后助手 API",
         "version": "1.0.0",
         "redis": redis_status,
     }
@@ -795,7 +795,7 @@ async def root():
         return FileResponse(frontend_path, media_type="text/html")
     # 前端文件不存在时返回 API 信息
     return {
-        "service": "RAG Agent API",
+        "service": "云集优选 · 售后助手 API",
         "version": "1.0.0",
         "docs": "/docs",
         "health": "/health",

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RAG Agent - 多智能体协作系统</title>
+<title>云集优选 · 售后助手</title>
 <style>
 /* ========== CSS 变量 & 全局样式 ========== */
 :root {
@@ -1213,10 +1213,10 @@ body {
     <!-- ===== 顶栏 ===== -->
     <div class="header">
         <div class="header-left">
-            <div class="header-logo">R</div>
+            <div class="header-logo">云</div>
             <div>
-                <div class="header-title">RAG Agent</div>
-                <div class="header-subtitle">多智能体协作系统</div>
+                <div class="header-title">云集优选 · 售后助手</div>
+                <div class="header-subtitle">退换货 · 订单物流 · 投诉处理</div>
             </div>
         </div>
         <div class="header-actions">
@@ -1229,11 +1229,11 @@ body {
     <!-- ===== 聊天区域 ===== -->
     <div class="chat-area" id="chatArea">
         <div class="welcome-screen" id="welcomeScreen">
-            <div class="welcome-icon">R</div>
-            <div class="welcome-title">RAG 多智能体协作系统</div>
+            <div class="welcome-icon">云</div>
+            <div class="welcome-title">云集优选 · 售后助手</div>
             <div class="welcome-desc">
-                支持知识检索、数据库查询、合同审核、Excel分析、图片识别等多种能力。
-                可上传文件或图片进行分析。
+                可以咨询售后政策、查询订单与物流、提交退换货申请、受理投诉。
+                需要提供订单号；也可以上传破损商品照片、快递单或发票截图。
             </div>
             <div class="welcome-categories" id="welcomeCategories"></div>
         </div>
@@ -1244,7 +1244,7 @@ body {
         <div class="upload-preview" id="uploadPreview"></div>
         <div class="input-row">
             <textarea id="queryInput"
-                      placeholder="输入你的问题... (Shift+Enter 换行)"
+                      placeholder="描述您遇到的售后问题，例如：订单 SO20260909001 的耳机坏了要退货 (Shift+Enter 换行)"
                       rows="1"
                       onkeydown="handleKeyDown(event)"
                       oninput="autoResize(this)"></textarea>
@@ -2212,11 +2212,11 @@ function createWelcomeScreen() {
     div.className = 'welcome-screen';
     div.id = 'welcomeScreen';
     div.innerHTML = `
-        <div class="welcome-icon">R</div>
-        <div class="welcome-title">RAG 多智能体协作系统</div>
+        <div class="welcome-icon">云</div>
+        <div class="welcome-title">云集优选 · 售后助手</div>
         <div class="welcome-desc">
-            支持知识检索、数据库查询、合同审核、Excel分析、图片识别等多种能力。
-            可上传文件或图片进行分析。
+            可以咨询售后政策、查询订单与物流、提交退换货申请、受理投诉。
+            需要提供订单号；也可以上传破损商品照片、快递单或发票截图。
         </div>
         <div class="welcome-categories" id="welcomeCategories"></div>
     `;
@@ -2234,24 +2234,42 @@ function useTip(el) {
 }
 
 // 分类问题数据
+//
+// 这些示例问题不是随便写的 —— 每一类对应一条不同的执行路径，
+// 点一下就能看到系统内部走了哪个分支（右侧 trace 面板会显示）。
+// 问题里用的订单号都是演示库里真实存在的，能跑出结果。
 const DEMO_QUESTIONS = [
     {
-        category: '🔍 知识检索（简单路由）',
+        // 简单路径 → customer_service_agent → 混合检索 → 直接回答
+        category: '📋 售后政策咨询（简单路由）',
         questions: [
-            'RAG系统有哪些核心优化策略？',
+            '七天无理由退货的时间怎么计算？',
+            '退货运费由谁来承担？',
         ]
     },
     {
-        category: '🗄️ 数据库查询（SQL生成）',
+        // 简单路径 → database_agent → Text-to-SQL
+        category: '🔍 订单与物流查询（SQL生成）',
         questions: [
-            '从数据库查询销售额最高的前5位客户及其购买的曲目数量',
+            '订单 SO20260909001 现在什么状态？',
+            'SO20260909001 这个订单的快递到哪了？',
         ]
     },
     {
+        // 复杂路径 → planner 生成 DAG → 多 Agent 协作
         category: '🧩 复杂任务（DAG编排）',
         questions: [
-            '从数据库查询客户Eduardo Martins的消费记录和购买偏好，并从知识库检索客户满意度提升策略，给出综合建议',
-            '从数据库查询销售额前3的客户信息，并从知识库检索客户留存最佳实践，给出针对性策略',
+            // 有依赖：先查订单，再据订单办理退货
+            '订单 SO20260909001 的耳机右耳没声音，我要退货',
+            // 无依赖：查数据 ‖ 问规则，两个任务并行
+            '帮我看看还有哪些订单没发货，另外超时未发货平台怎么赔？',
+        ]
+    },
+    {
+        // 情绪识别 → 工单优先级 → 写操作审批
+        category: '📣 投诉与工单（含人工审批）',
+        questions: [
+            '我要投诉！上次申请的退款到现在还没到账，已经催过两次了',
         ]
     },
 ];
