@@ -131,13 +131,30 @@ START → complexity_classifier ─┬─ simple  → router ──→ [单个 A
 > 所以"耳机坏了要退货"必须走**质量问题**通道（15 日、运费平台承担），
 > 而不是无理由通道（7 日、运费自付）。这逼着系统必须真的读懂政策，而不是套模板。
 
-### 阶段 2：数据接入层
-- 表名中文映射改成电商表（[sqlite_mcp_service.py:23-39](core/sqlite_mcp_service.py#L23-L39)）
-- 默认库路径指向 `ecommerce.db`（[sqlite_mcp_service.py:51-53](core/sqlite_mcp_service.py#L51-L53)）
-- `database_agent` 的 few-shot 示例从「多少首歌」改成订单查询场景
-- `customer_service_agent` 的工单后端从 `MockCRM` 假数据（[crm_mock.py:42-81](core/crm_mock.py#L42-L81)）换成读写 `tickets` 表
+### 阶段 2：数据接入层　✅ 已完成（2026-09-16）
 
-**里程碑**：问「订单 SO2024001 现在什么状态」能查对，答案来自真实 SQL 查询而非幻觉。
+- [x] 表名中文映射换成电商 6 张表（[sqlite_mcp_service.py](core/sqlite_mcp_service.py)）
+- [x] 默认库路径 `chinook.db` → `ecommerce.db`
+- [x] `database_agent` 的 few-shot 换成 2 个订单/物流示例（含 **JOIN** 示范 + 防幻觉约束）
+- [x] 新建 [core/ecommerce_crm.py](core/ecommerce_crm.py)：`EcommerceCRM` 读写真实 `tickets` / `customers` 表，
+      接口与 `MockCRM` 完全一致，Agent 侧只改一行实例化
+- [x] 修掉 `vip_level` → `member_level` 字段名（那是旧 CRM 的字段名）
+- [x] **修 bug**：DDL 解析器把中文行注释当成了列名，导致 `list_tables` 输出的列名变成 `--`
+      （详见 [idea.md](idea.md) 阶段 2 第 4 节 —— 本阶段最有价值的一条教训）
+
+**里程碑**：数据库 Agent 端到端答对 2 个问题，**答案来自真实 SQL 而非幻觉**　✅
+
+```
+问: 订单 SO20260909001 现在什么状态？
+答: 状态为「已签收」，下单时间 2026-09-09 14:23。
+
+问: SO20260909001 这个订单的快递到哪了？   ← 必须 JOIN orders 和 logistics 才能答对
+答: 顺丰速运承运，运单号 SF1234567890，已于 2026-09-11 15:42 签收。
+```
+
+> **遗留在原地的东西**：`core/crm_mock.py` 现在没有任何地方引用了（Agent 已切到
+> `EcommerceCRM`）。它没有坏处，但确实是死代码 —— 需要的话可以删掉，连同 `data/crm/*.json`。
+> **暂未删除，标记在此以免日后困惑。**
 
 ### 阶段 3：售后 Agent 重写（工作量最大）
 - 重写系统提示词（[agent.py:404-458](agents/customer_service_agent/agent.py#L404-L458)）→ 电商售后话术
@@ -432,7 +449,7 @@ START → complexity_classifier ─┬─ simple  → router ──→ [单个 A
               depends_on: [task_1, task_2]      ← 必须等前两个回填参数
 
 ③ 第 1 波：Send 只发 task_1、task_2（依赖都为空），并行执行
-   task_1 → SQL 查 ecommerce.db 命中订单 SO2024001
+   task_1 → SQL 查 ecommerce.db 命中订单 SO20260909001（张伟的耳机，已签收）
    task_2 → 混合检索命中《质量问题退换货政策》第 3 条
 
 ④ 汇合 → parameter_validator 检查 task_3 需要的 order_id / policy_basis

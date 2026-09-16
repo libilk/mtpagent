@@ -326,4 +326,206 @@ openai>=1.0.0
 
 ---
 
+## 阶段 2 · 数据接入层
+
+> 日期：2026-09-16　　commit：见文末
+
+### 这阶段实际做了什么
+
+| # | 动作 | 文件 |
+|---|---|---|
+| 1 | 表名中文映射换成电商 6 张表 | [sqlite_mcp_service.py](core/sqlite_mcp_service.py) |
+| 2 | 默认库路径 `chinook.db` → `ecommerce.db` | 同上 |
+| 3 | few-shot 示例从「多少首歌」改成订单/物流场景（2 个示例） | [database_agent/agent.py](agents/database_agent/agent.py) |
+| 4 | 新建 `EcommerceCRM`（真实 SQLite 读写） | [core/ecommerce_crm.py](core/ecommerce_crm.py) |
+| 5 | 客服 Agent 换用新 CRM，修掉 `vip_level` 字段名 | [customer_service_agent/agent.py](agents/customer_service_agent/agent.py) |
+| 6 | **修 bug**：DDL 解析器把中文行注释当成了列名 | [sqlite_mcp_service.py](core/sqlite_mcp_service.py) |
+
+**里程碑验证**：数据库 Agent 端到端回答了 2 个问题，**答案来自真实 SQL 查询**（见下）。
+
+### 1. 思路
+
+阶段 1 把数据**放进了**库里，阶段 2 要让人**取得出来**。两条路径：
+
+```
+知识类问题  →  knowledge_agent  →  RAG 检索      （阶段 1 已通）
+交易类问题  →  database_agent   →  Text-to-SQL   ← 本阶段
+售后办事    →  after_sales_agent →  CRM 读写工单  ← 本阶段
+```
+
+数据库这块有个关键选择：**让 LLM 现场写 SQL**，还是**给人预先写好一批查询函数**？
+
+### 2. 为什么这么改
+
+**为什么选「让 LLM 写 SQL」而不是「预定义查询函数」？**
+
+| 做法 | 优点 | 缺点 |
+|---|---|---|
+| **Text-to-SQL**（本项目） | 能回答**没预料到**的问题 | 会写错 SQL、可能幻觉 |
+| 预定义函数 `get_order_status(order_id)` | 稳、可控 | 只能回答预先设计好的问题 |
+
+电商售后的提问方式是发散无穷的 —— 「我上周买的耳机到哪了」「帮我看看有没有还没发货的订单」「这个月退款一共多少钱」。你没法穷举。所以选 Text-to-SQL。
+
+代价是要防幻觉，这就引出了下面三件事。
+
+**为什么要把「表名 → 中文描述」的映射喂给 LLM？**
+
+因为 LLM 只看到 `order_items` 这种英文表名，得靠猜。而它的判断依据来自训练数据 —— 在别的项目里 `order_items` 是什么样，它就按什么样理解。
+
+给它一句「订单明细表，记录每笔订单买了什么商品、数量、单价、小计」，它就能在「我要查某个商品买了几件」这类问题上**准确挑中这张表**，不用先 `describe_table` 把每张表都看一遍。
+
+**这是省钱又提准的一招**：一段文字描述，换掉了成百上千 token 的探索过程。
+
+> 映射里没写的表也不会坏 —— `_get_table_description()` 会退化成「从 DDL 解析列名」。
+> 有映射是加分项，没映射是兜底，不会崩。**这种「增强而非依赖」的设计值得学。**
+
+**为什么 few-shot 示例要写得那么详细？**
+
+因为 few-shot 示例**其实是隐式的 schema 文档**。LLM 会照着示例的模式办事：
+
+- 示例里写「先 `list_tables` → 再 `describe_table` → 最后 `query_database`」，它就会走这个流程
+- 示例里的 SQL 写了 `WHERE order_id = 'SO20260909001'`，它就知道订单号长这样、要加引号
+- 示例二特意演示了 **JOIN**（orders 和 logistics 用 order_id 关联），它遇到跨表问题就知道要 JOIN
+
+**没有这个 JOIN 示例会怎样？** LLM 很可能只查 orders 表，然后**编造**一个物流状态 —— 因为它不知道还该查 logistics。这就是幻觉的典型来源：不是模型想骗人，是它不知道去哪儿找。
+
+所以我在示例后面加了一句硬约束：
+
+> 「查不到某个订单的物流记录，通常意味着订单还没发货 —— 这时要如实回答『该订单尚未发货，暂无物流信息』，不要编造轨迹。」
+
+**为什么换 CRM 要让新类保持和旧的完全一样的接口？**
+
+因为 `EcommerceCRM` 和 `MockCRM` 有完全相同的方法签名：
+
+```
+get_user_info(user_id)              get_ticket(ticket_id)
+create_ticket(user_id, issue, ...)  update_ticket_status(id, status)
+                                    get_user_tickets(user_id)
+```
+
+这样 Agent 那边**只需要改一行**（换实例化的类），其余代码一行不动：
+
+```python
+self.crm = crm or MockCRM()      →   self.crm = crm or EcommerceCRM()
+```
+
+这就是**鸭子类型**的威力 —— Python 不要求你继承同一个基类，只要"叫起来像鸭子"（方法名和签名对得上）就行。代价是**没有编译期检查**，所以接口要刻意保持一致，这是靠约定而不是靠编译器保证的。
+
+**为什么每次操作都新开数据库连接？**
+
+```python
+def _connect(self):
+    conn = sqlite3.connect(self.db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+```
+
+因为 **SQLite 的连接不能跨线程共享**，而 Agent 可能在多个线程里被并发调用（FastAPI 就是多线程的）。共享一个连接，迟早会遇到「SQLite objects created in a thread can only be used in that same thread」这个经典报错。
+
+开连接的开销很小（就是打开一个文件），**不值得为这点性能去做连接池** —— 那是 MySQL 那种网络数据库才需要考虑的事。
+
+> 顺带一个设计细节：`_next_ticket_id()` 用 `MAX(ticket_id)` 而不是 `COUNT(*)` 算序号。
+> 用 COUNT 的话，中间删掉一个工单，序号就会重复 —— **生成主键时要看"最大值"而不是"数量"**，这是个容易踩的坑。
+
+**为什么不抛异常，只打警告？**
+
+```python
+if not os.path.exists(self.db_path):
+    logger.warning(f"数据库不存在: {self.db_path}，请先运行 ...")
+```
+
+因为数据库文件缺失时，**更好的结果**是"客服 Agent 回一句『工单系统暂时不可用』"，而不是"整个服务起不来"。这叫 **fail-soft（软失败）**：让故障局限在一个功能内，不要扩散成整体宕机。
+
+### 3. 里程碑验证结果
+
+用数据库 Agent 跑端到端（真的走 LLM + ReAct + SQL 执行）：
+
+```
+问: 订单 SO20260909001 现在什么状态？
+答: 订单 SO20260909001 状态为「已签收」，下单时间为 2026-09-09 14:23。
+
+问: SO20260909001 这个订单的快递到哪了？
+答: 该订单由顺丰速运承运，运单号为 SF1234567890，当前状态为「已签收」，
+    签收地点为杭州市西湖区文三路营业点，签收时间为 2026-09-11 15:42。
+```
+
+第二问**必须 JOIN 两张表**才能答对（状态在 orders、物流在 logistics）。两个答案的数字都能在库里逐条核对上，**不是幻觉**。
+
+CRM 侧也单独验过：`get_user_info('U10001')` → 张伟/金卡/消费 18620.5；`create_ticket` 生成的工单号 `TK20260916004` 序号正确（当天已有 001~003）。
+
+> 日志里会有一行 `Redis连接失败...降级为纯内存缓存` —— 这是**正常的**。
+> Redis 在本项目只是可选的缓存持久化，没起 Redis 服务就自动降级，不影响功能。
+
+### 4. ★ 本阶段最有价值的教训：一个自己埋的 bug
+
+我的建库脚本里给每列都写了中文行注释，这本来是好习惯：
+
+```sql
+CREATE TABLE customers (
+    user_id   TEXT PRIMARY KEY,   -- 会员ID，如 U10001
+    name      TEXT NOT NULL,      -- 姓名
+    ...
+)
+```
+
+结果验证时看到这个：
+
+```
+customers  会员表...约6行。列: [user_id, --, --, --, member_level, --, --, --]
+                                    ↑ 列名变成 -- 了
+```
+
+**根因**：SQLite 把建表语句的**原始文本**（含注释）原样存进 `sqlite_master.sql`。而 `_extract_columns_from_ddl()` 的逻辑是「按逗号切分，取每段第一个词」——
+
+```
+"user_id TEXT PRIMARY KEY"  →  第一个词 user_id   ✓
+"  -- 会员ID，如 U10001\n  name TEXT NOT NULL"  →  第一个词 --   ✗
+```
+
+**为什么这个问题严重？** 这串描述正是 `list_tables` 喂给 LLM 的东西。列名全变成 `--`，等于 LLM **看不到表有哪些字段** —— 只能靠 `describe_table` 多跑一轮补回来，既费 token 又降准确率。
+
+**修法**：解析前先剥掉 SQL 注释。
+
+```python
+body = re.sub(r'--[^\n]*', '', body)   # 先剥注释，再按逗号切
+```
+
+**这个 bug 教了三件事：**
+
+1. **"注释是好习惯"只在人读代码时成立。** 当注释进入机器解析路径（这里是 SQLite 的 DDL 存储），它就成了噪声。**写得漂亮不等于写得正确。**
+2. **验证不能只看"跑通没报错"。** 脚本一路绿灯，输出也在正常打印，只是内容悄悄退化了。所以验证要**看输出内容是否合理**，不能只看退出码。
+3. **元编程/文本解析的代码最脆弱。** `_extract_columns_from_ddl` 是个"用正则解析别人生成的 SQL"的函数 —— 它比普通业务代码更容易被输入格式搞崩。这类代码值得额外写几个边界用例。
+
+### 5. 人类怎么学这部分
+
+#### 5.1 该动手看的
+
+1. **读 [core/ecommerce_crm.py](core/ecommerce_crm.py)** —— 它是"把一份假实现换成真实现"的完整示范，重点看它**没有**改什么：方法名、参数、返回值结构全都照搬旧的
+2. **看 [database_agent/agent.py](agents/database_agent/agent.py) 里的 `_build_system_prompt()`**，特别注意第二个 few-shot 示例。
+   然后做个实验：**把 JOIN 那行删掉**，重跑「快递到哪了」，看它会不会编造答案
+3. **读 `_extract_columns_from_ddl`**（[sqlite_mcp_service.py:189](core/sqlite_mcp_service.py#L189)），用刚才那个 bug 的输入试一下 —— 亲手看到 `--` 是怎么冒出来的
+4. **打开 `database/ecommerce.db`**（用 DB Browser for SQLite 之类的工具），翻到 `tickets` 表，看看 Agent 建出来的工单真的躺在里面
+
+#### 5.2 背后的通用概念
+
+| 概念 | 一句话解释 | 为什么重要 |
+|---|---|---|
+| **Text-to-SQL** | 让 LLM 把自然语言翻成 SQL | 能覆盖无穷无尽的提问方式，代价是幻觉风险 |
+| **schema 提示工程** | 把表结构、字段含义、示例查询塞进 prompt | Text-to-SQL 的准确率**主要**由它决定，不是由模型大小决定 |
+| **鸭子类型** | 只要方法对得上就能替换，不要求继承 | Python 的灵活之处，代价是接口一致性靠自觉 |
+| **fail-soft** | 局部故障不要扩散成整体故障 | 生产系统的基本要求，`try/except` 之外还要想清楚"降级成什么" |
+| **SQLite 并发模型** | 单写入者 + 连接不可跨线程 | 决定了它适合单机，也决定了代码要怎么写 |
+| **幂等 / 主键生成** | 用 MAX 不用 COUNT | 删过数据后 COUNT 会算出重复主键 |
+
+#### 5.3 看完应该能回答的问题
+
+- Text-to-SQL 和预定义查询函数，各自的适用场景是什么？
+- 为什么给 LLM 的表描述能显著提升准确率？它省掉了哪一步？
+- few-shot 示例里藏了什么没写明的信息？（提示：DDL、取数流程、ID 格式、要不要 JOIN）
+- 为什么 `create_ticket` 的工单号要用 `MAX` 而不是 `COUNT`？
+- SQLite 连接为什么不能跨线程？如果非要用连接池会出什么问题？
+- 如果哪天要换成 MySQL，`EcommerceCRM` 里哪些地方**必须**改，哪些可以不动？
+
+---
+
 <!-- 下一个阶段从这里往下追加 -->

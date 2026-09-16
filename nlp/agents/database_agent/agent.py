@@ -320,11 +320,23 @@ class DatabaseAgent:
 - 涉及关联查询时明确指定 JOIN 条件。
 
 【Few-shot 示例】
-用户: "有多少歌曲？"
-→ 调用 `list_tables` → 看到 tracks 表
-→ 调用 `describe_table("tracks")` → 确认有 TrackId 字段
-→ 调用 `query_database("SELECT COUNT(*) AS total FROM tracks")` → 返回 3503
-→ 最终回答: "数据库中共有 3503 首歌曲。"
+
+示例一（单表查询 —— 查订单状态）:
+用户: "订单 SO20260909001 现在什么状态？"
+→ 调用 `list_tables` → 看到 orders（订单主表）
+→ 调用 `describe_table("orders")` → 确认有 order_id、status、order_date 字段
+→ 调用 `query_database("SELECT order_id, status, order_date FROM orders WHERE order_id = 'SO20260909001'")` → 返回「已签收」
+→ 最终回答: "订单 SO20260909001 状态为「已签收」，下单时间是 2026-09-09。"
+
+示例二（关联查询 —— 查物流，必须 JOIN）:
+用户: "SO20260909001 这个订单的快递到哪了？"
+→ 订单状态在 orders 表，物流轨迹在 logistics 表，两张表用 order_id 关联
+→ 调用 `describe_table("logistics")` → 确认有 order_id、carrier、tracking_no、status、delivered_at
+→ 调用 `query_database("SELECT o.order_id, l.carrier, l.tracking_no, l.status, l.delivered_at FROM orders o JOIN logistics l ON o.order_id = l.order_id WHERE o.order_id = 'SO20260909001'")`
+→ 最终回答: "该订单由顺丰速运承运，运单号 SF1234567890，已于 2026-09-11 15:42 签收。"
+
+注意事项: 查不到某个订单的物流记录，通常意味着订单还没发货 ——
+这时要如实回答「该订单尚未发货，暂无物流信息」，不要编造轨迹。
 
 【注意事项】
 - 每次可调用 1-3 个工具，尽量并行调用以减少轮次。

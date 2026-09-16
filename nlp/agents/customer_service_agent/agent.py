@@ -95,10 +95,14 @@ class CustomerServiceAgent:
         logger.info(f"CustomerServiceAgent初始化完成 (优化: {enable_optimizations})")
 
     def _init_customer_service_modules(self, crm):
-        """初始化客服模块"""
+        """初始化客服模块
+
+        工单和会员数据来自 database/ecommerce.db（真实 SQLite 表），
+        不再用 crm_mock.py 里那套硬编码的假数据。
+        """
         try:
-            from core.crm_mock import MockCRM
-            self.crm = crm or MockCRM()
+            from core.ecommerce_crm import EcommerceCRM
+            self.crm = crm or EcommerceCRM()
             logger.info("✓ 客服系统初始化完成")
         except Exception as e:
             logger.error(f"客服系统初始化失败: {e}", exc_info=True)
@@ -837,7 +841,7 @@ class CustomerServiceAgent:
             user = self.crm.get_user_info(user_id)
 
             if user:
-                logger.info(f"[查询用户] 找到用户: {user_id}, VIP等级: {user.get('vip_level')}")
+                logger.info(f"[查询用户] 找到用户: {user_id}, 会员等级: {user.get('member_level')}")
                 return user
             else:
                 logger.warning(f"[查询用户] 未找到用户: {user_id}")

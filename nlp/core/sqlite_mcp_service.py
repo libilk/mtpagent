@@ -19,23 +19,21 @@ logger = logging.getLogger(__name__)
 class SQLiteMCPService:
     """SQLite 数据库服务（MCP 优先，sqlite3 降级）"""
 
-    # 常见英文表名 → 中文描述映射（可扩展）
+    # 表名 → 中文描述映射
+    #
+    # 这个映射会拼进 list_tables 工具的结果里给 LLM 看。
+    # 有了中文描述，LLM 在「哪些表跟退款有关」这类语义判断上会准很多，
+    # 不用先去读每个表的列名。表名对不上也没关系 —— 下面的
+    # _get_table_description() 会退化成「从 DDL 解析列名」。
+    #
+    # 当前对应 database/ecommerce.db（电商售后演示库）。
     KNOWN_TABLE_DESCRIPTIONS = {
-        "albums": "专辑表，存储音乐专辑信息",
-        "artists": "艺术家/歌手表",
-        "customers": "客户/顾客表",
-        "employees": "员工表",
-        "genres": "音乐流派/类型表",
-        "invoices": "发票/订单表",
-        "invoice_items": "发票明细/订单项表",
-        "media_types": "媒体类型表",
-        "playlists": "播放列表表",
-        "playlist_track": "播放列表与曲目的关联表",
-        "tracks": "曲目/歌曲表",
-        "orders": "订单表",
-        "products": "产品/商品表",
-        "users": "用户表",
-        "categories": "分类/类别表",
+        "customers": "会员表，存储会员等级、注册时间、历史消费总额，用于判断售后权益",
+        "orders": "订单主表，存储订单号、下单时间、订单状态、实付金额、收货信息",
+        "order_items": "订单明细表，记录每笔订单买了什么商品、数量、单价、小计",
+        "logistics": "物流表，存储承运商、运单号、物流状态、预计到达和实际签收时间",
+        "refunds": "退款表，记录退款类型（退货退款/仅退款/换货）、金额和处理状态",
+        "tickets": "售后工单表，记录客服工单的分类、优先级、情绪、处理状态",
     }
 
     def __init__(self, database_path: str = None, mcp_server_package: str = None,
@@ -49,7 +47,7 @@ class SQLiteMCPService:
             skip_mcp: 是否跳过 MCP 连接尝试（默认 True，因为 npm 包已下架）
         """
         self.database_path = database_path or os.path.join(
-            os.getcwd(), "database", "chinook.db"
+            os.getcwd(), "database", "ecommerce.db"
         )
         self.mcp_client = None
         self.server_name = "sqlite"
@@ -193,6 +191,15 @@ class SQLiteMCPService:
         if not match:
             return []
         body = match.group(1)
+
+        # 先剥掉 SQL 行注释（-- 到行尾）再解析。
+        # SQLite 会把建表语句的原始文本（含注释）原样存进 sqlite_master，
+        # 而下面的逻辑是「按逗号切分，取每段第一个词」。带注释的写法如
+        #     user_id  TEXT PRIMARY KEY,   -- 会员ID
+        #     name     TEXT NOT NULL,      -- 姓名
+        # 切出来第二段的第一个词会变成 "--"，列名就丢了。
+        body = re.sub(r'--[^\n]*', '', body)
+
         columns = []
         for part in body.split(','):
             part = part.strip()
