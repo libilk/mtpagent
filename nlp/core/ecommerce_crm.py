@@ -70,9 +70,16 @@ class EcommerceCRM:
         每次操作都新开连接、用完就关：SQLite 的连接不能跨线程共享，
         而 Agent 可能在多个线程里被调用，共享连接会踩坑。
         开连接的开销很小，不值得为此做连接池。
+
+        ★ 必须显式打开外键约束。
+        建表语句里写了 `FOREIGN KEY ... REFERENCES ...`，但那**只是一个声明**：
+        SQLite 默认 FOREIGN KEYS = OFF，不执行任何校验。
+        不开这行，往 tickets 里写一个不存在的 user_id 会直接成功 ——
+        实测模型就臆造过一个 U87654321 进去。
         """
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row   # 让查询结果能按列名取值，比下标可读
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
     def _next_ticket_id(self, conn: sqlite3.Connection) -> str:
@@ -168,33 +175,46 @@ class EcommerceCRM:
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        with self._connect() as conn:
-            ticket_id = self._next_ticket_id(conn)
-            conn.execute(
-                """
-                INSERT INTO tickets
-                    (ticket_id, user_id, order_id, category, priority,
-                     sentiment, content, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    ticket_id,
-                    user_id or "anonymous",
-                    order_id,
-                    category or "咨询",
-                    priority,
-                    sentiment,
-                    description or issue,
-                    TICKET_STATUS_PENDING,
-                    now,
-                    now,
-                ),
-            )
-            conn.commit()
+        try:
+            with self._connect() as conn:
+                ticket_id = self._next_ticket_id(conn)
+                conn.execute(
+                    """
+                    INSERT INTO tickets
+                        (ticket_id, user_id, order_id, category, priority,
+                         sentiment, content, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ticket_id,
+                        # 不再把空 user_id 写成字符串 "anonymous" —— 那是个假用户，
+                        # 外键校验会直接拒绝。空就是 NULL，代表"匿名咨询"。
+                        user_id or None,
+                        order_id,
+                        category or "咨询",
+                        priority,
+                        sentiment,
+                        description or issue,
+                        TICKET_STATUS_PENDING,
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
 
-            row = conn.execute(
-                "SELECT * FROM tickets WHERE ticket_id = ?", (ticket_id,)
-            ).fetchone()
+                row = conn.execute(
+                    "SELECT * FROM tickets WHERE ticket_id = ?", (ticket_id,)
+                ).fetchone()
+
+        except sqlite3.IntegrityError as e:
+            # 外键拦下来的情况：user_id / order_id 在库里不存在。
+            # 这多半意味着模型臆造了一个编号 —— 把它变成一条明确的错误返回给 Agent，
+            # 而不是让脏数据进库之后才被发现。
+            logger.warning(f"[CRM] 工单创建被外键拒绝（user_id={user_id!r}, order_id={order_id!r}）: {e}")
+            return {
+                "error": f"工单创建失败：用户 {user_id!r} 或订单 {order_id!r} 在系统中不存在。"
+                         f"请先用 query_order 查出订单的真实归属用户，再重试。"
+            }
 
         logger.info(f"[CRM] 已创建工单 {ticket_id}（{category or '咨询'} / {priority}）")
         return self._row_to_dict(row)

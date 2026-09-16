@@ -120,14 +120,18 @@ CREATE TABLE refunds (
     status        TEXT,                    -- 待审核 / 审核通过 / 退款中 / 已到账 / 已拒绝
     applied_at    TEXT,                    -- 申请时间
     processed_at  TEXT,                    -- 处理完成时间
-    FOREIGN KEY (order_id) REFERENCES orders(order_id)
+    FOREIGN KEY (order_id) REFERENCES orders(order_id),
+    FOREIGN KEY (user_id) REFERENCES customers(user_id)
 );
 
 -- 售后工单：客服 Agent 读写的核心表
 -- 注意 priority 的取值必须与 create_ticket 工具的枚举保持一致
 CREATE TABLE tickets (
     ticket_id     TEXT PRIMARY KEY,        -- 如 TK20260916001
-    user_id       TEXT NOT NULL,
+    -- user_id 允许为 NULL：用户没提供身份时代表"匿名咨询"。
+    -- 但**只要给了值，就必须是 customers 表里真实存在的用户**（靠外键兜住），
+    -- 这样模型臆造出来的 user_id 会被数据库拒绝，而不是悄悄存进去。
+    user_id       TEXT,
     order_id      TEXT,                    -- 可能不关联具体订单（如纯咨询）
     category      TEXT,                    -- 退货 / 换货 / 物流 / 发票 / 投诉 / 咨询
     priority      TEXT NOT NULL DEFAULT 'normal',   -- low / normal / high / urgent
@@ -136,7 +140,10 @@ CREATE TABLE tickets (
     status        TEXT NOT NULL DEFAULT '待处理',    -- 待处理 / 处理中 / 已解决 / 已关闭
     created_at    TEXT,
     updated_at    TEXT,
-    FOREIGN KEY (user_id) REFERENCES customers(user_id)
+    FOREIGN KEY (user_id) REFERENCES customers(user_id),
+    -- order_id 也要约束：工单关联到一个不存在的订单没有意义，
+    -- 而且模型臆造订单号是真实发生过的（实测填过 SO99999999）
+    FOREIGN KEY (order_id) REFERENCES orders(order_id)
 );
 """
 
