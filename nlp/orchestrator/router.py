@@ -226,14 +226,15 @@ class AgentRouter:
             f"任务: {task_desc}\n\n"
             f"候选Agent（按相似度排序）:\n"
             f"{candidates_desc}{other_agents_desc}\n\n"
-            "选择规则：\n"
-            "1. 涉及数据库操作（查询表、SQL、统计数据库中的记录/数据）-> database_agent\n"
-            "2. 涉及知识概念解释、原理、对比分析 -> knowledge_agent\n"
-            "3. 涉及已上传的文件分析（Excel/CSV/PDF/Word/TXT等文档）-> document_agent\n"
-            "4. 涉及客户投诉、咨询、工单 -> customer_service_agent\n"
-            "5. 涉及合同审核、文档风险分析 -> document_agent\n"
-            "6. 涉及图片分析、图表识别 -> vqa_agent\n"
-            "7. 闲聊、问候、意图不明确 -> chat_agent\n\n"
+            "选择规则（这是电商售后场景，按下面的边界判断）：\n"
+            "1. 售后政策、退换货规则、运费谁承担、退款时效、会员权益等**咨询类**问题 -> customer_service_agent\n"
+            "2. 办理类动作：要退货/换货、提交售后申请、投诉 -> customer_service_agent\n"
+            "3. 查询订单/物流/退款等**交易数据**（订单状态、快递到哪了、退款进度、按条件统计订单）-> database_agent\n"
+            "4. 与售后无关的通用知识、概念解释、原理说明 -> knowledge_agent\n"
+            "5. 图片分析（破损商品照片、快递单、发票截图、图表）-> vqa_agent\n"
+            "6. 闲聊、问候、意图不明确 -> chat_agent\n\n"
+            "注意 1 和 3 的区别：问「退货政策是什么」→ customer_service_agent；\n"
+            "问「我这个订单现在什么状态」→ database_agent。一个问规则，一个查数据。\n\n"
             "请仔细分析任务需求与每个Agent的能力匹配度，选择最合适的Agent。\n"
             "如果候选列表中的Agent都不合适，可以从其他可用Agent中选择。\n\n"
             '只输出JSON格式：\n'
@@ -325,35 +326,3 @@ class AgentRouter:
         except Exception as e:
             logger.error(f"LLM精排失败: {e}，使用相似度最高的")
             return candidates[0][0]['id']
-
-    def route_simple(self, query: str, agents: List[Dict]) -> str:
-        """
-        简单路由（基于关键词）
-
-        Args:
-            query: 查询文本
-            agents: Agent列表
-
-        Returns:
-            Agent ID
-        """
-        query_lower = query.lower()
-
-        # 关键词映射
-        keyword_mapping = {
-            "code_agent": ["代码", "编程", "code", "python", "java", "函数", "算法"],
-            "customer_agent": ["客服", "工单", "订单", "投诉", "咨询", "用户"],
-            "knowledge_agent": ["什么是", "如何", "为什么", "解释", "原理"]
-        }
-
-        # 匹配关键词
-        for agent_id, keywords in keyword_mapping.items():
-            if any(kw in query_lower for kw in keywords):
-                # 检查Agent是否可用
-                if any(a['id'] == agent_id for a in agents):
-                    logger.debug(f"关键词路由: {agent_id}")
-                    return agent_id
-
-        # 默认兜底返回chat_agent
-        fallback = "chat_agent" if any(a['id'] == "chat_agent" for a in agents) else "knowledge_agent"
-        return fallback

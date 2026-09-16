@@ -217,12 +217,39 @@ resume("approved") → success=True，答复引用真实工单号 TK20260916004
 2. Agent 实测**臆造过用户ID**（填了 `U87654321`，库里没这人）。已加提示词约束，
    但根治要靠外键约束。
 
-### 阶段 4：路由与编排适配
-- 重写选择规则（[router.py:229-236](orchestrator/router.py#L229-L236)）→ 售后意图分类
-- **修 bug**：[router.py:345](orchestrator/router.py#L345) 的 `"customer_agent"` 是过期 id（真实 id 是 `customer_service_agent`），整条关键词规则失效；同时把「订单」从客服划给 `database_agent`
-- 摘掉 `document_agent` 注册（[enhanced_entry.py:938](langgraph_orchestrator/enhanced_entry.py#L938)）—— 它 9 个工具全是为合同审核写的
+### 阶段 4：路由与编排适配　✅ 已完成（2026-09-16）
 
-**里程碑**：5 类典型问题（政策问答 / 查订单 / 查物流 / 投诉 / 闲聊）路由全部正确。
+- [x] 重写 LLM 选择规则 → 售后意图分类（政策咨询 / 查数据 / 办理 / 图片 / 闲聊）
+- [x] 重写 **Agent 注册描述**（[enhanced_entry.py](langgraph_orchestrator/enhanced_entry.py)）——
+      向量召回是把 description + capabilities 做 embedding 比相似度，**描述就是路由依据**
+- [x] 重写 **planner 提示词**的规则与两个示例（原来讲的是 Chinook 和向量数据库对比）
+- [x] 摘掉 `document_agent` 注册（9 个工具全是合同审核专用）
+- [x] 修 `planner._create_simple_plan()` 里的过期 id（`code_agent` / `customer_agent`），
+      默认兜底从 `knowledge_agent` 改为 `customer_service_agent`
+- [x] 更新 `nodes.py` 里给路由用的文件类型提示（原来硬指 document_agent）
+- [x] **删除** `router.route_simple()` —— 见下方更正
+
+**里程碑**：7 类问题路由全部正确　✅
+
+```
+OK [政策问答] 七天无理由退货的时间怎么计算  -> customer_service_agent
+OK [政策问答] 退货运费由谁来承担            -> customer_service_agent
+OK [查订单]   订单 SO20260909001 现在什么状态 -> database_agent
+OK [查物流]   我的快递到哪了                -> database_agent
+OK [投诉]     你们服务太差了，我要投诉！      -> customer_service_agent
+OK [闲聊]     你好                          -> chat_agent
+OK [通用知识] 什么是向量数据库               -> knowledge_agent
+```
+
+注册表最终形态：`knowledge_agent` / `database_agent` / `customer_service_agent` /
+`vqa_agent` / `chat_agent`（5 个，document_agent 已摘除，critic 本来就没注册）。
+
+> **⚠️ 更正一条我之前记错的信息：** 我在阶段 4 的准备阶段说过
+> 「`router.py` 里 `customer_agent` 是过期 id，导致关键词路由整条失效、静默降级」。
+> 实际去查证后发现——**那个函数 `route_simple()` 全项目无人调用，是死代码**，
+> 它从来没有参与过路由，所以谈不上"失效"。
+> 我当时只看了 id 对不上就下了结论，**没有先确认代码路径是否被执行**。
+> 这次已把死函数删除。`_create_simple_plan()` 里的同类问题倒是真在回退路径上，已修。
 
 ### 阶段 5：前端与文案
 - `frontend/index.html` 的标题、欢迎语、示例问题改成售后场景
@@ -245,7 +272,7 @@ resume("approved") → success=True，答复引用真实工单号 TK20260916004
 | 3 | **增量脚本不走白名单** | [incremental_update.py](tools/scripts/incremental_update.py) 未做 `ALLOWED_DOC_IDS` 过滤 | 换知识库**必须全量重建**，别用 `--update-db` |
 | 4 | **MCP 其实是关的** | [sqlite_mcp_service.py](core/sqlite_mcp_service.py) 的 `skip_mcp` 默认 `True`（npm 包已下架），实际走 sqlite3 降级 | README 说的「MCP 自主探索表结构」并不生效，别按那个预期调 |
 | 5 | **角色过滤没接线** | [enhanced_entry.py:705](langgraph_orchestrator/enhanced_entry.py#L705) 把 `doc_filter` 硬编码传 `None` | Agent 端有权限过滤逻辑，但运行时不会触发 |
-| 6 | **过期 agent id** | [router.py:345](orchestrator/router.py#L345) 写的是 `customer_agent` | 关键词路由整条失效，静默降级 |
+| 6 | **过期 agent id** | `router.route_simple()`（已删）及 `planner._create_simple_plan()` 里的 `customer_agent` / `code_agent` | 前者是死代码从未执行；**后者在回退路径上，会指向不存在的 Agent** —— 已修 |
 
 ---
 

@@ -332,11 +332,16 @@ class GraphNodes:
             file_names = [os.path.basename(fp) for fp in file_paths]
             file_exts = [os.path.splitext(fn)[1].lower() for fn in file_names]
             task_desc += f"\n[用户已上传文件: {', '.join(file_names)}]"
-            # 明确提示文件类型以辅助路由（所有文档类型统一由 document_agent 处理）
-            if any(ext in ('.xlsx', '.xls', '.csv') for ext in file_exts):
-                task_desc += "\n[文件类型: Excel/CSV数据文件，需要文档处理Agent解析分析]"
+            # 明确提示文件类型以辅助路由
+            # 注意：document_agent 已在阶段 4 移除注册（它的工具是合同审核专用的）。
+            # 这里改为把文件类型说清楚，让路由自己判断该给谁 —— 图片类交给 vqa_agent，
+            # 数据类交给 database_agent 处理。
+            if any(ext in ('.png', '.jpg', '.jpeg', '.webp', '.bmp') for ext in file_exts):
+                task_desc += "\n[用户上传了图片，需要视觉理解（破损商品照片、快递单、发票截图等）]"
+            elif any(ext in ('.xlsx', '.xls', '.csv') for ext in file_exts):
+                task_desc += "\n[用户上传了 Excel/CSV 数据文件]"
             elif any(ext in ('.pdf', '.docx', '.doc') for ext in file_exts):
-                task_desc += "\n[文件类型: 文档文件，需要文档处理Agent解析分析]"
+                task_desc += "\n[用户上传了文档文件]"
 
         if image_paths or image_urls:
             task_desc += "\n[用户已上传图片，需要图片分析/识别]"

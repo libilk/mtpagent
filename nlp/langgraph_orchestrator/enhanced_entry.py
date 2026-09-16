@@ -712,10 +712,14 @@ class EnhancedLangGraphRAGSystem:
         bm25_retriever = self._init_bm25_retriever(retriever)
 
         # 注册 Agents（文档角色过滤已禁用，所有用户可查询所有文档）
+        #
+        # 注意：document_agent 已移除（阶段 4）。
+        # 它那 9 个工具全是合同审核专用的（风险识别、违约金计算、按供应商检索），
+        # 与电商售后无关。原 Agent 代码保留在 agents/document_agent/ 未删除，
+        # 只是不再注册 —— 如果以后要恢复，把 _register_document_agent 调用加回来即可。
         self._register_knowledge_agent(retriever, bm25_retriever, None)
         self._register_database_agent()
         self._register_customer_service_agent(retriever, bm25_retriever)
-        self._register_document_agent(retriever)
         self._register_vqa_agent()
 
         # 更新路由器索引
@@ -895,11 +899,15 @@ class EnhancedLangGraphRAGSystem:
                 enable_cache=False,  # 禁用业务缓存，确保每次展示完整 RAG 流程
                 redis_client=self.redis_client,
             )
+            # 描述会被向量化，用于路由召回 —— 所以要写清楚"什么该找我、什么不该找我"，
+            # 并且尽量覆盖用户真实会用的词。
             self.registry.register(
                 agent_id="knowledge_agent",
                 name="知识检索Agent",
-                description="专门处理通用知识查询，擅长技术概念、原理解释、文档检索。",
-                capabilities=["语义检索", "关键词检索", "混合检索", "查询优化", "网络搜索"],
+                description="通用知识问答，适合概念解释、原理说明、技术问题解答。"
+                            "不涉及售后业务；售后政策、退换货规则、退款时效属于客服Agent的职责。",
+                capabilities=["语义检索", "关键词检索", "混合检索", "查询优化",
+                              "概念解释", "原理解读", "网络搜索"],
                 agent_instance=agent,
             )
             logger.info("Knowledge Agent注册成功")
@@ -913,9 +921,12 @@ class EnhancedLangGraphRAGSystem:
             agent = DatabaseAgent(llm=self.llm_plus, enable_optimizations=True, enable_cache=False)
             self.registry.register(
                 agent_id="database_agent",
-                name="数据库查询Agent",
-                description="专门处理数据库查询任务，擅长SQL生成、表结构探索、数据分析。",
-                capabilities=["数据库查询", "SQL生成", "数据分析"],
+                name="订单数据查询Agent",
+                description="查询交易数据：订单状态与详情、物流轨迹与签收时间、退款记录与进度、"
+                            "会员等级与消费统计、按条件筛选和统计订单。适合「我的订单到哪了」"
+                            "「查一下这个订单」「退款到账了没」这类**查数据**的问题。",
+                capabilities=["订单查询", "物流查询", "退款记录查询", "会员数据查询",
+                              "SQL生成", "表结构探索", "数据统计"],
                 agent_instance=agent,
             )
             logger.info("Database Agent注册成功")
@@ -936,9 +947,13 @@ class EnhancedLangGraphRAGSystem:
             )
             self.registry.register(
                 agent_id="customer_service_agent",
-                name="客服Agent",
-                description="专门处理客户咨询、投诉、工单管理。",
-                capabilities=["情感分析", "工单创建", "用户信息查询"],
+                name="售后客服Agent",
+                description="处理电商售后业务：退换货政策咨询（几天内能退、运费谁承担、"
+                            "哪些商品不支持无理由退货）、提交退货换货申请、退款规则、"
+                            "会员售后权益、投诉与工单受理。适合「我要退货」「耳机坏了"
+                            "怎么办」「退货运费谁出」这类**问规则或要办理**的问题。",
+                capabilities=["售后政策问答", "退换货办理", "退款规则", "运费规则",
+                              "投诉受理", "工单创建", "工单查询", "情感分析", "会员权益查询"],
                 agent_instance=agent,
             )
             logger.info("CustomerService Agent注册成功")

@@ -93,18 +93,19 @@ class TaskPlanner:
 5. 互相不依赖的任务不设置依赖关系，它们会被并行执行
 6. 有依赖关系的任务必须声明 input_schema（需要哪些字段）和 parameter_mapping（字段从哪个上游任务获取）
 7. 所有任务都应声明 output_schema（承诺输出哪些字段）
-8. 重要路由规则：
-   - 查询客户消费记录、订单历史、销售数据、交易统计 → 必须用 database_agent（数据在Chinook数据库中）
-   - 查询CRM工单、投诉记录、客服工单 → 用 customer_service_agent
-   - 检索知识、策略、方法论、最佳实践 → 用 knowledge_agent
+8. 重要路由规则（这是电商售后场景）：
+   - 查询订单状态、物流轨迹、退款记录、会员数据、交易统计 → 用 database_agent（查数据）
+   - 售后政策咨询、退换货办理、投诉受理、工单 → 用 customer_service_agent（问规则或办事）
+   - 与售后无关的通用知识、概念解释 → 用 knowledge_agent
+   - 图片分析（破损商品照、快递单、发票截图）→ 用 vqa_agent
 
-示例一（并行+汇总）：用户问题="查询客户Eduardo Martins的消费记录，并结合知识库分析如何提升客户满意度"
+示例一（有依赖的任务链）：用户问题="订单 SO20260909001 的耳机坏了，帮我办退货"
 {{
-  "reasoning": "需要两个并行任务：1）用database_agent从数据库查询客户消费记录（消费记录、订单、交易数据都在数据库中）；2）用knowledge_agent从知识库检索客户满意度提升策略。两者互不依赖可并行。",
+  "reasoning": "退货要两步且有先后依赖：必须先查出订单的真实状态和签收时间（database_agent），才能判断是否在售后时限内、并据此办理（customer_service_agent）。后者的输入来自前者的输出，所以是串行而非并行。",
   "tasks": [
     {{
       "task_id": "task_1",
-      "description": "从数据库查询客户Eduardo Martins的消费记录、购买金额、购买的音乐流派等详细数据",
+      "description": "查询订单 SO20260909001 的详情：订单状态、下单时间、商品名称与数量、物流签收时间",
       "agent_id": "database_agent",
       "depends_on": [],
       "input_schema": {{
@@ -112,75 +113,60 @@ class TaskPlanner:
         "field_types": {{}}
       }},
       "output_schema": {{
-        "required_fields": ["customer_info", "purchase_records"],
-        "field_types": {{"customer_info": "str", "purchase_records": "str"}}
+        "required_fields": ["order_detail"],
+        "field_types": {{"order_detail": "str"}}
       }}
     }},
     {{
       "task_id": "task_2",
-      "description": "从知识库检索客户满意度分析方法和提升策略",
-      "agent_id": "knowledge_agent",
-      "depends_on": [],
+      "description": "依据订单详情办理退货，并引用售后政策条款说明运费由谁承担",
+      "agent_id": "customer_service_agent",
+      "depends_on": ["task_1"],
       "input_schema": {{
-        "required_fields": [],
-        "field_types": {{}}
+        "required_fields": ["order_detail"],
+        "field_types": {{"order_detail": "str"}}
       }},
       "output_schema": {{
-        "required_fields": ["satisfaction_strategies"],
-        "field_types": {{"satisfaction_strategies": "str"}}
+        "required_fields": ["handling_result"],
+        "field_types": {{"handling_result": "str"}}
+      }},
+      "parameter_mapping": {{
+        "order_detail": "task_1.order_detail"
       }}
     }}
   ]
 }}
 
-示例二（并行+汇总）：用户问题="对比向量数据库和图数据库的优缺点"
+示例二（并行+汇总）：用户问题="帮我看看还有哪些订单没发货，另外超时未发货平台怎么赔"
 {{
-  "reasoning": "向量数据库和图数据库是两个独立的知识检索，互不依赖，可以并行执行。最后需要一个汇总任务将两者结果对比分析。",
+  "reasoning": "这是两件互不相干的事：一件是查数据（统计未发货订单），一件是问规则（超时赔付标准）。前者要读数据库，后者要查政策文档，彼此没有依赖，可以并行执行。",
   "tasks": [
     {{
       "task_id": "task_1",
-      "description": "检索向量数据库的特点、优缺点",
-      "agent_id": "knowledge_agent",
+      "description": "统计当前所有状态为「待发货」的订单，列出订单号和下单时间",
+      "agent_id": "database_agent",
       "depends_on": [],
       "input_schema": {{
         "required_fields": [],
         "field_types": {{}}
       }},
       "output_schema": {{
-        "required_fields": ["summary"],
-        "field_types": {{"summary": "str"}}
+        "required_fields": ["pending_orders"],
+        "field_types": {{"pending_orders": "str"}}
       }}
     }},
     {{
       "task_id": "task_2",
-      "description": "检索图数据库的特点、优缺点",
-      "agent_id": "knowledge_agent",
+      "description": "检索超时未发货的判定标准和赔付规则",
+      "agent_id": "customer_service_agent",
       "depends_on": [],
       "input_schema": {{
         "required_fields": [],
         "field_types": {{}}
       }},
       "output_schema": {{
-        "required_fields": ["summary"],
-        "field_types": {{"summary": "str"}}
-      }}
-    }},
-    {{
-      "task_id": "task_3",
-      "description": "对比两种数据库的优缺点并生成总结",
-      "agent_id": "knowledge_agent",
-      "depends_on": ["task_1", "task_2"],
-      "input_schema": {{
-        "required_fields": ["vector_db_summary", "graph_db_summary"],
-        "field_types": {{"vector_db_summary": "str", "graph_db_summary": "str"}}
-      }},
-      "output_schema": {{
-        "required_fields": ["comparison"],
-        "field_types": {{"comparison": "str"}}
-      }},
-      "parameter_mapping": {{
-        "vector_db_summary": "task_1.summary",
-        "graph_db_summary": "task_2.summary"
+        "required_fields": ["late_shipment_policy"],
+        "field_types": {{"late_shipment_policy": "str"}}
       }}
     }}
   ]
@@ -279,16 +265,22 @@ class TaskPlanner:
                     raise ValueError("任务计划存在循环依赖")
 
     def _create_simple_plan(self, query: str, available_agents: List[Dict]) -> Dict:
-        """创建简单的单任务计划（回退方案）"""
-        # 默认使用knowledge_agent
-        agent_id = "knowledge_agent"
+        """创建简单的单任务计划（回退方案）
 
-        # 尝试根据关键词选择Agent
+        注意这里的关键词必须能对应上**真实注册的** agent_id，
+        否则路由会指向一个不存在的 Agent，静默失败。
+        （原代码用的是 code_agent / customer_agent，两个都已经不存在了。）
+        """
+        # 默认落到售后客服 —— 它是能力最全的一个（既有检索又有办理工具），
+        # 在电商售后场景下做兜底最不容易答错。
+        agent_id = "customer_service_agent"
+
+        # 按关键词再细化一下
         query_lower = query.lower()
-        if any(kw in query_lower for kw in ["代码", "编程", "code", "python", "java"]):
-            agent_id = "code_agent"
-        elif any(kw in query_lower for kw in ["客服", "工单", "订单", "投诉"]):
-            agent_id = "customer_agent"
+        if any(kw in query_lower for kw in ["订单", "物流", "快递", "退款记录", "统计", "多少"]):
+            agent_id = "database_agent"
+        elif any(kw in query_lower for kw in ["图片", "照片", "截图", "图里"]):
+            agent_id = "vqa_agent"
 
         return {
             "tasks": [
