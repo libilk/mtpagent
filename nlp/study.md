@@ -148,3 +148,261 @@ START → complexity_classifier ─┬─ simple  → router ──→ [单个 A
 - 不接真实支付/物流/CRM 的第三方 API —— demo 一律用合成数据
 - 不动 `llm/` 调用层和 `rag_core/` 的检索算法
 - 不重构 LangGraph 编排骨架
+
+---
+
+## 8. 改造后的目标架构（带注释）
+
+**图例**：【原有】不动 ·【改造】接口不变只换内部逻辑 ·【新增】新做的东西
+
+### 8.1 分层总览
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│ 层 0 · 接入层                                                    【原有】 │
+│                                                                          │
+│   浏览器 frontend/index.html          ← 阶段 5 只改标题/欢迎语/示例问题   │
+│        │                                                                 │
+│        │ EventSource（SSE 流式，逐节点推进度）                            │
+│        ▼                                                                 │
+│   api.py（FastAPI）                                                       │
+│    ├ /chat/stream   流式对话，前端 trace 面板靠它      api.py:291         │
+│    ├ /chat          非流式                             api.py:354         │
+│    ├ /resume        人工介入后恢复执行                 api.py:385         │
+│    ├ /upload(.multiple)  上传文件/图片                 api.py:467/547     │
+│    └ /health /agents /cache/stats /logs ...                              │
+│        │                                                                 │
+│        ▼ 以 thread_id 隔离会话                                            │
+│   会话状态 = MemorySaver(进程内) + MemoryStore(内存字典)                  │
+│   ⚠️ 两者都不持久化，重启即丢；Redis 只缓存、不存会话                     │
+└──────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ 层 1 · 编排层 langgraph_orchestrator/                     【原有·骨架不动】│
+│         唯一的改动：节点总数少 1 个（document_agent 被摘掉）              │
+└──────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ 层 2 · Agent 层                                  6 个 → 5 个，有增有减   │
+│   knowledge_agent 【原有】零业务知识，原样复用                            │
+│   database_agent  【改造】查询目标换成 ecommerce.db                       │
+│   after_sales_agent 【改造】由 customer_service_agent 重写而来（核心工作）│
+│   vqa_agent       【原有】保留 —— 售后要高品照片/快递单/发票识别          │
+│   chat_agent      【原有】兜底，原样保留                                  │
+│   document_agent  【删除】9 个工具全为合同审核而写                        │
+└──────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ 层 3 · 能力层                                                             │
+│   检索：rag_core/ 混合检索（向量 + BM25 → RRF 融合）      【原有】        │
+│   数据：database_agent 内 SQL 生成      【改造】表名映射 + few-shot 示例  │
+│   审批：写操作闸门                                         【新增】★     │
+└──────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ 层 4 · 数据层                                                             │
+│   data/knowledge/   12 篇技术文档 → 8~10 篇售后政策       【全换】        │
+│   database/         chinook.db(音乐店) → ecommerce.db      【全换】        │
+│                     customers / orders / order_items /                   │
+│                     logistics / refunds / tickets                        │
+│   vector_db/        ChromaDB collection "knowledge_base"  【重建】        │
+└──────────────────────────────────────────────────────────────────────────┘
+
+横切能力（全部【原有】，不用动）：三层缓存 · 对话记忆 · 性能监控 · 问答日志
+```
+
+### 8.2 编排主干（改造后）
+
+```
+                              START
+                                │
+                                ▼
+                ┌───────────────────────────────┐
+                │     complexity_classifier      │  LLM 二分类：判断是否需要
+                │     nodes.py:230               │  「多个不同类型」Agent 协作
+                └───────────────┬───────────────┘  解析失败 → 降级为 simple
+                                │
+                          route_by_complexity
+                          ╱                  ╲
+                    simple                  complex
+                          │                        │
+                          ▼                        ▼
+            ┌──────────────────────┐   ┌──────────────────────────┐
+            │       router         │   │        planner           │
+            │  两级选择：           │   │  LLM 生成 DAG 任务图      │
+            │  ①向量召回 top-3      │   │  每个 task 声明：         │
+            │  ②LLM 精排            │   │   agent_id / depends_on   │
+            │  router.py:132-276   │   │   input_schema / 参数映射 │
+            └──────────┬───────────┘   └────────────┬─────────────┘
+                       │                            │
+                 route_to_agent            fan_out_dag_tasks（Send）
+                 （单个 Agent）            ★只发 depends_on 为空的任务
+                       │                            │
+                       └──────────┬─────────────────┘
+                                  ▼
+                  ┌───────────────────────────────┐
+                  │   各 Agent 执行                │  ★Send 载荷带
+                  │   （DAG 分波次并行）           │   current_task_id
+                  │   完成后回写 completed_task_ids│
+                  └───────────────┬───────────────┘
+                                  ▼
+                  ┌───────────────────────────────┐
+                  │    parameter_validator         │  检查上游字段/类型是否
+                  │    clarification.py            │  满足下游所需，动态填槽
+                  └───────────────┬───────────────┘
+                              ╱         ╲
+                        reexecute     continue
+                              │             │
+                    upstream_retry          │   ← 重跑的是上游那个 Agent
+                    （重跑上游 Agent）      │
+                                            ▼
+                  ┌───────────────────────────────┐
+                  │    duplicate_detection         │  语义相似度检测
+                  │    enhanced_nodes.py:39        │  重跑结果是否与上次重复
+                  └───────────────┬───────────────┘
+                                  ▼
+                  ┌───────────────────────────────┐
+                  │        aggregator              │  ★中间波次直接 return {}
+                  │        nodes.py:344            │   空转，不打扰下游；
+                  └───────────────┬───────────────┘   全部完成后 LLM 综合
+                                  │
+                                  ▼
+                  ┌───────────────────────────────┐
+                  │      wave_scheduler            │  ★就绪判据 =
+                  │      router.py:120-169         │   depends_on ⊆ completed
+                  └───────────────┬───────────────┘
+                            ╱           ╲
+                     还有就绪任务     全部完成
+                            │             │
+                  Send 下一波 │             ▼
+                  （回到 Agent）│  ┌───────────────────────────┐
+                            └───→│        evaluator           │  LLM 三维打分：
+                                 │        nodes.py:447        │  相关性/完整性/准确性
+                                 └─────────────┬─────────────┘
+                                          ╱         ╲
+                                     达标           不达标
+                                       │              │
+                                       │      注入反馈，路由回 Agent 重做
+                                       ▼
+                        ╔══════════════════════════════════╗
+                        ║   human_intervention_check       ║  统一人工介入闸门
+                        ║   enhanced_nodes.py:109          ║  触发条件见 8.4
+                        ╚════════════════┬═════════════════╝
+                                    ╱     │     ╲
+                              need_human  pass  retry
+                                  │        │      │
+                                  ▼        │      └→ 回到 complexity_classifier
+                    ┌──────────────────┐   │         （整条链重跑，注意是重跑不是续跑）
+                    │ human_intervene  │   │
+                    │ _execute         │   │  ★interrupt_before 在这里挂起
+                    │ （/resume 唤醒） │   │
+                    └────────┬─────────┘   │
+                        ╱         ╲       │
+                    override     retry    │
+                   (强制通过)   (重跑)     │
+                        │         │       │
+                        ▼         └───────┤
+                      END                 │
+                                          ▼
+                                        END
+```
+
+### 8.3 Agent 层改造明细
+
+| Agent | 状态 | 具体动作 |
+|---|---|---|
+| `knowledge_agent` | 【原有】 | 15 个工具全是通用检索能力，**零业务硬编码**，接口不动。改的只是它检索的语料（阶段 1 换知识库） |
+| `database_agent` | 【改造】 | 换库 + 改表名中文映射（[sqlite_mcp_service.py:23-39](../core/sqlite_mcp_service.py#L23-L39)）+ few-shot 从「多少首歌」改成订单场景。**接口仍是 4 个工具** |
+| `after_sales_agent` | 【改造·重点】 | 由 `customer_service_agent` 重写。提示词、情感词表、工具集全换（详见下表） |
+| `vqa_agent` | 【原有】 | 千问 VL，售后场景要它认破损商品照/快递单/发票，**保留** |
+| `chat_agent` | 【原有】 | 兜底闲聊，原样保留 |
+| `document_agent` | 【删除】 | 从 [enhanced_entry.py:938](../langgraph_orchestrator/enhanced_entry.py#L938) 摘掉注册。它的 9 个工具（风险识别/违约金计算/按供应商检索）全是合同审核专用 |
+| `critic_agent` | 无需处理 | 本来就是死代码（从未注册 + `enable_critic` 默认 False），**别为它花时间** |
+
+**`after_sales_agent` 的工具集变化：**
+
+```
+【沿用】hybrid_search      混合检索售后政策
+【沿用】vector_search      语义检索
+【沿用】keyword_search     BM25 精确匹配（「7天无理由」这类固定表述）
+【沿用】analyze_sentiment  情绪识别 —— 改造后要把「情绪激动」真正接到工单优先级上
+【沿用】create_ticket      建工单（后端从 MockCRM 假数据换成 tickets 表）
+【沿用】query_ticket       查工单进度
+【沿用】query_user_info    查用户信息（改成查会员等级 + 历史订单）
+
+【新增】query_logistics        查物流轨迹（transport → logistics 表）
+【新增】submit_return_request  提交退换货申请（★写操作，走审批闸门）
+【新增】query_refund_status    查退款进度（→ refunds 表）
+```
+
+### 8.4 ★ 新增：写操作审批闸门（必须补的设计）
+
+**为什么必须补：** 现有代码里的「数据库写操作审核」拦不住办工单，两个原因 ——
+
+1. 它要求 `"database" in selected_agent`（[enhanced_nodes.py:127](../langgraph_orchestrator/enhanced_nodes.py#L127)），
+   但工单是 `after_sales_agent` 内部建的，压根不满足这个条件
+2. 它检查**用户那句中文**里有没有 `INSERT`/`UPDATE`（[enhanced_nodes.py:129](../langgraph_orchestrator/enhanced_nodes.py#L129)），
+   而用户说的是「我要退货」，永远不可能命中
+
+另外 `selected_agent` 只在 simple 单 Agent 路径上有值，DAG 路径上大概率是空的。
+
+**改造后设计：**
+
+```
+  Agent 执行时，给写类工具打标记
+  （submit_return_request / create_ticket / 任何改数据的工具）
+              │
+              ▼
+  agent_results 里出现 write 类工具调用
+              │
+              ▼
+  human_intervention_check 新增一个判断分支
+  → human_intervention_required = True
+  → intervention_reason = "即将提交退换货申请，等待人工确认"
+              │
+              ▼
+  interrupt_before 挂起 → 前端弹确认 → /resume 唤醒
+```
+
+这样「办工单」才真正带审批。**落在阶段 3。**
+
+### 8.5 一次典型请求的完整数据流
+
+用户说：**「我上周买的耳机坏了，想退货」**
+
+```
+① complexity_classifier
+   → complex（要同时查订单、查政策、建工单，涉及 3 个不同类型 Agent）
+
+② planner 生成 DAG
+   ├─ task_1  「查询该用户最近购买的耳机订单」      → database_agent
+   ├─ task_2  「质量问题退货运费由谁承担」          → knowledge_agent
+   └─ task_3  「创建退换货工单」                   → after_sales_agent
+              depends_on: [task_1, task_2]      ← 必须等前两个回填参数
+
+③ 第 1 波：Send 只发 task_1、task_2（依赖都为空），并行执行
+   task_1 → SQL 查 ecommerce.db 命中订单 SO2024001
+   task_2 → 混合检索命中《质量问题退换货政策》第 3 条
+
+④ 汇合 → parameter_validator 检查 task_3 需要的 order_id / policy_basis
+   —— task_1/task_2 的输出正好填上，continue
+
+⑤ aggregator 空转（任务没全完成）→ wave_scheduler 发现 task_3 就绪
+   → Send 第 2 波：task_3 执行，调 submit_return_request 建工单
+
+⑥ ★ 写操作闸门触发 → human_intervention_check 置 True
+   → 图在 human_intervention_execute 前挂起（interrupt_before）
+
+⑦ 前端弹确认框，客服点「通过」→ POST /resume
+   → 图继续 → aggregator 汇总 → evaluator 打分（三维）→ END
+
+⑧ 返回用户：「已为您创建退换货工单 TK20260916001，运费由商家承担
+   （质量问题），预计 3 个工作日内上门取件」
+```
+
+对比一下：**同样一句话在改造前会走成什么样** —— `task_2` 检索不到任何售后政策（知识库里只有 RAG 技术文档），`task_3` 的 `create_ticket` 写进的是 `MockCRM` 的假数据，工单号在下次重启后消失，而且全程**没有任何审批**。
+
