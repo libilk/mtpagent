@@ -3,6 +3,9 @@
 > 这份文档记录 `nlp/` 从「通用多 Agent RAG 系统」改造为「**电商售后助手**」的路线。
 > 写作日期：2026-09-16　　当前代码基线：仓库 commit `1ed39f1` 之后的 nlp/ 目录
 > 用途：动手前先读这个，避免走弯路；每完成一个阶段回来勾掉。
+>
+> **配套文档**：[idea.md](idea.md) —— 记录每一处改动「怎么想的 / 为什么这么改 / 人类该从中学到什么」。
+> 本文件管**路线和进度**，idea.md 管**理解**，两者同步更新。
 
 ---
 
@@ -22,7 +25,8 @@
 | 业务能力 | **答问题 + 办工单**（写操作，需要保留人工介入环节） |
 | 数据来源 | **我合成一套 demo 数据**（政策文档 + 订单 SQLite 库） |
 | 模型 | 沿用 **DashScope 通义千问**，key 已验证可用 |
-| Python | **3.13**（机器上没有 3.12；3.14 太新，chromadb/langchain 轮子有风险） |
+| Python | **3.12.13**（由 uv 管理；3.14 太新，chromadb/langchain 的 wheel 还没跟上） |
+| 依赖工具 | **uv** + 清华镜像（`pypi.tuna.tsinghua.edu.cn`），不用 pip |
 
 ---
 
@@ -32,11 +36,28 @@
 - [x] `nlp/.env` 建好，含真实 `DASHSCOPE_API_KEY`，已被 [.gitignore:5](.gitignore#L5) 覆盖
 - [x] `.git/hooks/pre-commit` 防泄漏钩子 —— 拦截 `sk-` / `tvly-` / `AKIA` 三类密钥特征，实测生效
 - [x] **key 实测有效**：HTTP 200，返回正常（2026-09-16）
+- [x] `nlp/.venv` 建好，Python **3.12.13**（`uv venv --python 3.12 .venv`）
+- [x] 依赖装完，143 个包；项目自身模块导入全部通过
+- [x] 根目录那个空的 `.venv`（Python 3.14.5，0 个包）**弃用但保留**，不删
 
-### 待办
-- [ ] 建 `nlp/.venv`（Python 3.13）：`py -3.13 -m venv .venv`
-- [ ] 装依赖：`.venv/Scripts/python.exe -m pip install -r requirements.txt`
-- [ ] 根目录那个空的 `.venv`（Python 3.14.5，0 个包）**不要用**，留着别管
+> **为什么用 uv 而不是 pip、为什么是 3.12 而不是更新版本** —— 见 [idea.md](idea.md) 阶段 0 的「为什么这么改」。
+
+### ⚠️ 实测装到的版本，比需求写的新很多
+
+`requirements.txt` 只写了下限（`chromadb>=0.4.0`、`openai>=1.0.0`），实际解析到：
+
+| 包 | 需求写的 | 实际装到 |
+|---|---|---|
+| chromadb | `>=0.4.0` | **1.5.9** |
+| openai | `>=1.0.0` | **3.14.1** |
+| pandas | `>=2.0.0` | **3.0.5** |
+| langgraph | `>=0.1.0` | 见 `uv pip list` |
+
+两者都有过大版本破坏性变更。**已验证**：项目自身模块（`core.file_parser` / `llm.llm_client` / `rag_core.chroma_store` / `rag_core.hybrid_retriever` / `langgraph_orchestrator.enhanced_entry`）**导入全部正常**，说明没有 import 层的 API 漂移。
+
+但**运行时**的 API 差异还没验证过（比如 Chroma collection 的方法签名）。阶段 1 重建向量库时会第一次真正调用，届时如果报错，优先怀疑是这个原因 —— 处理方式是把这两个包钉到代码写作年代的版本。
+
+> 另注：项目**不依赖 `dashscope` 包**，它用 `openai` SDK 走 DashScope 的 OpenAI 兼容接口。别被 README 的措辞误导。
 
 ### 防泄漏三道防线（不要破坏）
 1. `.gitignore` 覆盖 `.env`（根目录 + nlp/ 各一份）
@@ -70,9 +91,13 @@ START → complexity_classifier ─┬─ simple  → router ──→ [单个 A
 
 > 规则：**每个阶段结束 → 验证里程碑 → commit + push**。不要攒着一堆改动一起提交。
 
-### 阶段 0：环境就位
-建 venv 装依赖。
-**里程碑**：`python -c "import langgraph, chromadb, dashscope, fastapi"` 无报错。
+### 阶段 0：环境就位　✅ 已完成（2026-09-16）
+
+建 venv 装依赖（uv + Python 3.12 + 清华镜像）。
+
+**里程碑**：`python -c "import langgraph, chromadb, openai, fastapi"` 无报错　✅
+补充验证：项目自身 5 个核心模块导入通过，无 API 漂移。
+详情见 [idea.md](idea.md) 阶段 0。
 
 ### 阶段 1：合成数据基座
 - 写 8–10 篇售后政策文档，替换 `data/knowledge/` 里原有的 12 篇（那些全是 RAG 技术文档，没有一条电商业务内容）
