@@ -99,15 +99,37 @@ START → complexity_classifier ─┬─ simple  → router ──→ [单个 A
 补充验证：项目自身 5 个核心模块导入通过，无 API 漂移。
 详情见 [idea.md](idea.md) 阶段 0。
 
-### 阶段 1：合成数据基座
-- 写 8–10 篇售后政策文档，替换 `data/knowledge/` 里原有的 12 篇（那些全是 RAG 技术文档，没有一条电商业务内容）
-  覆盖：7 天无理由、退换货流程、运费谁承担、物流时效、退款到账时间、质量问题处理、发票、价格保护、超时未发货
-- 建订单库 `database/ecommerce.db`，表：`customers` / `orders` / `order_items` / `logistics` / `refunds` / `tickets`
-- 改白名单 [init_vector_db.py:91](tools/scripts/init_vector_db.py#L91) 的 `ALLOWED_DOC_IDS`
-- 同步 `data/metadata/document_metadata.json`（`domain` 用 `customer_service`）
-- 全量重建：`python main.py --init-db`
+### 阶段 1：合成数据基座　✅ 已完成（2026-09-16）
 
-**里程碑**：检索「7天无理由」能命中政策文档，且返回的 chunk 来自新文档。
+- [x] 写 **10 篇**售后政策文档，替换原有 12 篇 RAG 技术文档
+      （7天无理由 / 退换货流程 / 质量问题 / 运费承担 / 退款到账 / 价保 / 物流时效 / 超时未发货 / 会员权益 / 发票）
+- [x] 新建 [tools/scripts/init_ecommerce_db.py](tools/scripts/init_ecommerce_db.py) → `database/ecommerce.db`
+      6 张表：`customers` / `orders` / `order_items` / `logistics` / `refunds` / `tickets`
+- [x] 改白名单 `ALLOWED_DOC_IDS`（[init_vector_db.py:91](tools/scripts/init_vector_db.py#L91)）→ 10 个新 doc_id
+- [x] 重写 `data/metadata/document_metadata.json`（10 条，`domain` 全为 `customer_service`）
+- [x] 全量重建：`python tools/scripts/init_vector_db.py` → **10 文档 / 34 chunk**
+- [x] 修掉脚本里过时的硬编码测试问题（「什么是向量数据库」→ 售后问题）
+- [x] `database/ecommerce.db` 加进 `.gitignore`（生成物不入库）
+
+**里程碑**：6 个真实售后问题检索，**top-1 全部命中正确文档**，分数 0.575~0.827，
+高于 `MIN_VECTOR_SCORE=0.45` 阈值　✅
+
+**附带结论**：chromadb 1.5.9 全程无 API 报错 —— 阶段 0 记下的版本漂移隐患**已解除**。
+
+> 这里踩到的坑、以及"为什么白名单和删除要同时做"等取舍，见 [idea.md](idea.md) 阶段 1。
+
+**主场景订单**（后续阶段 2/3 都围绕它验证）：
+
+| 字段 | 值 |
+|---|---|
+| 订单号 | `SO20260909001` |
+| 会员 | 张伟（U10001，**金卡**） |
+| 商品 | 云听 Pro 主动降噪无线耳机 |
+| 状态 | 已签收（2026-09-11 签收，9-16 来投诉即"签收 5 天"） |
+
+> 这个场景有个刻意的设计：**已激活的 3C 数码不适用七天无理由**（知识库里写了这条例外），
+> 所以"耳机坏了要退货"必须走**质量问题**通道（15 日、运费平台承担），
+> 而不是无理由通道（7 日、运费自付）。这逼着系统必须真的读懂政策，而不是套模板。
 
 ### 阶段 2：数据接入层
 - 表名中文映射改成电商表（[sqlite_mcp_service.py:23-39](core/sqlite_mcp_service.py#L23-L39)）

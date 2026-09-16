@@ -1,65 +1,173 @@
 {
-  "rag_introduction": {
-    "doc_id": "rag_introduction",
-    "title": "Rag Introduction",
-    "domain": "tech",
-    "audiences": [
-      "developer"
-    ],
-    "tags": [],
-    "priority": 5
-  },
-  "rag_optimization_strategies": {
-    "doc_id": "rag_optimization_strategies",
-    "title": "RAG系统核心优化策略",
-    "domain": "tech",
-    "audiences": [
-      "developer"
-    ],
-    "tags": [
-      "RAG",
-      "优化",
-      "混合检索",
-      "缓存",
-      "重排序",
-      "HyDE",
-      "查询优化"
-    ],
-    "priority": 8
-  },
-  "customer_satisfaction_guide": {
-    "doc_id": "customer_satisfaction_guide",
-    "title": "客户满意度分析与提升策略指南",
+  "seven_day_return_policy": {
+    "doc_id": "seven_day_return_policy",
+    "title": "云集优选七天无理由退货政策",
     "domain": "customer_service",
     "audiences": [
-      "customer_service_rep",
-      "sales_rep"
+      "end_user",
+      "customer_service_rep"
     ],
     "tags": [
-      "客户满意度",
-      "RFM",
-      "消费分析",
-      "提升策略"
+      "七天无理由",
+      "退货",
+      "起算时间",
+      "商品完好",
+      "不适用商品"
+    ],
+    "priority": 9
+  },
+  "return_exchange_process": {
+    "doc_id": "return_exchange_process",
+    "title": "云集优选退换货申请流程说明",
+    "domain": "customer_service",
+    "audiences": [
+      "end_user",
+      "customer_service_rep"
+    ],
+    "tags": [
+      "退换货",
+      "申请流程",
+      "审核时效",
+      "寄回",
+      "运单号"
+    ],
+    "priority": 9
+  },
+  "shipping_fee_policy": {
+    "doc_id": "shipping_fee_policy",
+    "title": "云集优选退换货运费承担规则",
+    "domain": "customer_service",
+    "audiences": [
+      "end_user",
+      "customer_service_rep"
+    ],
+    "tags": [
+      "运费",
+      "退货补贴",
+      "质量问题运费",
+      "会员免费退货",
+      "包邮门槛"
+    ],
+    "priority": 9
+  },
+  "quality_issue_policy": {
+    "doc_id": "quality_issue_policy",
+    "title": "云集优选商品质量问题处理规则",
+    "domain": "customer_service",
+    "audiences": [
+      "end_user",
+      "customer_service_rep"
+    ],
+    "tags": [
+      "质量问题",
+      "15日退货",
+      "30日换货",
+      "举证",
+      "运费平台承担"
+    ],
+    "priority": 9
+  },
+  "refund_timeline": {
+    "doc_id": "refund_timeline",
+    "title": "云集优选退款到账时间说明",
+    "domain": "customer_service",
+    "audiences": [
+      "end_user",
+      "customer_service_rep"
+    ],
+    "tags": [
+      "退款",
+      "到账时间",
+      "支付渠道",
+      "原路退回",
+      "退款进度"
+    ],
+    "priority": 9
+  },
+  "logistics_delivery_policy": {
+    "doc_id": "logistics_delivery_policy",
+    "title": "云集优选物流时效与配送范围",
+    "domain": "customer_service",
+    "audiences": [
+      "end_user",
+      "customer_service_rep"
+    ],
+    "tags": [
+      "物流",
+      "配送时效",
+      "配送范围",
+      "偏远地区",
+      "承运商"
     ],
     "priority": 8
   },
-  "customer_retention_best_practices": {
-    "doc_id": "customer_retention_best_practices",
-    "title": "客户留存最佳实践与流失防控指南",
+  "late_shipment_policy": {
+    "doc_id": "late_shipment_policy",
+    "title": "云集优选超时未发货处理规则",
     "domain": "customer_service",
     "audiences": [
-      "customer_service_rep",
-      "sales_rep"
+      "end_user",
+      "customer_service_rep"
     ],
     "tags": [
-      "客户留存",
-      "流失预警",
-      "复购率",
-      "客户生命周期",
-      "召回策略",
-      "留存率",
-      "CLV"
+      "超时发货",
+      "发货时限",
+      "赔付",
+      "48小时",
+      "取消订单"
     ],
     "priority": 8
+  },
+  "price_protection_policy": {
+    "doc_id": "price_protection_policy",
+    "title": "云集优选价格保护规则",
+    "domain": "customer_service",
+    "audiences": [
+      "end_user",
+      "customer_service_rep"
+    ],
+    "tags": [
+      "价格保护",
+      "价保",
+      "退差价",
+      "降价",
+      "不适用情形"
+    ],
+    "priority": 7
+  },
+  "member_benefits_policy": {
+    "doc_id": "member_benefits_policy",
+    "title": "云集优选会员等级与售后权益说明",
+    "domain": "customer_service",
+    "audiences": [
+      "end_user",
+      "customer_service_rep"
+    ],
+    "tags": [
+      "会员等级",
+      "银卡",
+      "金卡",
+      "钻石",
+      "售后权益",
+      "免费退货次数"
+    ],
+    "priority": 8
+  },
+  "invoice_policy": {
+    "doc_id": "invoice_policy",
+    "title": "云集优选发票开具与管理规则",
+    "domain": "customer_service",
+    "audiences": [
+      "end_user",
+      "customer_service_rep"
+    ],
+    "tags": [
+      "发票",
+      "电子发票",
+      "专用发票",
+      "换开",
+      "退货后发票"
+    ],
+    "priority": 7
   }
 }

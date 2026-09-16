@@ -81,28 +81,36 @@ from core.file_parser import (
 # 仅索引与核心问题相关的文档（doc_id = 文件名不含扩展名）
 # 不在此列表中的文档将被跳过，不会写入向量数据库
 #
-# 核心问题：
-#   1. RAG系统有哪些核心优化策略？
-#   2. 数据库查询销售额最高的前5位客户及其购买的曲目数量
-#   3. 查询客户Eduardo Martins的消费记录 + 检索客户满意度提升策略
-#   4. 查询销售额前3的客户信息 + 检索客户留存最佳实践
+# 当前场景：电商售后助手（云集优选）
+# 售后助手要能回答的问题：
+#   1. 七天无理由怎么算？哪些商品不支持？
+#   2. 退货的运费谁承担？
+#   3. 退款多久到账？
+#   4. 商品有质量问题怎么办？时限和普通退货有什么不同？
+#   5. 会员等级对售后权益有什么影响？
+#
+# ⚠️ 换知识库时必须全量重建（python main.py --init-db）。
+#    增量脚本 incremental_update.py 不做白名单过滤，会把被排除的文档也索引进去。
 #
 # 如需索引全部文档，将此变量设为 None
 ALLOWED_DOC_IDS = {
-    # RAG 技术文档（问题1：RAG系统有哪些核心优化策略？）
-    "rag_optimization_strategies",      # RAG核心优化策略
-    "hybrid_search_deep_dive",          # 混合检索深度解析
-    "retrieval_methods_comparison",     # 检索方法对比与选型
-    "rag_embedding_and_vectordb",       # 向量嵌入与向量数据库
-    "rag_introduction",                 # RAG系统介绍(PDF)
-    "rag_evaluation_and_monitoring",    # RAG评估与监控体系
-    "semantic_cache_and_performance",   # 语义缓存与性能优化
-    "document_chunking_best_practices", # 文档分块与数据预处理
-    "llm_prompt_engineering",           # LLM提示工程与Prompt优化
-    # 客户分析（问题3/4，知识库检索部分）
-    "customer_satisfaction_guide",      # 客户满意度提升策略
-    "customer_retention_best_practices",# 客户留存最佳实践
-    "customer_data_analytics",          # 客户数据分析方法论
+    # 退货与换货
+    "seven_day_return_policy",   # 七天无理由退货：起算时间、商品完好标准、例外商品
+    "return_exchange_process",   # 退换货申请流程：怎么申请、审核时效、寄回要求
+    "quality_issue_policy",      # 质量问题处理：15日退货/30日换货，运费平台承担
+
+    # 费用与资金
+    "shipping_fee_policy",       # 退换货运费承担规则：谁出运费、会员补贴
+    "refund_timeline",           # 退款到账时间：按支付渠道区分
+    "price_protection_policy",   # 价格保护：下单后降价可退差价
+
+    # 物流与发货
+    "logistics_delivery_policy", # 物流时效与配送范围：各省时效、偏远地区
+    "late_shipment_policy",      # 超时未发货处理：发货时限、超时赔付
+
+    # 会员与票据
+    "member_benefits_policy",    # 会员等级与售后权益：四级会员的差异化待遇
+    "invoice_policy",            # 发票开具与管理：开票、换开、随货发票
 }
 
 
@@ -338,8 +346,10 @@ def init_vector_db():
         )
 
     # 6. 测试检索
+    # 用一个真实的售后问题做冒烟测试 —— 如果知识库换对了，这条应该能命中政策文档。
+    # 换了知识库场景的话，记得把这里也改成新场景的问题，否则分数会很低、看不出效果。
     print("[4/4] 验证检索...")
-    test_query = "什么是向量数据库"
+    test_query = "七天无理由退货的时间怎么计算"
     query_embedding = embedder.encode_query(test_query)
     results = chroma_store.search(
         query_vector=query_embedding.tolist() if hasattr(query_embedding, 'tolist') else query_embedding,

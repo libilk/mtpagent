@@ -89,6 +89,8 @@ test_output/
 *.test
 nul
 
-# 数据库文件（可由用户自行下载或初始化）
+# 数据库文件（可由脚本生成，不入库）
 database/chinook.db
 database/qa_logs.db
+# 电商售后演示库：跑 tools/scripts/init_ecommerce_db.py 即可重建
+database/ecommerce.db
