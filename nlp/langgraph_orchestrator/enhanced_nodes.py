@@ -123,6 +123,53 @@ def human_intervention_check_node(state: Dict[str, Any]) -> dict:
             "intervention_data": {"plan": plan, "options": {"approved": "确认规划，继续执行", "abort": "终止任务"}}
         }
 
+    # ---------- 写操作审批（阶段 3 新增）----------
+    #
+    # 【为什么需要这条通道】
+    # 下面那段"数据库写操作审核"覆盖不到真正的写操作，两个原因：
+    #   1. 它要求 Agent 名里含 "database"，但建工单/提交退货发生在售后 Agent 内部；
+    #   2. 它检查的是**用户那句中文**里有没有 INSERT/UPDATE 关键字，
+    #      而用户说的是"我要退货"，永远不可能命中。
+    #
+    # 所以新增这条：Agent 执行真正的写操作时通过 core/write_ops.py 登记，
+    # Agent 节点把登记结果写进 state["write_operations"]，这里据此触发审批。
+    # 它不依赖用户措辞、也不依赖 Agent 的名字 —— 只看"数据是不是真的被改了"。
+    write_ops = state.get("write_operations") or []
+    if write_ops and not state.get("write_approved"):
+        _emit("human_intervention_check", "触发: 检测到写操作需人工确认", stage="triggered")
+
+        # 把写操作整理成人看得懂的一句话，展示给审批人
+        summaries = []
+        for op in write_ops:
+            detail = op.get("detail", {}) or {}
+            if op.get("type") == "submit_return_request":
+                summaries.append(
+                    f"提交{detail.get('refund_type', '退货')}申请："
+                    f"订单 {detail.get('order_id')}，"
+                    f"金额 {detail.get('amount')} 元，"
+                    f"单号 {detail.get('refund_id')}"
+                )
+            elif op.get("type") == "create_ticket":
+                summaries.append(
+                    f"创建售后工单 {detail.get('ticket_id')}，"
+                    f"分类 {detail.get('category')}，优先级 {detail.get('priority')}"
+                )
+            else:
+                summaries.append(f"{op.get('type')}: {detail}")
+
+        return {
+            "human_intervention_required": True,
+            "intervention_reason": "已完成写操作，等待人工确认",
+            "intervention_data": {
+                "operations": write_ops,
+                "summary": summaries,
+                "options": {
+                    "approved": "确认无误，放行给用户",
+                    "abort": "不认可，终止本次回复",
+                },
+            },
+        }
+
     # 数据库写操作审核（仅当查询中包含写操作关键词时触发，SELECT查询无需审核）
     if selected_agent and "database" in selected_agent.lower() and not state.get("db_operation_approved"):
         query = state.get("query", "").upper()

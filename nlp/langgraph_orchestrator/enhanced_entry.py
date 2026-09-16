@@ -131,6 +131,9 @@ def _make_initial_state(
         "human_feedback": None,
         "intervention_reason": None,
         "intervention_data": None,
+        # 写操作审计（这些字段用 operator.add 聚合，必须给初始值，否则图会报错）
+        "write_operations": [],
+        "write_approved": False,
         # 多模态（VQA）
         "image_urls": image_urls or [],
         "image_paths": image_paths or [],
@@ -359,11 +362,18 @@ class EnhancedLangGraphRAGSystem:
         # 根据反馈类型自动设置对应的审批标志
         if human_feedback == "approved":
             current_state = self.graph.get_state(config)
-            reason = current_state.values.get("intervention_reason", "")
+            # 注意用 `or ""`：intervention_reason 可能是显式的 None，
+            # 而 `.get(key, "")` 只在键不存在时才给默认值，键存在但值为 None 时会返回 None，
+            # 下一行的 `in` 判断就会抛 TypeError。这是修掉的一个既有 bug。
+            reason = current_state.values.get("intervention_reason") or ""
             if "任务规划" in reason:
                 update_values["plan_approved"] = True
             elif "数据库" in reason:
                 update_values["db_operation_approved"] = True
+            elif "写操作" in reason:
+                # 阶段 3 新增的写操作审批通道（见 enhanced_nodes.py 的
+                # human_intervention_check_node）。批准后置位，避免再次触发。
+                update_values["write_approved"] = True
 
         if extra_state:
             update_values.update(extra_state)

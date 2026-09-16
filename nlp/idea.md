@@ -772,4 +772,172 @@ tool = StructuredTool.from_function(func=actual_func, ..., args_schema=args_sche
 
 ---
 
+## 阶段 3（续） · 写操作审批闸门
+
+> 日期：2026-09-16　　commit：见文末
+
+### 这阶段实际做了什么
+
+| # | 动作 | 文件 |
+|---|---|---|
+| 1 | State 新增 `write_operations` / `write_approved` 字段 | [enhanced_state.py](langgraph_orchestrator/enhanced_state.py) |
+| 2 | Agent 节点在 `handle()` 后读取写操作登记，写入 State | [nodes.py](langgraph_orchestrator/nodes.py) |
+| 3 | 人工介入节点新增写操作审批分支 | [enhanced_nodes.py](langgraph_orchestrator/enhanced_nodes.py) |
+| 4 | `resume` 支持放行写操作 | [enhanced_entry.py](langgraph_orchestrator/enhanced_entry.py) |
+| 5 | 初始 State 补上两个字段的默认值 | 同上 |
+| 6 | **修既有 bug**：`intervention_reason` 为 None 时 crash | 同上 |
+
+**验证**：`handle_query` → 闸门拦截（带可读摘要）→ `resume("approved")` → 恢复并返回真实工单号。
+
+---
+
+### 1. 思路
+
+阶段 3 前半段让 Agent 能改数据了。**能改数据 = 能造成不可逆后果** ——
+用户收到一个工单号，商家那边就得有人处理。所以必须配一道审批。
+
+困难不在"要不要审批"，而在**信号怎么从 Agent 传到编排层**。
+
+### 2. 为什么这么设计
+
+#### 2.1 核心难点：Agent 只返回一个字符串
+
+`AgentProtocol` 规定接口是 `handle(query, context) -> str`。写操作发生了，但返回值里没有
+结构化的位置可以放"我改了数据"这个事实。三条路都试过：
+
+| 方案 | 为什么不行 |
+|---|---|
+| 在返回值里插机器标记 | 标记会漏进最终答复，污染用户可见文本 |
+| 挂在 `self` 上（实例属性） | **Agent 实例全局共享**，并发请求互相覆盖，A 的退货会触发 B 的审批 |
+| `context` 字典 | `context` 是节点函数里的**局部变量**，但它是**可变对象**，Agent 往里写、节点读得到 —— 理论可行，但工具函数拿不到 `context` |
+
+最终选了**线程本地存储**（`threading.local`），因为：
+- `handle()` 是在节点函数里**同步**调用的 → Agent 与节点在同一线程
+- 每个请求各写各的副本，天然隔离
+- 不污染返回值，也不需要穿透 `context`
+
+#### 2.2 ★ 一个差点埋下的坑：工具可能跑在线程池里
+
+写完线程本地方案后我复查了工具的**执行路径**，发现：
+
+```python
+if len(unique_calls) > 1:
+    with ThreadPoolExecutor(max_workers=...) as pool:   # ← 并行执行
+        ...
+```
+
+**LLM 一次调用多个工具时，它们跑在 worker 线程里。** 如果写操作的登记放在
+工具函数（CRM）内部，就会登记到 worker 线程的副本上 —— 节点线程读不到，**信号直接丢失**。
+
+更糟的是：线程池的线程**会被复用**。残留的记录可能被下一个恰好调度到该线程的请求读到，
+**变成跨用户串号**。
+
+所以把登记从 CRM 挪到了 Agent 的工具分发层，在**调用线程**里做：
+
+```python
+# _execute_tool_calls 里，所有工具都执行完之后（此时回到调用线程）
+self._record_write_operations(tool_results)
+```
+
+**教训：用线程本地/上下文变量时，先确认代码有没有开线程池。**
+「同一个逻辑调用」不等于「同一个线程」。
+
+> 这个 bug 还有一个隐蔽之处：如果用单工具调用的场景去测，它**完全正常**。
+> 只有 LLM 恰好把两个工具放在一轮里，才会出问题。这类"条件触发"的 bug
+> 靠手测很难覆盖，必须靠**读代码确认线程模型**。
+
+#### 2.3 闸门放在哪：不看措辞，只看事实
+
+原有的写操作审核是这样判断的：
+
+```python
+if "database" in selected_agent and any(kw in query.upper() for kw in ["INSERT","UPDATE",...]):
+```
+
+两个失效点：① 建工单发生在售后 Agent 内，Agent 名里没有 "database"；
+② 用户说的是中文"我要退货"，永远不可能命中 SQL 关键字。
+
+新的闸门换了个判据 —— **不看用户怎么说、也不看 Agent 叫什么，只看"数据是不是真的被改了"**：
+
+```
+Agent 执行写工具 → 登记 → 节点写入 state["write_operations"] → 闸门据此触发
+```
+
+这比"猜意图"可靠得多。**判断副作用时，事件驱动比意图推断可靠。**
+
+#### 2.4 审批界面要给人看的东西
+
+拦截时不能只丢一个 `True` 出去，得让审批人明白在批什么：
+
+```
+创建售后工单 TK20260916004，分类 退货，优先级 high
+[approved] 确认无误，放行给用户
+[abort]    不认可，终止本次回复
+```
+
+顺带修了一个既有 bug：`resume_after_human_input` 里
+`reason = current_state.values.get("intervention_reason", "")` ——
+`.get(key, "")` 只在**键不存在**时给默认值，键存在但值是 `None` 时会返回 `None`，
+下一行的 `"任务规划" in reason` 直接抛 `TypeError`。改成 `or ""`。
+
+### 3. 验证结果
+
+```
+[1] mode=planning           介入=False          ← 走复杂路径，规划审批
+[2] mode=planning           介入=False
+[3] mode=human_intervention 介入=True  原因=已完成写操作，等待人工确认
+    摘要: ['创建售后工单 TK20260916004，分类 退货，优先级 high']
+    --- approved 后 ---
+    mode: planning  success: True
+    答复: ... 工单号 TK20260916004 ...
+```
+
+**注意 [1][2] 和 [3] 结果不一样** —— 路由本身有随机性（`temperature` 不为 0），
+同一个问题有时走简单路径、有时走复杂路径。测 Agent 系统时要有这个预期，
+**单次通过不等于稳定通过**，关键路径值得连跑几次。
+
+### 4. 顺带发现的两个问题（未修，留给阶段 6）
+
+1. **外键没有生效**：建库脚本写了 `FOREIGN KEY (user_id) REFERENCES customers(user_id)`，
+   但 SQLite **默认不校验外键**，需要显式 `PRAGMA foreign_keys = ON`。
+   所以往 tickets 里塞一个不存在的 user_id 是能成功的。
+2. **Agent 会臆造用户ID**：实测它给工单填了 `U87654321` —— 库里根本没有这个用户。
+   已加提示词约束（"不要臆造 ID，从 query_order 的结果里取 user_id"），
+   但**根治要靠外键约束把它挡住**，那是阶段 6 回归验证时要补的。
+
+> 这两个问题合起来说明一件事：**光有 schema 声明不等于有约束**。
+> `FOREIGN KEY` 写在建表语句里只是个文档，不开 pragma 就没有执行力。
+
+### 5. 人类怎么学这部分
+
+#### 5.1 该动手看的
+
+1. **读 [core/write_ops.py](core/write_ops.py)** —— 全文不到 80 行，注释讲清了"为什么必须是线程本地"
+2. **看 [nodes.py](langgraph_orchestrator/nodes.py) 里 `consume_write_ops()` 的位置** ——
+   为什么必须在 `handle()` 之后、且必须在 `except` 分支里也清一次
+3. **看 [enhanced_nodes.py](langgraph_orchestrator/enhanced_nodes.py) 的闸门分支** ——
+   对比它和下面那段"数据库写操作审核"的判据差异
+
+#### 5.2 背后的通用概念
+
+| 概念 | 一句话解释 | 为什么重要 |
+|---|---|---|
+| **线程本地存储** | 每个线程一份变量副本 | 并发下隔离状态的最轻量手段 |
+| **线程池与上下文传播** | 任务跑在哪个线程，上下文变量就跟到哪 | 用了 ThreadLocal/contextvar 就必须先确认线程模型 |
+| **线程复用污染** | 池里的线程会被后来的任务复用 | 残留状态会跨请求串号，比"丢信号"更难查 |
+| **副作用审计（audit trail）** | 记录"谁在什么时候改了什么" | 任何写系统的必备能力，也是审批的依据 |
+| **人机协同（human-in-the-loop）** | 关键动作前暂停，等人确认 | Agent 落地的关键设计；LangGraph 用 interrupt 实现 |
+| **事件驱动 vs 意图推断** | 靠"发生了什么"而非"猜用户想干嘛"来决策 | 前者可靠，后者易被措辞绕过 |
+
+#### 5.3 看完应该能回答的问题
+
+- 为什么把写操作标记挂在 Agent 的 `self` 上会出问题？
+- 工具跑在线程池里时，线程本地存储会怎么失效？失效后**最坏**的后果是什么？
+  （提示：不只是丢信号）
+- 为什么新闸门用"数据被改过"当判据，而不继续用关键词匹配？
+- `.get(key, default)` 和 `or default` 有什么区别？各自的陷阱是什么？
+- 为什么同一句提问，连跑三次可能得到不同的路径？
+
+---
+
 <!-- 下一个阶段从这里往下追加 -->

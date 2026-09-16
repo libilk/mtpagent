@@ -60,6 +60,8 @@ class EnhancedGraphState(TypedDict):
     human_feedback: Optional[str]
     intervention_reason: Optional[str]              # 中断原因（展示给用户）
     intervention_data: Optional[Dict[str, Any]]     # 中断时展示给用户的详细数据
+    write_operations: Annotated[List[Dict[str, Any]], operator.add]  # 本轮已执行的写操作（见 core/write_ops.py）
+    write_approved: bool                            # 写操作是否已获人工批准
 
     # ========== 多模态（图片输入） ==========
     image_urls: Optional[List[str]]                          # 图片公网URL列表

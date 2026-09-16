@@ -24,8 +24,6 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from core.write_ops import record_write_op
-
 logger = logging.getLogger(__name__)
 
 # 项目根目录：本文件在 core/ 下，根目录是上一级
@@ -199,16 +197,6 @@ class EcommerceCRM:
             ).fetchone()
 
         logger.info(f"[CRM] 已创建工单 {ticket_id}（{category or '咨询'} / {priority}）")
-
-        # 建工单是写操作 —— 登记一下，编排层会据此决定要不要走人工审批
-        record_write_op("create_ticket", {
-            "ticket_id": ticket_id,
-            "user_id": user_id or "anonymous",
-            "order_id": order_id,
-            "category": category or "咨询",
-            "priority": priority,
-        })
-
         return self._row_to_dict(row)
 
     def get_ticket(self, ticket_id: str) -> Optional[Dict]:
@@ -400,17 +388,6 @@ class EcommerceCRM:
             ).fetchone()
 
         logger.info(f"[CRM] 已提交{refund_type}: {refund_id}（订单 {order_id}）")
-
-        # 登记写操作 —— 这一步动了钱，编排层应当走人工审批
-        record_write_op("submit_return_request", {
-            "refund_id": refund_id,
-            "order_id": order_id,
-            "user_id": user_id,
-            "refund_type": refund_type,
-            "amount": final_amount,
-            "reason": reason,
-        })
-
         return self._row_to_dict(row)
 
     def _next_refund_id(self, conn: sqlite3.Connection) -> str:

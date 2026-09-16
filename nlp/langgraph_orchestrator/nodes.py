@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from langchain_core.messages import AIMessage
 from langgraph.config import get_stream_writer
 
 from langgraph_orchestrator.enhanced_state import EnhancedGraphState as GraphState
 from core.protocol import AgentProtocol
+from core.write_ops import consume_write_ops, clear_write_ops
 
 logger = logging.getLogger(__name__)
 
@@ -165,8 +166,12 @@ def make_agent_node(agent_instance: Any, agent_name: str, shared_memory=None, me
         context["_stream_writer"] = writer
         context["_agent_name"] = agent_name
 
+        # 取出本次 Agent 调用期间登记的所有写操作（详见 core/write_ops.py）。
+        # 必须在 handle() 之后、且在本线程内读取 —— 记录器是线程本地的。
+        write_ops: List[Dict[str, Any]] = []
         try:
             result = agent_instance.handle(query, context)
+            write_ops = consume_write_ops()
             _emit(writer, agent_name, "执行完成", stage="done")
             # 写入共享记忆
             if session_memory:
@@ -176,6 +181,11 @@ def make_agent_node(agent_instance: Any, agent_name: str, shared_memory=None, me
             logger.error(f"Agent {agent_name} 执行失败: {e}")
             _emit(writer, agent_name, f"执行失败: {e}", stage="error")
             result = f"Agent执行出错: {e}"
+            # 异常路径也要清空，否则残留的写操作会误触下一个请求的审批
+            clear_write_ops()
+
+        if write_ops:
+            logger.info(f"[写操作] {agent_name} 本轮执行了 {len(write_ops)} 个写操作")
 
         return {
             "agent_results": [
@@ -189,6 +199,7 @@ def make_agent_node(agent_instance: Any, agent_name: str, shared_memory=None, me
                 AIMessage(content=str(result)[:8000], name=agent_name)
             ],
             "completed_task_ids": [state.get("current_task_id") or agent_name],
+            "write_operations": write_ops,
         }
 
     # 让函数名在调试时更有辨识度

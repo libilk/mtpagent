@@ -189,7 +189,33 @@ START → complexity_classifier ─┬─ simple  → router ──→ [单个 A
 写操作: ['RF20260916006']   答复中的单号: {'RF20260916006'}
 ```
 
-**写操作审批闸门　⏳ 待做**（下一节）
+**写操作审批闸门　✅ 已完成**
+
+- [x] State 新增 `write_operations` / `write_approved`
+- [x] Agent 节点在 `handle()` 后读线程本地的写操作登记，写入 State
+- [x] 人工介入节点新增写操作审批分支（带可读摘要 + approved/abort 选项）
+- [x] `resume` 支持放行写操作；初始 State 补默认值
+- [x] 修既有 bug：`intervention_reason` 为 None 时 `resume` 会 crash
+- [x] **踩到并修掉一个条件触发的坑**：工具并行执行时跑在线程池里，
+      写操作登记若放在工具内部会丢失信号、甚至跨请求串号。登记已挪到调用线程。
+
+**闸门验证**：
+
+```
+handle_query → 闸门拦截  mode=human_intervention
+               摘要: ['创建售后工单 TK20260916004，分类 退货，优先级 high']
+resume("approved") → success=True，答复引用真实工单号 TK20260916004
+```
+
+> ⚠️ 测这个时发现**路由有随机性**：同一句提问连跑 3 次，前两次走复杂路径（规划审批）、
+> 第三次才走简单路径触发写操作闸门。**单次通过 ≠ 稳定通过。**
+
+**⚠️ 两个已知问题，留给阶段 6：**
+
+1. 建表语句里的 `FOREIGN KEY` **默认不生效** —— SQLite 需要显式 `PRAGMA foreign_keys = ON`，
+   所以现在能往 `tickets` 里塞不存在的 user_id。
+2. Agent 实测**臆造过用户ID**（填了 `U87654321`，库里没这人）。已加提示词约束，
+   但根治要靠外键约束。
 
 ### 阶段 4：路由与编排适配
 - 重写选择规则（[router.py:229-236](orchestrator/router.py#L229-L236)）→ 售后意图分类

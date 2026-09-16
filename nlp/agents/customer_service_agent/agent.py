@@ -13,6 +13,7 @@ import json
 from typing import Dict, Any, List
 from llm.output_parser import parse_llm_json, parse_tool_calls
 from llm.langchain_tools import ToolRegistry
+from core.write_ops import record_write_op
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
@@ -514,7 +515,44 @@ class CustomerServiceAgent:
         else:
             tool_results.append(_exec_one(unique_calls[0]))
 
+        # ★ 写操作登记必须在这里做（调用线程），不能放进工具函数内部：
+        # 上面那个并行分支会让工具跑在 worker 线程里，而写操作记录器是**线程本地**的。
+        # 在 worker 线程里登记，信号会丢失；更糟的是会残留在被复用的线程上，
+        # 污染下一个恰好调度到该线程的请求。
+        self._record_write_operations(tool_results)
+
         return tool_results
+
+    @staticmethod
+    def _parse_tool_result(result) -> Dict:
+        """把工具返回值还原成字典。
+
+        tool_registry.call_tool() 统一返回 str()，字典会被转成 Python repr，
+        这里用 ast.literal_eval 安全地还原（不用 eval，避免执行任意代码）。
+        """
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, str):
+            try:
+                import ast
+                parsed = ast.literal_eval(result)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (ValueError, SyntaxError):
+                pass
+        return {"raw": str(result)[:300]}
+
+    def _record_write_operations(self, tool_results: List[Dict]) -> None:
+        """把本轮**成功执行**的写操作登记到当前线程，供编排层判断是否需要人工审批。"""
+        for tr in tool_results:
+            if not tr.get("success") or tr.get("tool") not in self._WRITE_TOOLS:
+                continue
+
+            detail = self._parse_tool_result(tr.get("result"))
+            if detail.get("error"):
+                continue        # 写失败了不算，别拿失败去触发审批
+
+            record_write_op(tr["tool"], detail)
 
     def _build_system_prompt(self, context: Dict) -> str:
         """构建系统提示词（电商售后专用）"""
@@ -527,6 +565,9 @@ class CustomerServiceAgent:
 ★ 订单号、物流状态、退款进度必须来自工具返回的真实数据。查不到就如实说查不到，
   绝对不要编造一个"看起来合理"的状态或时间。
 ★ 涉及收货人手机号、详细地址等个人信息时，只回必要的部分，不要整条复述。
+★ **不要臆造 ID。** 用户ID（形如 U10001）、订单号、单号都必须来自用户原话或工具返回。
+  拿不到就留空或向用户索取，**绝对不要自己编一个"看起来像"的编号**。
+  从订单查用户是最稳的做法：query_order 的返回里就有 user_id 字段，直接用它。
 ★ **办理类操作必须真的执行工具，不能只在回答里描述。** 如果你对用户说
   "已为您提交退货申请""已为您创建工单"，那么在这一轮对话里**必须真的调用过**
   submit_return_request 或 create_ticket，并且拿到它们返回的单号。
