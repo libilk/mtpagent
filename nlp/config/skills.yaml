@@ -1,0 +1,260 @@
+skills:
+  # Knowledge Agent 工具
+  vector_search:
+    name: 向量检索
+    description: 在知识库中进行语义相似度检索，适用于概念性查询和模糊匹配
+    agent: knowledge_agent
+    parameters:
+      query:
+        type: string
+        required: true
+        description: 查询文本
+      top_k:
+        type: integer
+        default: 3
+        description: 返回结果数量
+    适用场景:
+      - 询问技术概念
+      - 查找相关文档
+      - 语义相似查询
+    不适用场景:
+      - 需要精确匹配的查询
+
+  keyword_search:
+    name: 关键词检索
+    description: 基于BM25算法的关键词精确匹配检索
+    agent: knowledge_agent
+    parameters:
+      query:
+        type: string
+        required: true
+      top_k:
+        type: integer
+        default: 3
+    适用场景:
+      - 精确关键词匹配
+      - 专有名词查询
+    不适用场景:
+      - 语义理解查询
+
+  hybrid_search:
+    name: 混合检索
+    description: 结合向量检索和关键词检索，使用RRF算法融合结果
+    agent: knowledge_agent
+    parameters:
+      query:
+        type: string
+        required: true
+      top_k:
+        type: integer
+        default: 3
+      vector_weight:
+        type: float
+        default: 0.5
+        description: 向量检索权重
+    适用场景:
+      - 复杂查询
+      - 需要兼顾语义和精确匹配
+
+  summarize:
+    name: 文本摘要
+    description: 对长文本进行摘要提取
+    agent: knowledge_agent
+    parameters:
+      text:
+        type: string
+        required: true
+      max_length:
+        type: integer
+        default: 200
+
+  web_search:
+    name: 网络搜索
+    description: 搜索互联网获取最新信息，当知识库中没有相关内容时使用
+    agent: knowledge_agent
+    parameters:
+      query:
+        type: string
+        required: true
+        description: 搜索查询文本
+      max_results:
+        type: integer
+        default: 5
+        description: 返回结果数量
+    适用场景:
+      - 知识库中没有相关内容
+      - 需要实时数据或最新资讯
+      - 查询近期事件或新闻
+    不适用场景:
+      - 知识库已有相关文档时
+
+  # Code Agent 工具
+  generate_code:
+    name: 代码生成
+    description: 根据需求生成代码
+    agent: code_agent
+    parameters:
+      task:
+        type: string
+        required: true
+        description: 代码任务描述
+      language:
+        type: string
+        default: python
+        description: 编程语言
+      style:
+        type: string
+        default: clean
+        description: 代码风格
+
+  review_code:
+    name: 代码审查
+    description: 审查代码质量和潜在问题
+    agent: code_agent
+    parameters:
+      code:
+        type: string
+        required: true
+      language:
+        type: string
+        required: true
+
+  debug_code:
+    name: 代码调试
+    description: 分析和修复代码错误
+    agent: code_agent
+    parameters:
+      code:
+        type: string
+        required: true
+      error_message:
+        type: string
+        required: true
+
+  # VQA Agent 工具
+  chart_analysis:
+    name: 图表分析
+    description: 对单张图表进行深度分析，识别数据趋势、关键转折点、异常值，输出结构化分析报告
+    agent: vqa_agent
+    parameters:
+      query:
+        type: string
+        required: true
+        description: 关于图表的问题（如"分析这张图的趋势"）
+      image_url:
+        type: string
+        required: false
+        description: 图片公网URL
+      image_path:
+        type: string
+        required: false
+        description: 本地图片路径
+    适用场景:
+      - 单张图表趋势分析
+      - 图表数据提取
+      - 图表关键数据点识别
+    不适用场景:
+      - 纯文本问答
+      - 不涉及图片的查询
+
+  multi_chart_compare:
+    name: 多图表对比分析
+    description: 对多张图表进行对比分析，识别共同趋势、差异点和关联关系
+    agent: vqa_agent
+    parameters:
+      query:
+        type: string
+        required: true
+        description: 对比分析的问题
+      image_urls:
+        type: array
+        required: false
+        description: 多张图片的公网URL列表
+      image_paths:
+        type: array
+        required: false
+        description: 多张图片的本地路径列表
+    适用场景:
+      - 多张图表数据对比
+      - 跨图表趋势分析
+      - 不同维度数据关联分析
+    不适用场景:
+      - 单张图片分析
+      - 不涉及图片的查询
+
+  visual_question_answering:
+    name: 视觉问答
+    description: 根据图片回答用户问题，支持图片描述、OCR文字识别等通用视觉任务
+    agent: vqa_agent
+    parameters:
+      query:
+        type: string
+        required: true
+        description: 关于图片的问题
+      image_url:
+        type: string
+        required: false
+        description: 图片的公网URL
+      image_path:
+        type: string
+        required: false
+        description: 本地图片路径
+    适用场景:
+      - 图片内容描述
+      - 图片中文字识别
+      - 物体/场景识别
+    不适用场景:
+      - 纯文本问答
+      - 不涉及图片的查询
+
+  # Customer Agent 工具
+  analyze_sentiment:
+    name: 情感分析
+    description: 分析用户情绪（正面/负面/中性）
+    agent: customer_agent
+    parameters:
+      text:
+        type: string
+        required: true
+    returns:
+      sentiment:
+        type: string
+        enum: [positive, negative, neutral]
+      score:
+        type: float
+        description: 情感分数（-1到1）
+
+  create_ticket:
+    name: 创建工单
+    description: 为用户创建客服工单
+    agent: customer_agent
+    parameters:
+      user_id:
+        type: string
+        required: false
+      issue:
+        type: string
+        required: true
+      priority:
+        type: string
+        default: normal
+        enum: [low, normal, high, urgent]
+
+  query_ticket:
+    name: 查询工单
+    description: 查询工单状态
+    agent: customer_agent
+    parameters:
+      ticket_id:
+        type: string
+        required: true
+
+  query_user_info:
+    name: 查询用户信息
+    description: 查询用户基本信息和历史记录
+    agent: customer_agent
+    parameters:
+      user_id:
+        type: string
+        required: true
+

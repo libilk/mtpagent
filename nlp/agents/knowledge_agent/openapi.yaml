@@ -1,0 +1,126 @@
+openapi: 3.0.0
+info:
+  title: Knowledge Agent API
+  description: 知识检索Agent，提供语义检索、关键词检索和混合检索能力
+  version: 1.0.0
+
+paths:
+  /vector_search:
+    post:
+      summary: 向量检索
+      description: 在知识库中进行语义相似度检索
+      operationId: vector_search
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                  description: 查询文本
+                top_k:
+                  type: integer
+                  default: 3
+                  description: 返回结果数量
+              required:
+                - query
+      responses:
+        '200':
+          description: 检索成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    content:
+                      type: string
+                    score:
+                      type: number
+
+  /keyword_search:
+    post:
+      summary: 关键词检索
+      description: 基于BM25算法的关键词精确匹配检索
+      operationId: keyword_search
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                  description: 查询文本
+                top_k:
+                  type: integer
+                  default: 3
+              required:
+                - query
+      responses:
+        '200':
+          description: 检索成功
+
+  /hybrid_search:
+    post:
+      summary: 混合检索
+      description: 结合向量检索和关键词检索，使用RRF算法融合结果
+      operationId: hybrid_search
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                  description: 查询文本
+                top_k:
+                  type: integer
+                  default: 3
+                vector_weight:
+                  type: number
+                  default: 0.5
+                  description: 向量检索权重（0-1）
+              required:
+                - query
+      responses:
+        '200':
+          description: 检索成功
+
+  /summarize:
+    post:
+      summary: 文本摘要
+      description: 对长文本进行摘要提取
+      operationId: summarize
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+                  description: 待摘要的文本
+                max_length:
+                  type: integer
+                  default: 200
+                  description: 摘要最大长度
+              required:
+                - text
+      responses:
+        '200':
+          description: 摘要成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  summary:
+                    type: string

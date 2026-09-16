@@ -1,0 +1,22 @@
+{
+  "user_001": {
+    "user_id": "user_001",
+    "name": "张三",
+    "email": "zhangsan@example.com",
+    "phone": "13800138000",
+    "vip_level": "gold",
+    "register_date": "2023-01-15",
+    "total_orders": 25,
+    "total_amount": 15800.5
+  },
+  "user_002": {
+    "user_id": "user_002",
+    "name": "李四",
+    "email": "lisi@example.com",
+    "phone": "13900139000",
+    "vip_level": "silver",
+    "register_date": "2023-06-20",
+    "total_orders": 10,
+    "total_amount": 5200.0
+  }
+}

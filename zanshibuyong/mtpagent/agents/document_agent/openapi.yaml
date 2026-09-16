@@ -1,0 +1,220 @@
+openapi: 3.0.0
+info:
+  title: Document Agent API
+  description: 企业级合同审核Agent，提供文档解析、风险识别、历史对比能力
+  version: 1.0.0
+
+paths:
+  /parse_document:
+    post:
+      summary: 解析文档
+      description: 自动识别文档类型（PDF/Word），提取文本和基本结构
+      operationId: parse_document
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                file_path:
+                  type: string
+                  description: 文档路径
+                enable_ocr:
+                  type: boolean
+                  default: false
+                  description: 是否启用OCR（用于扫描件）
+              required:
+                - file_path
+      responses:
+        '200':
+          description: 解析成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  text:
+                    type: string
+                    description: 文档文本内容
+                  metadata:
+                    type: object
+                    description: 文档元数据
+
+  /extract_structure:
+    post:
+      summary: 提取结构化信息
+      description: 从合同中提取结构化信息：甲乙方、金额、日期、条款等
+      operationId: extract_structure
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                document_text:
+                  type: string
+                  description: 文档文本
+                doc_type:
+                  type: string
+                  default: contract
+                  description: 文档类型
+              required:
+                - document_text
+      responses:
+        '200':
+          description: 提取成功
+
+  /extract_tables:
+    post:
+      summary: 提取表格数据
+      description: 提取文档中的表格数据，自动识别表格结构
+      operationId: extract_tables
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                file_path:
+                  type: string
+                  description: 文档路径
+                table_type:
+                  type: string
+                  default: auto
+                  description: 表格类型提示
+              required:
+                - file_path
+      responses:
+        '200':
+          description: 提取成功
+
+  /identify_risks:
+    post:
+      summary: 识别风险点
+      description: 基于LLM识别合同风险点：不合理条款、缺失条款、高风险条款等
+      operationId: identify_risks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                contract_data:
+                  type: string
+                  description: 结构化合同数据（JSON字符串）
+              required:
+                - contract_data
+      responses:
+        '200':
+          description: 识别成功
+
+  /compare_with_history:
+    post:
+      summary: 历史合同对比
+      description: 对比历史合同，分析条款变化、风险趋势
+      operationId: compare_with_history
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                current_contract:
+                  type: string
+                  description: 当前合同数据
+                supplier:
+                  type: string
+                  description: 供应商名称
+                compare_aspects:
+                  type: array
+                  items:
+                    type: string
+                  description: 对比维度
+              required:
+                - current_contract
+                - supplier
+      responses:
+        '200':
+          description: 对比成功
+
+  /calculate_risk_score:
+    post:
+      summary: 计算风险评分
+      description: 综合计算合同风险评分（0-100），基于多个维度
+      operationId: calculate_risk_score
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                contract_data:
+                  type: string
+                  description: 合同数据
+                risk_analysis:
+                  type: string
+                  description: 风险分析结果
+              required:
+                - contract_data
+      responses:
+        '200':
+          description: 计算成功
+
+  /search_similar_contracts:
+    post:
+      summary: 检索相似合同
+      description: 在历史合同库中检索相似合同，用于参考和对比
+      operationId: search_similar_contracts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                  description: 检索查询
+                contract_type:
+                  type: string
+                  description: 合同类型
+                top_k:
+                  type: integer
+                  default: 5
+                  description: 返回结果数量
+              required:
+                - query
+      responses:
+        '200':
+          description: 检索成功
+
+  /search_by_supplier:
+    post:
+      summary: 按供应商检索
+      description: 查询某供应商的历史合同记录，了解合作历史、违约记录等
+      operationId: search_by_supplier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                supplier:
+                  type: string
+                  description: 供应商名称
+                include_risk_info:
+                  type: boolean
+                  default: true
+                  description: 是否包含风险信息
+              required:
+                - supplier
+      responses:
+        '200':
+          description: 检索成功

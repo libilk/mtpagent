@@ -1,0 +1,65 @@
+{
+  "rag_introduction": {
+    "doc_id": "rag_introduction",
+    "title": "Rag Introduction",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [],
+    "priority": 5
+  },
+  "rag_optimization_strategies": {
+    "doc_id": "rag_optimization_strategies",
+    "title": "RAG系统核心优化策略",
+    "domain": "tech",
+    "audiences": [
+      "developer"
+    ],
+    "tags": [
+      "RAG",
+      "优化",
+      "混合检索",
+      "缓存",
+      "重排序",
+      "HyDE",
+      "查询优化"
+    ],
+    "priority": 8
+  },
+  "customer_satisfaction_guide": {
+    "doc_id": "customer_satisfaction_guide",
+    "title": "客户满意度分析与提升策略指南",
+    "domain": "customer_service",
+    "audiences": [
+      "customer_service_rep",
+      "sales_rep"
+    ],
+    "tags": [
+      "客户满意度",
+      "RFM",
+      "消费分析",
+      "提升策略"
+    ],
+    "priority": 8
+  },
+  "customer_retention_best_practices": {
+    "doc_id": "customer_retention_best_practices",
+    "title": "客户留存最佳实践与流失防控指南",
+    "domain": "customer_service",
+    "audiences": [
+      "customer_service_rep",
+      "sales_rep"
+    ],
+    "tags": [
+      "客户留存",
+      "流失预警",
+      "复购率",
+      "客户生命周期",
+      "召回策略",
+      "留存率",
+      "CLV"
+    ],
+    "priority": 8
+  }
+}

@@ -1,0 +1,110 @@
+agents:
+  - id: knowledge_agent
+    name: 知识检索Agent
+    description: 专门处理通用知识查询，擅长技术概念、原理解释、文档检索。支持混合检索、查询优化、网络搜索。已集成8大生产级优化。
+    agent_type: atomic  # 原子智能体：单一职责
+    capabilities:
+      - 语义相似度检索
+      - 关键词精确匹配
+      - 混合检索（RRF融合）
+      - 查询优化（扩展、分解、改写）
+      - 文本摘要
+      - 结果重排序
+      - 文档对比
+      - 质量评估
+      - 对话记忆
+      - 指代消解
+      - 网络搜索
+    openapi_spec: agents/knowledge_agent/openapi.yaml
+    model: qwen-plus
+    enabled: true
+    optimizations:
+      enable_memory: true
+      enable_rerank: true
+      reranker_type: auto  # auto(自动选择) / api(DashScope API) / cross_encoder(本地模型) / rule(规则)
+      enable_hyde: true
+      enable_self_consistency: true
+
+  - id: database_agent
+    name: 数据库查询Agent
+    description: 专门处理数据库查询任务，擅长SQL生成、表结构探索、数据分析。支持多轮数据库对话。可查询客户消费记录、订单历史、销售数据等交易型数据（Chinook数据库）。
+    agent_type: atomic  # 原子智能体：SQL生成单一职责
+    capabilities:
+      - 数据库查询
+      - 表结构探索
+      - SQL生成
+      - 数据分析
+      - 数据统计
+      - 样例数据查看
+      - 客户消费记录查询
+      - 订单历史查询
+      - 销售数据统计
+    model: qwen-plus
+    enabled: true
+
+  - id: customer_service_agent
+    name: 客服Agent
+    description: 专门处理客户咨询、投诉、工单管理（CRM系统）。支持情感分析、工单创建与跟进。注意：此Agent查询的是CRM工单系统，不能查询交易数据库中的消费记录或订单历史，那些应由database_agent处理。
+    agent_type: atomic  # 原子智能体：ReAct模式，7工具自主决策
+    capabilities:
+      - 情感分析
+      - 工单创建
+      - 工单查询
+      - CRM用户信息查询
+      - 客户咨询处理
+      - 投诉处理
+      - 知识库检索
+      - 客户满意度建议
+    model: qwen-plus
+    enabled: true
+
+  - id: document_agent
+    name: 文档处理Agent
+    description: 统一文档处理Agent，支持PDF（含OCR扫描件识别）、Word（.docx/.doc）、Excel/CSV、纯文本（.txt/.md）等多格式文档的解析与智能分析。
+    agent_type: composite  # 复合智能体：内部封装审核流程
+    capabilities:
+      - 文档解析
+      - 文档分析
+      - 文档总结
+    openapi_spec: agents/document_agent/openapi.yaml
+    model: qwen-plus
+    enabled: true
+
+  - id: vqa_agent
+    name: 视觉问答Agent
+    description: 基于千问VL多模态模型的视觉问答Agent，擅长图表数据趋势分析、单图/多图对比分析、图片内容描述、OCR文字识别。需要用户提供图片。
+    agent_type: atomic  # 原子智能体：视觉问答单一职责
+    capabilities:
+      - 图像问答
+      - 图表趋势分析
+      - 多图对比分析
+      - 图片内容描述
+      - OCR文字识别
+      - 图表数据提取
+    model: qwen-vl-max
+    enabled: true
+
+  - id: critic_agent
+    name: 评论家Agent
+    description: 审计智能体，验证任务衔接的合理性，确保上下游任务输出输入匹配。
+    agent_type: coordinator  # 协调智能体：质量保障
+    capabilities:
+      - 任务衔接验证
+      - 参数匹配检查
+      - 数据质量评估
+      - 冲突检测
+    model: qwen-plus
+    enabled: true
+
+  - id: chat_agent
+    name: 闲聊兜底Agent
+    description: 通用对话兜底Agent，处理闲聊、问候、意图不明确或不属于其他专业Agent的问题。当用户意图模糊、其他Agent没有把握时，优先选择此Agent。
+    agent_type: atomic
+    capabilities:
+      - 闲聊对话
+      - 问候回复
+      - 通用问答
+      - 意图不明确处理
+      - 引导用户使用专业功能
+    model: qwen-plus
+    enabled: true

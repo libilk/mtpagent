@@ -232,7 +232,6 @@ python -m pytest tests/coach/ -q     # 274 项
 
 ---
 
-## 对标
 
 市面上有两个成熟的学习平台:[WeSmartFlow](https://github.com/Tencent/WeSmartFlow)(腾讯)
 和 [DeepTutor](https://github.com/HKUDS/DeepTutor)(港大)。

@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG Agent - 系统监控</title>
+<style>
+/* ========== CSS 变量 & 全局样式 ========== */
+:root {
+    --bg-primary: #0f0f0f;
+    --bg-secondary: #1a1a1a;
+    --bg-tertiary: #252525;
+    --bg-hover: #2a2a2a;
+    --border-color: #333;
+    --text-primary: #e8e8e8;
+    --text-secondary: #999;
+    --text-muted: #666;
+    --accent: #4f8ff7;
+    --accent-hover: #3a7de6;
+    --accent-dim: rgba(79, 143, 247, 0.1);
+    --success: #34c759;
+    --warning: #ff9f0a;
+    --danger: #ff453a;
+    --radius: 12px;
+    --radius-sm: 8px;
+    --shadow: 0 2px 12px rgba(0,0,0,0.3);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Microsoft YaHei", sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+}
+
+/* ========== 顶部导航 ========== */
+.navbar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-color);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+.navbar-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.navbar-brand .logo { font-size: 24px; }
+
+.navbar-links {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+}
+
+.navbar-links a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    padding: 6px 14px;
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    transition: all 0.2s;
+}
+
+.navbar-links a:hover,
+.navbar-links a.active {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 6px;
+}
+
+.status-dot.green { background: var(--success); box-shadow: 0 0 6px var(--success); }
+.status-dot.red { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+.status-dot.yellow { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
+
+/* ========== 主内容 ========== */
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 24px;
+}
+
+/* ========== 统计卡片 ========== */
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.stat-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    padding: 20px;
+    position: relative;
+    overflow: hidden;
+}
+
+.stat-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 4px;
+    height: 100%;
+}
+
+.stat-card.blue::before { background: var(--accent); }
+.stat-card.green::before { background: var(--success); }
+.stat-card.orange::before { background: var(--warning); }
+.stat-card.red::before { background: var(--danger); }
+.stat-card.purple::before { background: #a855f7; }
+
+.stat-label {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+}
+
+.stat-value {
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+}
+
+.stat-sub {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+/* ========== 面板 ========== */
+.panel {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    margin-bottom: 24px;
+    overflow: hidden;
+}
+
+.panel-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.panel-title {
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.panel-body {
+    padding: 20px;
+}
+
+/* ========== Agent 列表 ========== */
+.agent-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 16px;
+}
+
+.agent-card {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    padding: 16px;
+    transition: all 0.2s;
+}
+
+.agent-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-1px);
+}
+
+.agent-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.agent-name {
+    font-weight: 600;
+    font-size: 15px;
+}
+
+.agent-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 500;
+}
+
+.badge-atomic { background: rgba(79,143,247,0.15); color: var(--accent); }
+.badge-composite { background: rgba(168,85,247,0.15); color: #a855f7; }
+.badge-coordinator { background: rgba(255,159,10,0.15); color: var(--warning); }
+
+.agent-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 10px;
+    line-height: 1.5;
+}
+
+.agent-caps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.cap-tag {
+    font-size: 11px;
+    padding: 2px 8px;
+    background: var(--bg-hover);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    color: var(--text-secondary);
+}
+
+.agent-model {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+/* ========== 日志表格 ========== */
+.log-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.log-table th {
+    text-align: left;
+    padding: 10px 12px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-weight: 500;
+    border-bottom: 1px solid var(--border-color);
+    white-space: nowrap;
+}
+
+.log-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+    vertical-align: top;
+}
+
+.log-table tr:hover td {
+    background: var(--bg-hover);
+}
+
+.log-query {
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.log-query:hover {
+    white-space: normal;
+    word-break: break-all;
+}
+
+.log-answer {
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.log-answer:hover {
+    white-space: normal;
+    word-break: break-all;
+}
+
+.score-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.score-high { background: rgba(52,199,89,0.15); color: var(--success); }
+.score-mid { background: rgba(255,159,10,0.15); color: var(--warning); }
+.score-low { background: rgba(255,69,58,0.15); color: var(--danger); }
+
+.mode-tag {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+.mode-simple { background: rgba(52,199,89,0.12); color: var(--success); }
+.mode-planning { background: rgba(79,143,247,0.12); color: var(--accent); }
+.mode-error { background: rgba(255,69,58,0.12); color: var(--danger); }
+
+/* ========== 分页 ========== */
+.pagination {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+    margin-top: 16px;
+}
+
+.pagination button {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    padding: 6px 14px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+}
+
+.pagination button:hover:not(:disabled) {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.pagination button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.pagination .page-info {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+/* ========== 工具栏 ========== */
+.toolbar {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.toolbar input,
+.toolbar select {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+}
+
+.toolbar input:focus,
+.toolbar select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--accent);
+}
+
+.btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.btn-primary:hover {
+    background: var(--accent-hover);
+}
+
+/* ========== 加载动画 ========== */
+.loading {
+    text-align: center;
+    padding: 40px;
+    color: var(--text-muted);
+}
+
+.spinner {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    border: 2px solid var(--border-color);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ========== 系统信息 ========== */
+.sys-info {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 16px;
+}
+
+.info-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 14px;
+}
+
+.info-row:last-child {
+    border-bottom: none;
+}
+
+.info-label {
+    color: var(--text-secondary);
+}
+
+.info-value {
+    font-weight: 500;
+}
+
+/* ========== 空状态 ========== */
+.empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--text-muted);
+}
+
+.empty-state .icon {
+    font-size: 48px;
+    margin-bottom: 16px;
+}
+
+/* ========== 刷新按钮 ========== */
+.refresh-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 4px;
+    transition: all 0.3s;
+}
+
+.refresh-btn:hover {
+    color: var(--accent);
+}
+
+.refresh-btn.spinning {
+    animation: spin 0.6s linear;
+}
+
+/* ========== 响应式 ========== */
+@media (max-width: 768px) {
+    .container { padding: 16px; }
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    .agent-grid { grid-template-columns: 1fr; }
+    .log-table { font-size: 12px; }
+    .toolbar { flex-direction: column; }
+    .navbar { padding: 10px 16px; }
+}
+</style>
+</head>
+<body>
+
+<!-- 导航栏 -->
+<nav class="navbar">
+    <div class="navbar-brand">
+        <span class="logo">📊</span>
+        <span>RAG Agent 系统监控</span>
+        <span id="systemStatus" style="font-size:13px;color:var(--text-secondary)">
+            <span class="status-dot yellow"></span>连接中...
+        </span>
+    </div>
+    <div class="navbar-links">
+        <a href="/">💬 聊天界面</a>
+        <a href="/monitor" class="active">📊 系统监控</a>
+        <button class="refresh-btn" onclick="refreshAll()" title="刷新所有数据">🔄</button>
+    </div>
+</nav>
+
+<div class="container">
+
+    <!-- ========== 统计概览 ========== -->
+    <div class="stats-grid" id="statsGrid">
+        <div class="stat-card blue">
+            <div class="stat-label">📝 总问答数</div>
+            <div class="stat-value" id="statTotal">-</div>
+            <div class="stat-sub" id="statToday">今日 -</div>
+        </div>
+        <div class="stat-card green">
+            <div class="stat-label">✅ 成功率</div>
+            <div class="stat-value" id="statSuccessRate">-</div>
+            <div class="stat-sub" id="statSuccessCount">成功 - 次</div>
+        </div>
+        <div class="stat-card orange">
+            <div class="stat-label">⭐ 平均评分</div>
+            <div class="stat-value" id="statAvgScore">-</div>
+            <div class="stat-sub">质量评估分数</div>
+        </div>
+        <div class="stat-card purple">
+            <div class="stat-label">⏱️ 平均耗时</div>
+            <div class="stat-value" id="statAvgDuration">-</div>
+            <div class="stat-sub">毫秒</div>
+        </div>
+        <div class="stat-card blue">
+            <div class="stat-label">🧩 简单查询</div>
+            <div class="stat-value" id="statSimple">-</div>
+            <div class="stat-sub">单Agent路由</div>
+        </div>
+        <div class="stat-card red">
+            <div class="stat-label">🔀 复杂查询</div>
+            <div class="stat-value" id="statComplex">-</div>
+            <div class="stat-sub">多Agent协作</div>
+        </div>
+    </div>
+
+    <!-- ========== Agent 列表 ========== -->
+    <div class="panel">
+        <div class="panel-header">
+            <span class="panel-title">🤖 Agent 注册列表</span>
+            <span id="agentCount" style="font-size:13px;color:var(--text-secondary)"></span>
+        </div>
+        <div class="panel-body">
+            <div class="agent-grid" id="agentGrid">
+                <div class="loading"><div class="spinner"></div><p style="margin-top:8px">加载中...</p></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 系统信息 ========== -->
+    <div class="panel">
+        <div class="panel-header">
+            <span class="panel-title">⚙️ 系统信息</span>
+        </div>
+        <div class="panel-body">
+            <div class="sys-info" id="sysInfo">
+                <div>
+                    <div class="info-row">
+                        <span class="info-label">服务状态</span>
+                        <span class="info-value" id="infoStatus">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">服务版本</span>
+                        <span class="info-value" id="infoVersion">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Redis</span>
+                        <span class="info-value" id="infoRedis">-</span>
+                    </div>
+                </div>
+                <div>
+                    <div class="info-row">
+                        <span class="info-label">首次查询</span>
+                        <span class="info-value" id="infoFirst">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">最近查询</span>
+                        <span class="info-value" id="infoLast">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">数据刷新</span>
+                        <span class="info-value" id="infoRefresh">-</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 问答日志 ========== -->
+    <div class="panel">
+        <div class="panel-header">
+            <span class="panel-title">📋 问答日志</span>
+            <div class="toolbar">
+                <input type="text" id="logKeyword" placeholder="🔍 搜索关键词..." style="width:180px">
+                <select id="logMode">
+                    <option value="">全部模式</option>
+                    <option value="simple">简单查询</option>
+                    <option value="planning">复杂查询</option>
+                    <option value="error">错误</option>
+                </select>
+                <button class="btn" onclick="searchLogs()">搜索</button>
+                <button class="btn" onclick="exportLogs()">📥 导出 CSV</button>
+            </div>
+        </div>
+        <div class="panel-body" style="padding:0">
+            <div id="logContainer">
+                <table class="log-table">
+                    <thead>
+                        <tr>
+                            <th style="width:50px">ID</th>
+                            <th style="width:150px">时间</th>
+                            <th>用户问题</th>
+                            <th>系统回答</th>
+                            <th style="width:70px">模式</th>
+                            <th style="width:70px">评分</th>
+                            <th style="width:80px">耗时</th>
+                            <th style="width:100px">Agent</th>
+                        </tr>
+                    </thead>
+                    <tbody id="logBody">
+                        <tr><td colspan="8" class="loading"><div class="spinner"></div></td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="pagination" id="pagination"></div>
+        </div>
+    </div>
+
+</div>
+
+<script>
+// ========== 全局状态 ==========
+let currentPage = 1;
+const pageSize = 15;
+
+// ========== 初始化 ==========
+document.addEventListener('DOMContentLoaded', () => {
+    refreshAll();
+    // Enter 键搜索
+    document.getElementById('logKeyword').addEventListener('keypress', e => {
+        if (e.key === 'Enter') searchLogs();
+    });
+});
+
+// ========== 刷新所有数据 ==========
+async function refreshAll() {
+    const btn = document.querySelector('.refresh-btn');
+    btn.classList.add('spinning');
+
+    await Promise.all([
+        loadHealth(),
+        loadStats(),
+        loadAgents(),
+        loadLogs(1),
+    ]);
+
+    document.getElementById('infoRefresh').textContent = new Date().toLocaleTimeString();
+    setTimeout(() => btn.classList.remove('spinning'), 600);
+}
+
+// ========== 健康检查 ==========
+async function loadHealth() {
+    try {
+        const res = await fetch('/health');
+        const data = await res.json();
+
+        const statusEl = document.getElementById('systemStatus');
+        const isHealthy = data.status === 'healthy';
+        statusEl.innerHTML = `<span class="status-dot ${isHealthy ? 'green' : 'red'}"></span>${isHealthy ? '运行正常' : data.status}`;
+
+        document.getElementById('infoStatus').textContent = isHealthy ? '🟢 运行正常' : '🔴 ' + data.status;
+        document.getElementById('infoVersion').textContent = data.version || '-';
+
+        const redisMap = { connected: '🟢 已连接', not_configured: '⚪ 未配置', disconnected: '🔴 已断开' };
+        document.getElementById('infoRedis').textContent = redisMap[data.redis] || data.redis;
+    } catch (e) {
+        document.getElementById('systemStatus').innerHTML = '<span class="status-dot red"></span>连接失败';
+    }
+}
+
+// ========== 统计数据 ==========
+async function loadStats() {
+    try {
+        const res = await fetch('/logs/stats');
+        const data = await res.json();
+
+        document.getElementById('statTotal').textContent = data.total || 0;
+        document.getElementById('statToday').textContent = `今日 ${data.today_count || 0} 次`;
+        document.getElementById('statSuccessRate').textContent = data.success_rate || 'N/A';
+        document.getElementById('statSuccessCount').textContent = `成功 ${data.success_count || 0} 次`;
+        document.getElementById('statAvgScore').textContent = data.avg_score || 0;
+        document.getElementById('statAvgDuration').textContent = (data.avg_duration_ms || 0).toLocaleString();
+        document.getElementById('statSimple').textContent = data.simple_count || 0;
+        document.getElementById('statComplex').textContent = data.complex_count || 0;
+        document.getElementById('infoFirst').textContent = data.first_query || '-';
+        document.getElementById('infoLast').textContent = data.last_query || '-';
+    } catch (e) {
+        console.error('加载统计失败:', e);
+    }
+}
+
+// ========== Agent 列表 ==========
+async function loadAgents() {
+    try {
+        const res = await fetch('/agents');
+        const data = await res.json();
+        const agents = data.agents || [];
+
+        document.getElementById('agentCount').textContent = `共 ${agents.length} 个`;
+
+        if (agents.length === 0) {
+            document.getElementById('agentGrid').innerHTML = '<div class="empty-state"><div class="icon">🤖</div><p>暂无注册的 Agent</p></div>';
+            return;
+        }
+
+        const typeIcons = { atomic: '⚡', composite: '🔗', coordinator: '🎯' };
+        const badgeClass = { atomic: 'badge-atomic', composite: 'badge-composite', coordinator: 'badge-coordinator' };
+
+        document.getElementById('agentGrid').innerHTML = agents.map(a => `
+            <div class="agent-card">
+                <div class="agent-header">
+                    <span class="agent-name">${typeIcons[a.agent_type] || '🤖'} ${a.name || a.id}</span>
+                    <span class="agent-badge ${badgeClass[a.agent_type] || 'badge-atomic'}">${a.agent_type}</span>
+                </div>
+                <div class="agent-desc">${a.description || '暂无描述'}</div>
+                <div class="agent-caps">
+                    ${(a.capabilities || []).map(c => `<span class="cap-tag">${c}</span>`).join('')}
+                </div>
+                <div class="agent-model">模型: ${a.model || '默认'} | ID: ${a.id}</div>
+            </div>
+        `).join('');
+    } catch (e) {
+        document.getElementById('agentGrid').innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>加载 Agent 列表失败</p></div>';
+    }
+}
+
+// ========== 日志列表 ==========
+async function loadLogs(page) {
+    currentPage = page || 1;
+    const keyword = document.getElementById('logKeyword').value.trim();
+    const mode = document.getElementById('logMode').value;
+
+    let url = `/logs?page=${currentPage}&page_size=${pageSize}`;
+    if (keyword) url += `&keyword=${encodeURIComponent(keyword)}`;
+    if (mode) url += `&mode=${mode}`;
+
+    try {
+        const res = await fetch(url);
+        const data = await res.json();
+        const logs = data.data || [];
+
+        if (logs.length === 0) {
+            document.getElementById('logBody').innerHTML = `
+                <tr><td colspan="8">
+                    <div class="empty-state">
+                        <div class="icon">📭</div>
+                        <p>暂无问答日志</p>
+                        <p style="font-size:12px;margin-top:8px">开始聊天后，日志将自动记录在这里</p>
+                    </div>
+                </td></tr>`;
+            document.getElementById('pagination').innerHTML = '';
+            return;
+        }
+
+        document.getElementById('logBody').innerHTML = logs.map(log => {
+            // 评分样式
+            const score = log.quality_score || 0;
+            let scoreClass = 'score-low';
+            if (score >= 0.8) scoreClass = 'score-high';
+            else if (score >= 0.6) scoreClass = 'score-mid';
+
+            // 模式样式
+            const modeClass = log.mode === 'simple' ? 'mode-simple' : log.mode === 'planning' ? 'mode-planning' : 'mode-error';
+            const modeLabel = log.mode === 'simple' ? '简单' : log.mode === 'planning' ? '复杂' : log.mode || '-';
+
+            // Agent 列表
+            let agentStr = '-';
+            try {
+                const agents = JSON.parse(log.agents || '[]');
+                agentStr = agents.join(', ') || '-';
+            } catch { agentStr = log.agents || '-'; }
+
+            // 耗时
+            const dur = log.duration_ms ? `${(log.duration_ms / 1000).toFixed(1)}s` : '-';
+
+            return `<tr>
+                <td>${log.id}</td>
+                <td style="white-space:nowrap;color:var(--text-secondary)">${log.timestamp || '-'}</td>
+                <td class="log-query" title="${escapeHtml(log.query || '')}">${escapeHtml(truncate(log.query, 60))}</td>
+                <td class="log-answer" title="${escapeHtml(log.answer || '')}">${escapeHtml(truncate(log.answer, 80))}</td>
+                <td><span class="mode-tag ${modeClass}">${modeLabel}</span></td>
+                <td><span class="score-badge ${scoreClass}">${score.toFixed(2)}</span></td>
+                <td style="color:var(--text-secondary)">${dur}</td>
+                <td style="font-size:12px;color:var(--text-secondary)">${agentStr}</td>
+            </tr>`;
+        }).join('');
+
+        // 分页
+        const totalPages = data.pages || 1;
+        document.getElementById('pagination').innerHTML = `
+            <button onclick="loadLogs(1)" ${currentPage <= 1 ? 'disabled' : ''}>首页</button>
+            <button onclick="loadLogs(${currentPage - 1})" ${currentPage <= 1 ? 'disabled' : ''}>◀ 上一页</button>
+            <span class="page-info">${currentPage} / ${totalPages} 页（共 ${data.total} 条）</span>
+            <button onclick="loadLogs(${currentPage + 1})" ${currentPage >= totalPages ? 'disabled' : ''}>下一页 ▶</button>
+            <button onclick="loadLogs(${totalPages})" ${currentPage >= totalPages ? 'disabled' : ''}>末页</button>
+        `;
+    } catch (e) {
+        document.getElementById('logBody').innerHTML = `<tr><td colspan="8" class="loading">加载失败: ${e.message}</td></tr>`;
+    }
+}
+
+// ========== 搜索 ==========
+function searchLogs() {
+    loadLogs(1);
+}
+
+// ========== 导出 ==========
+function exportLogs() {
+    window.open('/logs/export', '_blank');
+}
+
+// ========== 工具函数 ==========
+function truncate(str, len) {
+    if (!str) return '';
+    str = str.replace(/\n/g, ' ');
+    return str.length > len ? str.substring(0, len) + '...' : str;
+}
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;');
+}
+</script>
+
+</body>
+</html>

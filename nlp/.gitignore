@@ -5,7 +5,6 @@
 .env
 .env.local
 .env.*.local
-api.env
 
 # API Key 配置文件
 *_api_key.txt
@@ -25,13 +24,6 @@ ENV/
 .venv
 
 # ==================== 数据文件 ====================
-# coach 本地数据：SQLite 图/画像，可用 coach.knowledge.builder --build 重建
-# 注意用 data/coach/* 而不是 data/coach/ —— 后者会让下面的 ! 失效
-# （git 不允许重新包含被排除目录里的文件）
-data/coach/*
-# 但题库要跟着仓库走：它是种子数据，不是生成的产物
-!data/coach/problems/
-
 # 向量数据库（保留目录结构，排除实际数据）
 vector_db/chroma_db/
 vector_db/indexed_files.json
@@ -53,6 +45,7 @@ Thumbs.db
 # ==================== IDE ====================
 .vscode/
 .idea/
+.spyproject/
 *.swp
 *.swo
 *~
@@ -73,8 +66,19 @@ package-lock.json
 ocr_tools/*.dll
 ocr_tools/tessdata/
 
-# ==================== Claude IDE ====================
+# ==================== Claude Code ====================
 .claude/
+CLAUDE.md
+PROJECT_BLUEPRINT.md
+
+# ==================== 用户数据 ====================
+# 用户上传的私人文件（简历、图片等）
+data/uploads/
+# 生成的图表
+data/charts/
+
+# ==================== OCR 二进制 ====================
+ocr_tools/tesseract.exe
 
 # ==================== 文档 ====================
 docs/
@@ -83,17 +87,8 @@ docs/
 # 测试输出
 test_output/
 *.test
+nul
 
 # 数据库文件（可由用户自行下载或初始化）
 database/chinook.db
-
-# coach 检查点库(LangGraph,可重建)
-data/coach/checkpoints.db
-
-# ==================== 归档区 ====================
-# 内容搬到 zanshibuyong/mtpagent/ 后，上面那些带路径前缀的规则不再匹配，
-# 按新路径重新声明一遍，避免本地运行数据被跟踪。
-zanshibuyong/mtpagent/data/coach/*
-zanshibuyong/mtpagent/data/coach/checkpoints.db
-!zanshibuyong/mtpagent/data/coach/problems/
-zanshibuyong/mtpagent/vector_db/indexed_files.json
+database/qa_logs.db
