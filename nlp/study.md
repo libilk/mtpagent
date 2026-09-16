@@ -156,13 +156,40 @@ START → complexity_classifier ─┬─ simple  → router ──→ [单个 A
 > `EcommerceCRM`）。它没有坏处，但确实是死代码 —— 需要的话可以删掉，连同 `data/crm/*.json`。
 > **暂未删除，标记在此以免日后困惑。**
 
-### 阶段 3：售后 Agent 重写（工作量最大）
-- 重写系统提示词（[agent.py:404-458](agents/customer_service_agent/agent.py#L404-L458)）→ 电商售后话术
-- 重写情感词表（[agent.py:733-772](agents/customer_service_agent/agent.py#L733-L772)）→ 售后场景负面词：破损/发错/没收到/退款慢/漏发
-- 扩工具集，现有 7 个之外补：**查物流轨迹**、**提交退换货申请**、**查退款进度**
-- 保留 `analyze_sentiment`，把「情绪激动」接到工单优先级上（现在是死代码，字段没人写）
+### 阶段 3：售后 Agent 重写　🔄 进行中（2026-09-16）
 
-**里程碑**：「我买的东西坏了要退货」→ 能走完识别意图 → 建工单 → 返回工单号。
+**Agent 本体　✅ 已完成**
+
+- [x] 重写系统提示词 → 电商售后话术 + **按意图组织的决策树** + 4 个业务陷阱
+- [x] 重写情感词表 → 售后场景用词（破损/发错/没收到/退款慢…）
+- [x] 删掉 `context["urgent"]` 死代码，改成提示词里的情绪 → 工单优先级映射
+- [x] 新增 **4 个**工具：`query_order` / `query_logistics` / `query_refund_status` / `submit_return_request`
+      （计划里写的是 3 个，`query_order` 是第 4 个 —— 退货前必须先校验订单归属和状态）
+- [x] `EcommerceCRM` 扩 4 个业务方法，`submit_return_request` 带**三重校验**
+      （订单存在 / 归属正确 / 状态允许售后）
+- [x] `max_iterations` 5 → 8
+- [x] **加防幻觉兜底** `_verify_write_claim()`
+
+**三个必须记下来的问题（详见 [idea.md](idea.md) 阶段 3）：**
+
+1. **Agent 会"演"** —— 一口气描述了完整的退货流程，但 `submit_return_request` 从没被调用，
+   数据库里什么都没有。**LLM Agent 最危险的失败模式：描述没发生的事。**
+2. **迭代次数卡死会诱发编造** —— `max_iterations=5` 装不下 5 轮工具 + 1 轮回答，
+   被强制收敛后模型顺着"流程应该走到哪"补完了结果，连单号都是编的。
+   **`max_iterations` 是正确性参数，不是性能参数。**
+3. **项目级潜伏 bug** —— `register_tool()` 用的 `Tool`（即 LangChain 的 `SimpleTool`）
+   **硬编码只接受 1 个参数**，加 `args_schema` 也无效。项目原有工具恰好都只传 1 个参数，
+   所以从没暴露；`create_ticket` 其实一直是坏的。已改用 `StructuredTool` 修复。
+
+**里程碑**：连跑 3 次「耳机坏了要退货」，**3/3 成功**，答复中的单号与真实落库单号一致　✅
+
+```
+写操作: ['RF20260916004']   答复中的单号: {'RF20260916004'}
+写操作: ['RF20260916005']   答复中的单号: {'RF20260916005'}
+写操作: ['RF20260916006']   答复中的单号: {'RF20260916006'}
+```
+
+**写操作审批闸门　⏳ 待做**（下一节）
 
 ### 阶段 4：路由与编排适配
 - 重写选择规则（[router.py:229-236](orchestrator/router.py#L229-L236)）→ 售后意图分类

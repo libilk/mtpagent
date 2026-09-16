@@ -160,7 +160,7 @@ class CustomerServiceAgent:
             self.hybrid_retriever = None
 
     def _register_tools(self):
-        """注册工具（7个）"""
+        """注册工具（11 个 = 3 检索 + 4 客服 + 4 售后办理）"""
         # ========== 知识检索工具 ==========
 
         # 1. 混合检索
@@ -256,7 +256,7 @@ class CustomerServiceAgent:
         # 5. 创建工单
         self.tool_registry.register_tool(
             name="create_ticket",
-            description="为用户创建客服工单，适合投诉、问题反馈、需要人工跟进的场景",
+            description="为用户创建售后工单，适合投诉、问题反馈、需要人工跟进的场景",
             parameters={
                 "type": "object",
                 "properties": {
@@ -272,7 +272,24 @@ class CustomerServiceAgent:
                         "type": "string",
                         "enum": ["low", "normal", "high", "urgent"],
                         "default": "normal",
-                        "description": "优先级"
+                        "description": "优先级。应依据 analyze_sentiment 的结果来定："
+                                       "negative 且 score<=-0.7 用 urgent，negative 用 high，"
+                                       "neutral 用 normal，positive 用 low"
+                    },
+                    "order_id": {
+                        "type": "string",
+                        "description": "关联的订单号（可选，但建议带上，便于客服定位问题）"
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["退货", "换货", "物流", "发票", "投诉", "咨询"],
+                        "default": "咨询",
+                        "description": "工单分类"
+                    },
+                    "sentiment": {
+                        "type": "string",
+                        "enum": ["positive", "neutral", "negative"],
+                        "description": "analyze_sentiment 返回的情绪结果，一并留档"
                     }
                 },
                 "required": ["issue"]
@@ -312,6 +329,100 @@ class CustomerServiceAgent:
                 "required": ["user_id"]
             },
             function=self.query_user_info
+        )
+
+        # ========== 售后办理工具（阶段 3 新增）==========
+        # 这四个把 Agent 从"只能答问题"变成"能办事"。
+        # 前三个是只读查询，最后一个是写操作（会触发人工审批）。
+
+        # 8. 查订单
+        self.tool_registry.register_tool(
+            name="query_order",
+            description="按订单号查询订单详情（状态、金额、商品明细、收货信息）。"
+                        "办理退货/换货前必须先调用本工具确认订单真实存在且状态允许售后。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "order_id": {
+                        "type": "string",
+                        "description": "订单号，形如 SO20260909001"
+                    }
+                },
+                "required": ["order_id"]
+            },
+            function=self.query_order
+        )
+
+        # 9. 查物流
+        self.tool_registry.register_tool(
+            name="query_logistics",
+            description="按订单号查询物流轨迹（承运商、运单号、当前状态、签收时间）。"
+                        "订单存在但查不到物流，说明尚未发货。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "order_id": {
+                        "type": "string",
+                        "description": "订单号，形如 SO20260909001"
+                    }
+                },
+                "required": ["order_id"]
+            },
+            function=self.query_logistics
+        )
+
+        # 10. 查退款进度
+        self.tool_registry.register_tool(
+            name="query_refund_status",
+            description="查询退款/退货申请的处理进度。按订单号或退款单号查皆可。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "order_id": {
+                        "type": "string",
+                        "description": "订单号（可选）"
+                    },
+                    "refund_id": {
+                        "type": "string",
+                        "description": "退款单号，形如 RF20260916001（可选）"
+                    }
+                },
+                "required": []
+            },
+            function=self.query_refund_status
+        )
+
+        # 11. 提交退换货申请
+        self.tool_registry.register_tool(
+            name="submit_return_request",
+            description="★写操作★ 为用户提交退换货申请。调用前必须先 query_order 确认订单"
+                        "归属和状态，并用 hybrid_search 检索政策确认时限与运费规则。"
+                        "本操作会改动资金相关数据，将触发人工审批。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "order_id": {
+                        "type": "string",
+                        "description": "订单号"
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "申请人的用户ID，必须与订单归属一致"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "申请原因，如「耳机右耳无声，属质量问题」"
+                    },
+                    "refund_type": {
+                        "type": "string",
+                        "enum": ["退货退款", "仅退款", "换货"],
+                        "default": "退货退款",
+                        "description": "售后类型"
+                    }
+                },
+                "required": ["order_id", "user_id", "reason"]
+            },
+            function=self.submit_return_request
         )
 
     @staticmethod
@@ -406,57 +517,91 @@ class CustomerServiceAgent:
         return tool_results
 
     def _build_system_prompt(self, context: Dict) -> str:
-        """构建系统提示词（客服专用）"""
-        prompt = """你是一个专业的客服助手，具备知识检索和客户服务能力。你需要通过调用工具来帮助用户解决问题。
+        """构建系统提示词（电商售后专用）"""
+        prompt = """你是「云集优选」电商平台的售后客服助手。你的职责是解答售后政策、
+查询订单与物流、受理退换货申请、处理投诉。
 
-工作流程：
-1. 分析用户问题，判断是知识咨询还是需要客服介入
-2. 如果是知识问题，先用 hybrid_search 检索知识库
-3. 如果用户情绪明显，调用 analyze_sentiment 分析情感
-4. 如果需要人工跟进，调用 create_ticket 创建工单
-5. 给出温暖、专业的回答
+【最高优先级的三条铁律】
+★ 政策条款必须来自知识库检索结果。禁止凭印象背条文 —— 售后政策有大量例外
+  （哪些商品不支持七天无理由、运费谁承担、时限算几天），记错会直接引发纠纷。
+★ 订单号、物流状态、退款进度必须来自工具返回的真实数据。查不到就如实说查不到，
+  绝对不要编造一个"看起来合理"的状态或时间。
+★ 涉及收货人手机号、详细地址等个人信息时，只回必要的部分，不要整条复述。
+★ **办理类操作必须真的执行工具，不能只在回答里描述。** 如果你对用户说
+  "已为您提交退货申请""已为您创建工单"，那么在这一轮对话里**必须真的调用过**
+  submit_return_request 或 create_ticket，并且拿到它们返回的单号。
+  **只描述而不调用，等于欺骗用户，是严重事故。**
+  错误示范：查完订单和政策后直接写"已为您提交退货申请，单号 RFxxx"（其实没调用）。
+  正确做法：查完信息后**继续调用** submit_return_request，用工具返回的单号来回答。
+  经验值：完整退货流程通常需要 4~5 轮，别在第 3 轮就急着收工。
 
-【知识检索工具】
-- hybrid_search: 混合检索知识库，回答用户的知识类问题
-- vector_search: 语义检索
-- keyword_search: 关键词检索
+【工作流程】
+1. 先判断用户意图属于下面哪一类，再选对应工具：
 
-【客服工具】
-- analyze_sentiment: 分析用户情绪（正面/负面/中性）
-- create_ticket: 创建客服工单（投诉、问题反馈）
-- query_ticket: 查询工单状态
-- query_user_info: 查询用户信息和历史记录
+   政策咨询（"能退吗""运费谁出""几天到账"）
+     → hybrid_search 检索政策 → 依据检索结果回答
 
-【决策策略】
-- 知识咨询：hybrid_search → 回答
-- 投诉/反馈：analyze_sentiment → create_ticket → 安抚回复
-- 工单跟进：query_ticket → 告知进度
-- 个性化服务：query_user_info → 针对性回答
+   查订单 / 查物流（"我的货到哪了""订单什么状态"）
+     → query_order 确认订单情况 → query_logistics 查物流
+
+   申请退货 / 换货（"我要退货""东西坏了"）
+     → ① query_order 确认订单存在、归属正确、状态允许售后
+     → ② hybrid_search 检索政策，确认时限和运费规则
+     → ③ submit_return_request 提交申请，并把政策依据一并告诉用户
+
+   投诉 / 情绪激烈（"太差了""我要投诉"）
+     → analyze_sentiment 判断情绪 → create_ticket 建工单（必要时提高优先级）→ 安抚
+
+   工单跟进（"我那个工单怎么样了"）
+     → query_ticket 查询进度
+
+2. 用户没给订单号却又需要查订单时，**先向用户要订单号**，不要猜。
+
+【工具清单】
+知识检索：hybrid_search / vector_search / keyword_search
+订单售后：query_order（查订单）/ query_logistics（查物流）/
+          submit_return_request（提交退换货）/ query_refund_status（查退款进度）
+客服办理：analyze_sentiment / create_ticket / query_ticket / query_user_info
+
+【必须注意的业务陷阱】
+- **不是所有商品都能七天无理由退货**。已激活的 3C 数码、贴身衣物、生鲜、定制商品等
+  属于法定例外，这类商品只能走「质量问题」通道（时限更长、运费由平台承担）。
+  遇到这类商品，务必检索政策确认，不要想当然地按七天无理由答复。
+- **「无理由退货」和「质量问题退货」的成本完全不同**：前者运费用户自付、时限短；
+  后者运费平台承担、时限长。判断错误会直接影响用户的钱包，要先分清是哪一种。
+- **会员等级会影响售后权益**（免费退货次数、运费补贴额度）。用户提到会员身份或
+  需要判断补贴时，用 query_user_info 查一下等级。
+- 订单状态为「待发货」时**不存在退货问题**，应引导用户走取消订单。
 
 【语气要求】
-- 使用同理心语言，表达理解
-- 情绪负面时优先安抚，再解决问题
-- 提供明确的解决方案或时间表
-- 避免推诿或模糊回答
+- 先共情、再办事。用户带着情绪来时，第一句要先表达理解，不要直接抛条款
+- 给明确的时间表和下一步动作，不说"尽快""也许""可能"
+- 政策对用户不利时，要解释清楚依据（引用检索到的条款），而不是生硬拒绝
+- 不确定就说不确定，并给出人工介入的路径（建工单）
 
 【注意事项】
-- 每次调用1-3个工具，不要过多
-- 最多5轮迭代，避免过度检索
-- 信息充足时立即给出答案
-- 情绪负面时，优先考虑创建工单
+- 每次可并行调用多个工具（如同时 query_order + query_logistics），减少轮次
+- 信息够了就立刻回答，但**办理类操作没调用工具就不算办完**
+- 一次能办完的事不要拆成多次追问
 """
 
-        # 添加情感上下文
-        if context.get("urgent"):
-            sentiment = context.get("sentiment", {})
-            prompt += f"""
-【重要提示】
-当前用户情绪：{sentiment.get('sentiment', 'negative')}（评分：{sentiment.get('score', -0.7):.2f}）
-用户情绪强烈负面，请：
-1. 优先考虑创建工单（create_ticket）
-2. 使用同理心语言，表达理解和歉意
-3. 提供明确的解决方案或时间表
-4. 避免推诿或模糊回答
+        # 情绪 → 工单优先级的联动规则。
+        #
+        # 原先这里是一段 `if context.get("urgent")` 的分支，但**全项目没有任何地方
+        # 写过 `urgent` 这个 key**，所以那段提示词从来没生效过（死代码）。
+        #
+        # 改成写死在提示词里的规则：让 LLM 先调 analyze_sentiment，再把情绪结果
+        # 传给 create_ticket 的 priority 参数。这样不需要跨请求保存状态，
+        # 也不会因为 Agent 实例被多线程共享而出错。
+        prompt += """
+【情绪与工单优先级的对应关系】
+调过 analyze_sentiment 之后，把它返回的结果传给 create_ticket：
+- sentiment = negative 且 score <= -0.7  →  priority = "urgent"
+- sentiment = negative                    →  priority = "high"
+- sentiment = neutral                     →  priority = "normal"
+- sentiment = positive                    →  priority = "low"
+同时把 sentiment 字段一起传进去，工单里会留档，便于后续分析。
+如果用户明确提到"要投诉""要曝光""已经催过很多次"，即使情感分析没到负值，也按 high 起。
 """
 
         return prompt
@@ -485,9 +630,14 @@ class CustomerServiceAgent:
             {"role": "user", "content": query}
         ]
 
-        max_iterations = 5
+        # 迭代上限 8 轮。原先的 5 轮对完整售后流程不够用：
+        # query_order → query_logistics → hybrid_search → query_user_info
+        # → submit_return_request 就要 5 轮，再加一轮生成答案 = 6 轮。
+        # 上限卡在 5 会把它逼到"没办成却编一个办成了的答案"。
+        max_iterations = 8
         retrieval_count = 0
         seen_tool_calls = set()
+        executed_tools = set()      # 本轮真正执行过的工具名，用于事后核验（见 _verify_write_claim）
 
         for iteration in range(max_iterations):
             logger.info(f"[ReAct] 第 {iteration + 1}/{max_iterations} 轮")
@@ -515,7 +665,7 @@ class CustomerServiceAgent:
                         })
                         response = self.llm.chat(messages, temperature=0.5)
 
-                    return response
+                    return self._verify_write_claim(response, executed_tools)
 
                 # 发射工具调用事件
                 tool_names = [tc["function"]["name"] for tc in tool_calls]
@@ -526,11 +676,15 @@ class CustomerServiceAgent:
                 if not tool_results:
                     logger.info("[ReAct] 所有工具调用均为重复，强制收敛")
                     messages.append({"role": "user", "content": "请基于已有信息给出最终答案。"})
-                    return self.llm.chat(messages, temperature=0.5)
+                    return self._verify_write_claim(
+                        self.llm.chat(messages, temperature=0.5), executed_tools
+                    )
 
                 for tr in tool_results:
                     if tr.get("tool") in ["vector_search", "keyword_search", "hybrid_search"]:
                         retrieval_count += 1
+                    if tr.get("success"):
+                        executed_tools.add(tr["tool"])
 
                 # 发射工具结果事件
                 result_summary = ", ".join([tr["tool"] for tr in tool_results])
@@ -590,10 +744,68 @@ class CustomerServiceAgent:
         })
 
         try:
-            return self.llm.chat(messages, temperature=0.5)
+            return self._verify_write_claim(
+                self.llm.chat(messages, temperature=0.5), executed_tools
+            )
         except Exception as e:
             logger.error(f"[ReAct] 生成最终答案失败: {e}")
             return "抱歉，我无法完成您的请求。请尝试重新表述您的问题。"
+
+    # ==================== 防幻觉核验 ====================
+
+    # 会改动数据的工具。声称办过事，就必须真的调用过其中之一。
+    _WRITE_TOOLS = {"submit_return_request", "create_ticket"}
+
+    # 出现这些说法 = 在向用户宣称"事情已经办好了"
+    _CLAIM_MARKERS = (
+        "已为您提交", "已提交", "已受理", "已为您创建", "已创建工单",
+        "申请单号", "退货单号", "退款单号", "工单号",
+    )
+
+    def _verify_write_claim(self, answer: str, executed_tools: set) -> str:
+        """
+        核验"声称已办理"的答复，是否真的有对应的工具调用。
+
+        **为什么要做这件事：** ReAct 循环有个危险特性 —— LLM 可以在**没有真正调用**
+        写工具的情况下，编出一个"已为您提交申请，单号 RF2026xxxx"的答复。
+        对用户来说这和真办了没区别，直到他发现系统里查无此单。
+
+        实测就踩到了：迭代次数用尽时，模型会照着"流程应该是怎样"补全一个结果，
+        连单号都是编的（真实是 RF...004，它写了 RF...001）。
+
+        提示词里虽然写了硬规则，但**提示词是软约束，模型可以不听**。
+        所以这里加一道确定性兜底：核验不过就改写答复，明确告诉用户"没办成"。
+
+        Args:
+            answer: LLM 生成的最终答复
+            executed_tools: 本轮真正成功执行过的工具名集合
+
+        Returns:
+            核验通过的原文，或修正后的诚实答复
+        """
+        # 真的调用过写工具 → 正常放行
+        if executed_tools & self._WRITE_TOOLS:
+            return answer
+
+        # 没声称办过事 → 放行（例如只是回答政策咨询）
+        hit = next((m for m in self._CLAIM_MARKERS if m in answer), None)
+        if hit is None:
+            return answer
+
+        logger.error(
+            f"[防幻觉] 答复中出现「{hit}」，但本轮未成功执行任何写操作"
+            f"（已执行工具: {sorted(executed_tools)}），判定为编造，已改写答复"
+        )
+
+        return (
+            "【重要】本次售后申请**并未成功提交**，请注意：\n"
+            "上面若有单号，均为无效内容，请勿据此操作。\n\n"
+            "建议您：\n"
+            "1. 重新描述一次您的需求，我再为您办理；\n"
+            "2. 或直接联系人工客服协助处理。\n\n"
+            "---------- 以下为未经验证的生成内容，仅供了解政策参考 ----------\n"
+            + answer
+        )
 
     def handle(self, query: str, context: Dict) -> str:
         """
@@ -752,8 +964,27 @@ class CustomerServiceAgent:
             result = parse_llm_json(response, fallback=None)
 
             if result is None:
-                negative_keywords = ["差", "烂", "垃圾", "投诉", "退款", "骗", "坑", "失望", "愤怒", "不满"]
-                positive_keywords = ["好", "棒", "优秀", "满意", "感谢", "赞", "喜欢", "推荐"]
+                # LLM 解析失败时的兜底判定。词表是按**电商售后场景**挑的 ——
+                # 原先是通用客服词表（差/烂/垃圾），抓不住售后用户真正的表达方式。
+                #
+                # 挑选原则：优先用不容易误伤的多字词。
+                # 反例：「拖」能命中「拖延」（负面），也会命中「拖鞋」（中性），所以不取。
+                # 同理不把单独的「退款」当负面信号 —— 用户问「退款多久到账」是正常咨询。
+                negative_keywords = [
+                    # 商品问题
+                    "破损", "损坏", "坏了", "发错", "错发", "漏发", "少发", "缺件",
+                    # 物流问题
+                    "没收到", "未收到", "丢失", "一直没", "滞留",
+                    # 资金问题
+                    "退款慢", "没到账", "迟迟不", "还没退",
+                    # 情绪与升级
+                    "投诉", "差评", "垃圾", "骗", "太差", "失望", "愤怒", "不满",
+                    "催了", "催过", "什么破", "曝光", "维权",
+                ]
+                positive_keywords = [
+                    "满意", "感谢", "谢谢", "赞", "好评", "推荐",
+                    "及时", "贴心", "很快", "服务好", "喜欢",
+                ]
 
                 neg_count = sum(1 for kw in negative_keywords if kw in text)
                 pos_count = sum(1 for kw in positive_keywords if kw in text)
@@ -787,19 +1018,33 @@ class CustomerServiceAgent:
                 "reason": f"分析失败: {str(e)}"
             }
 
-    def create_ticket(self, issue: str, user_id: str = None, priority: str = "normal") -> Dict:
-        """创建客服工单"""
+    def create_ticket(
+        self,
+        issue: str,
+        user_id: str = None,
+        priority: str = "normal",
+        order_id: str = None,
+        category: str = "咨询",
+        sentiment: str = None,
+    ) -> Dict:
+        """创建售后工单"""
         try:
             if not self.crm:
                 return {"error": "CRM系统未初始化"}
 
-            logger.info(f"[创建工单] 问题: {issue}, 用户: {user_id}, 优先级: {priority}")
+            logger.info(
+                f"[创建工单] 问题: {issue}, 用户: {user_id}, "
+                f"优先级: {priority}, 分类: {category}"
+            )
 
             ticket = self.crm.create_ticket(
                 user_id=user_id,
                 issue=issue,
                 priority=priority,
-                description=issue
+                description=issue,
+                order_id=order_id,
+                category=category,
+                sentiment=sentiment,
             )
 
             logger.info(f"[创建工单] 成功创建工单: {ticket.get('ticket_id')}")
@@ -850,3 +1095,110 @@ class CustomerServiceAgent:
         except Exception as e:
             logger.error(f"查询用户失败: {e}")
             return {"error": f"查询用户失败: {str(e)}"}
+
+    # ==================== 售后办理工具实现（阶段 3 新增）====================
+
+    def query_order(self, order_id: str) -> Dict:
+        """查订单详情（含商品明细）。"""
+        try:
+            if not self.crm:
+                return {"error": "CRM系统未初始化"}
+
+            logger.info(f"[查订单] 订单号: {order_id}")
+
+            order = self.crm.query_order(order_id)
+            if order:
+                return order
+
+            logger.warning(f"[查订单] 未找到订单: {order_id}")
+            return {"error": f"未找到订单: {order_id}。请确认订单号是否正确。"}
+
+        except Exception as e:
+            logger.error(f"查订单失败: {e}")
+            return {"error": f"查询订单失败: {str(e)}"}
+
+    def query_logistics(self, order_id: str) -> Dict:
+        """查物流轨迹。"""
+        try:
+            if not self.crm:
+                return {"error": "CRM系统未初始化"}
+
+            logger.info(f"[查物流] 订单号: {order_id}")
+
+            logistics = self.crm.query_logistics(order_id)
+            if logistics:
+                return logistics
+
+            # 区分"订单不存在"和"订单存在但没发货" —— 这两种情况该给用户的回答完全不同
+            order = self.crm.query_order(order_id)
+            if order:
+                return {
+                    "message": f"订单 {order_id} 当前状态为「{order['status']}」，"
+                               f"尚未产生物流记录，暂无物流信息。",
+                    "order_status": order["status"],
+                }
+
+            return {"error": f"未找到订单: {order_id}"}
+
+        except Exception as e:
+            logger.error(f"查物流失败: {e}")
+            return {"error": f"查询物流失败: {str(e)}"}
+
+    def query_refund_status(self, order_id: str = None, refund_id: str = None) -> Dict:
+        """查退款进度。"""
+        try:
+            if not self.crm:
+                return {"error": "CRM系统未初始化"}
+
+            logger.info(f"[查退款] 订单号: {order_id}, 退款单号: {refund_id}")
+
+            refunds = self.crm.query_refund(order_id=order_id, refund_id=refund_id)
+            if refunds:
+                # 一个订单可能有多笔退款，全返回让 LLM 自己归纳
+                return {"refunds": refunds, "count": len(refunds)}
+
+            target = refund_id or order_id
+            return {"message": f"没有查到 {target} 对应的退款记录。"}
+
+        except Exception as e:
+            logger.error(f"查退款失败: {e}")
+            return {"error": f"查询退款失败: {str(e)}"}
+
+    def submit_return_request(
+        self,
+        order_id: str,
+        user_id: str,
+        reason: str,
+        refund_type: str = "退货退款",
+    ) -> Dict:
+        """
+        提交退换货申请（★写操作）。
+
+        校验逻辑放在 CRM 层（订单存在 / 归属正确 / 状态允许），
+        这里只负责调用和日志 —— Agent 层保持"薄"，业务规则不散落在两处。
+        """
+        try:
+            if not self.crm:
+                return {"error": "CRM系统未初始化"}
+
+            logger.info(
+                f"[提交退换货] 订单: {order_id}, 用户: {user_id}, 类型: {refund_type}"
+            )
+
+            result = self.crm.submit_return_request(
+                order_id=order_id,
+                user_id=user_id,
+                reason=reason,
+                refund_type=refund_type,
+            )
+
+            if result.get("error"):
+                logger.warning(f"[提交退换货] 失败: {result['error']}")
+            else:
+                logger.info(f"[提交退换货] 成功: {result.get('refund_id')}")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"提交退换货失败: {e}")
+            return {"error": f"提交退换货申请失败: {str(e)}"}

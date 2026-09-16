@@ -24,6 +24,8 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from core.write_ops import record_write_op
+
 logger = logging.getLogger(__name__)
 
 # 项目根目录：本文件在 core/ 下，根目录是上一级
@@ -197,6 +199,16 @@ class EcommerceCRM:
             ).fetchone()
 
         logger.info(f"[CRM] 已创建工单 {ticket_id}（{category or '咨询'} / {priority}）")
+
+        # 建工单是写操作 —— 登记一下，编排层会据此决定要不要走人工审批
+        record_write_op("create_ticket", {
+            "ticket_id": ticket_id,
+            "user_id": user_id or "anonymous",
+            "order_id": order_id,
+            "category": category or "咨询",
+            "priority": priority,
+        })
+
         return self._row_to_dict(row)
 
     def get_ticket(self, ticket_id: str) -> Optional[Dict]:
@@ -246,3 +258,178 @@ class EcommerceCRM:
             ).fetchall()
 
         return [self._row_to_dict(r) for r in rows]
+
+    # ----------------------------------------------------------
+    # 售后业务查询与办理
+    # ----------------------------------------------------------
+
+    def query_order(self, order_id: str) -> Optional[Dict]:
+        """
+        查订单主表，并把订单明细一起带上。
+
+        售后流程第一步几乎总是"先确认这笔订单存不存在、是谁的、什么状态"，
+        所以把订单 + 明细打包返回，省掉 Agent 再调一次工具。
+        """
+        if not order_id:
+            return None
+
+        with self._connect() as conn:
+            order = conn.execute(
+                "SELECT * FROM orders WHERE order_id = ?", (order_id,)
+            ).fetchone()
+            if not order:
+                return None
+
+            items = conn.execute(
+                "SELECT * FROM order_items WHERE order_id = ?", (order_id,)
+            ).fetchall()
+
+        result = self._row_to_dict(order)
+        result["items"] = [self._row_to_dict(i) for i in items]
+        return result
+
+    def query_logistics(self, order_id: str) -> Optional[Dict]:
+        """
+        查物流轨迹。
+
+        Returns:
+            物流信息；**订单存在但还没发货时返回 None**，调用方要区分这两种情况：
+            - 订单不存在  → 该订单号有误
+            - 订单存在但无物流 → 还没发货（对应《超时未发货处理规则》）
+        """
+        if not order_id:
+            return None
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM logistics WHERE order_id = ?", (order_id,)
+            ).fetchone()
+
+        return self._row_to_dict(row) if row else None
+
+    def query_refund(self, order_id: str = None, refund_id: str = None) -> List[Dict]:
+        """
+        查退款记录。按订单号或退款单号查，两个都不传则返回空。
+
+        一个订单可能有多笔退款（先退了一件、后来又退一件），所以返回列表。
+        """
+        if not order_id and not refund_id:
+            return []
+
+        with self._connect() as conn:
+            if refund_id:
+                rows = conn.execute(
+                    "SELECT * FROM refunds WHERE refund_id = ? ORDER BY applied_at DESC",
+                    (refund_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM refunds WHERE order_id = ? ORDER BY applied_at DESC",
+                    (order_id,),
+                ).fetchall()
+
+        return [self._row_to_dict(r) for r in rows]
+
+    def submit_return_request(
+        self,
+        order_id: str,
+        user_id: str,
+        reason: str,
+        refund_type: str = "退货退款",
+        amount: Optional[float] = None,
+    ) -> Dict:
+        """
+        提交退换货申请（写操作）。
+
+        这是整个售后流程里**唯一会改动资金相关数据**的动作，所以做三重校验：
+        订单存在、订单归属正确、订单状态允许售后。校验不过就返回 error，
+        不写库 —— 宁可让 Agent 回一句"这笔订单不能退货"，也不要吞掉脏数据。
+
+        Args:
+            order_id:    订单号
+            user_id:     申请人（必须和订单归属一致）
+            reason:      申请原因
+            refund_type: 退货退款 / 仅退款 / 换货
+            amount:      退款金额，不传则按订单实付金额
+
+        Returns:
+            成功返回退款单信息；失败返回 {"error": "..."}
+        """
+        if not order_id or not user_id:
+            return {"error": "缺少订单号或用户ID"}
+
+        with self._connect() as conn:
+            order = conn.execute(
+                "SELECT * FROM orders WHERE order_id = ?", (order_id,)
+            ).fetchone()
+            if not order:
+                return {"error": f"订单不存在: {order_id}"}
+
+            if order["user_id"] != user_id:
+                # 关键校验：防止 A 用户对 B 用户的订单发起退货
+                return {"error": f"订单 {order_id} 不属于用户 {user_id}，无法代为申请"}
+
+            if order["status"] in ("已取消", "待发货"):
+                return {
+                    "error": f"订单当前状态为「{order['status']}」，"
+                             f"尚未发货的订单请先取消订单，无需走退货流程"
+                }
+
+            # 金额默认取订单实付；换货不涉及退款，金额记 0
+            final_amount = amount if amount is not None else (
+                0.0 if refund_type == "换货" else order["total_amount"]
+            )
+
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            refund_id = self._next_refund_id(conn)
+
+            conn.execute(
+                """
+                INSERT INTO refunds
+                    (refund_id, order_id, user_id, refund_type, reason,
+                     amount, status, applied_at, processed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (refund_id, order_id, user_id, refund_type, reason,
+                 final_amount, "待审核", now, None),
+            )
+            conn.commit()
+
+            row = conn.execute(
+                "SELECT * FROM refunds WHERE refund_id = ?", (refund_id,)
+            ).fetchone()
+
+        logger.info(f"[CRM] 已提交{refund_type}: {refund_id}（订单 {order_id}）")
+
+        # 登记写操作 —— 这一步动了钱，编排层应当走人工审批
+        record_write_op("submit_return_request", {
+            "refund_id": refund_id,
+            "order_id": order_id,
+            "user_id": user_id,
+            "refund_type": refund_type,
+            "amount": final_amount,
+            "reason": reason,
+        })
+
+        return self._row_to_dict(row)
+
+    def _next_refund_id(self, conn: sqlite3.Connection) -> str:
+        """生成退款单号，格式 RF + 日期 + 3位序号，如 RF20260916001。"""
+        today = datetime.now().strftime("%Y%m%d")
+        prefix = f"RF{today}"
+
+        row = conn.execute(
+            "SELECT MAX(refund_id) AS max_id FROM refunds WHERE refund_id LIKE ?",
+            (f"{prefix}%",)
+        ).fetchone()
+
+        max_id = row["max_id"] if row else None
+        if max_id:
+            try:
+                seq = int(max_id[len(prefix):]) + 1
+            except ValueError:
+                seq = 1
+        else:
+            seq = 1
+
+        return f"{prefix}{seq:03d}"

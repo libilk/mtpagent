@@ -528,4 +528,248 @@ body = re.sub(r'--[^\n]*', '', body)   # 先剥注释，再按逗号切
 
 ---
 
+## 阶段 3 · 售后 Agent 重写
+
+> 日期：2026-09-16　　commit：见文末
+> 本节是阶段 3 的前半部分（Agent 本体）。写操作审批闸门在下一节。
+
+### 这阶段实际做了什么
+
+| # | 动作 | 文件 |
+|---|---|---|
+| 1 | 重写系统提示词 → 电商售后话术 + 意图决策树 + 三条例外陷阱 | [customer_service_agent/agent.py](agents/customer_service_agent/agent.py) |
+| 2 | 重写情感词表 → 售后场景用词（破损/发错/没收到/退款慢…） | 同上 |
+| 3 | 删掉 `context["urgent"]` 那段死代码，改成提示词里的情绪→优先级映射 | 同上 |
+| 4 | 新增 4 个工具（查订单 / 查物流 / 查退款 / 提交退换货） | 同上 |
+| 5 | `EcommerceCRM` 扩 4 个业务方法，含**三重校验** | [core/ecommerce_crm.py](core/ecommerce_crm.py) |
+| 6 | 新建线程本地写操作记录器 | [core/write_ops.py](core/write_ops.py) |
+| 7 | **修项目级 bug**：`register_tool` 生成的工具无法接受多参数 | [llm/langchain_tools.py](llm/langchain_tools.py) |
+| 8 | **加防幻觉兜底**：声称办过事必须真调用过工具 | [customer_service_agent/agent.py](agents/customer_service_agent/agent.py) |
+
+**里程碑验证**：连跑 3 次「耳机坏了要退货」，3/3 成功，答复中的单号与真实落库单号一致。
+
+---
+
+### 1. 思路
+
+前两个阶段解决了"查得到"，阶段 3 解决"办得成"。
+
+一个售后助手的价值在于**能真的办事**，而不只是会背政策。所以这一步的核心是把 Agent 从
+"只读问答"扩成"可写办理"，同时——**写操作意味着风险**，必须配套一道审批。
+
+这决定了本阶段的三个目标：能力要扩、话要会说、**防线要硬**。
+
+### 2. 为什么这么改
+
+#### 2.1 提示词为什么写成"决策树"而不是"工具清单"？
+
+原提示词是「知识咨询 → hybrid_search；投诉 → create_ticket」这样的罗列。
+但它没回答一个关键问题：**同一个问题可能同时需要多步**（退货要查订单 + 查政策 + 提交申请）。
+
+改成按**意图**组织的决策树，把每类意图的**完整步骤序列**写清楚：
+
+```
+申请退货 → ① query_order 确认订单 → ② hybrid_search 检索政策 → ③ submit_return_request 提交
+```
+
+同时把 **4 个业务陷阱**写进提示词。其中最重要的是这条：
+
+> 不是所有商品都能七天无理由退货。已激活的 3C 数码、贴身衣物等属于法定例外，
+> 只能走"质量问题"通道（时限更长、运费平台承担）。
+
+**为什么提这条？** 因为它是**反直觉**的。我们埋的主场景订单恰好就是「已激活的无线耳机」——
+如果不提醒，模型会照最熟悉的"七天无理由"模板回答，把运费责任说反（本该平台承担，说成用户自付）。
+
+注意我只写了"存在这个例外"，**没写具体时限和金额** —— 那些必须去检索。
+这是刻意的：**提示词负责指路，知识库负责给答案**。把政策条文抄进提示词，RAG 就白做了。
+
+#### 2.2 为什么删掉 `context["urgent"]` 那段？
+
+原代码里有：
+
+```python
+if context.get("urgent"):
+    sentiment = context.get("sentiment", {})
+    prompt += f"当前用户情绪：{sentiment.get('sentiment')}..."
+```
+
+看起来很合理。但**全项目搜不到任何地方给 `urgent` 赋过值** —— 这段提示词从写下的那天起就没生效过。
+
+**这段代码的危险之处不在于它没用，而在于它"看起来有用"** —— 读代码的人会以为情绪已经被接进去了，
+于是不去做真正该做的事。
+
+替代方案是把映射规则**写死进提示词**，让 LLM 自己去串：先调 `analyze_sentiment`，
+再把结果作为 `sentiment` 参数传给 `create_ticket`，优先级按分数映射。
+
+**为什么不改成在 Agent 里存 `self._last_sentiment`？** 因为 Agent 实例是**全局共享**的，
+多个请求并发时会互相覆盖 —— A 用户的情绪会影响 B 用户的工单优先级。
+改成"参数显式传递"就没有这个隐患。**能在函数参数里传的东西，不要挂在对象状态上。**
+
+#### 2.3 ★ 发现的第一个真问题：Agent 会"演"给你看
+
+第一次端到端测试，Agent 的回答非常漂亮：
+
+> ✅ 已为您成功提交退货申请：售后类型：退货退款 ...
+
+但我查数据库 —— **refunds 表里什么都没有**。
+
+它的 ReAct 轨迹是：`query_order` → `hybrid_search` → `query_user_info` → **收工**。
+三轮都在收集信息，**`submit_return_request` 从头到尾没被调用过**。
+
+这是 LLM Agent 最危险的失败模式：**它不是说了错误的话，而是描述了没发生过的事。**
+对用户来说，"已提交，单号 RF2026xxx" 和真的提交了**没有任何区别** —— 直到他去查，发现查无此单。
+
+> 有意思的是，这个项目**早就为数据库 Agent 踩过同一个坑**，它的提示词里写着：
+> 「★ 绝对禁止只输出 SQL 语句而不执行」。同一个失败模式，换了个 Agent 又出现一次。
+> 这说明它不是某个模块的疏漏，而是 **LLM Agent 的固有缺陷**。
+
+**第一层修法是提示词**：加一条硬规则，并明确"只描述不调用 = 欺骗用户"，
+还给了经验值（完整流程通常 4~5 轮，别在第 3 轮收工）。
+
+改完后它确实开始调用了。但——还不够。见下一节。
+
+#### 2.4 ★ 发现的第二个问题：迭代次数卡死，然后开始编
+
+加上提示词规则后重跑，第 5 轮终于调用了 `submit_return_request`，写操作也捕获到了。
+
+**但再跑一次，又变回"没调用"了。** 而且这次答复里的单号是 `RF20260916001` ——
+真实落库的是 `RF20260916004`，**单号是编的**。
+
+机制搞清楚了：完整流程需要
+```
+query_order → query_logistics → hybrid_search → query_user_info → submit_return_request
+```
+**5 轮工具 + 1 轮生成答案 = 6 轮**，而 `max_iterations = 5`。
+
+**迭代次数用尽时，代码会强制模型"基于已有信息给出最终答案"。**
+模型手里有一堆"我查到了订单、查到了政策、查到了会员"的信息，
+于是它顺着"流程应该走到哪"把结果补完了 —— **包括一个看起来很像真的单号**。
+
+两处修：
+
+1. **上限 5 → 8**（根因修复：给够轮次，让它能走完）
+2. **加确定性兜底 `_verify_write_claim()`**（见 2.5）
+
+**这里最重要的认知是：`max_iterations` 不只是一个性能参数，它是个正确性参数。**
+设小了，系统不会"少做一步"，而会**编一个做完了的答案** —— 比不做更糟。
+
+#### 2.5 ★ 为什么提示词不够，必须加确定性兜底
+
+提示词是**软约束** —— 模型可以不听。上面两轮测试就是证据：加了硬规则后，
+它有时听、有时不听。
+
+所以加一层代码级的核验：记录本轮**真正成功执行过**的工具，在返回答案前检查：
+
+```
+声称办过事（"已提交""退货单号"…） && 没真调用过写工具  →  判定为编造，改写答复
+```
+
+四种情况都测过：
+
+| 场景 | 结果 |
+|---|---|
+| 真调了写工具 + 声称办理 | 放行 |
+| **没调写工具 + 声称办理** | **拦截** |
+| 没调写工具 + 纯政策回答 | 放行（正常问答不该被误伤） |
+| 调了工具 + 纯查询 | 放行 |
+
+拦截后的答复会明确告诉用户"本次**并未成功提交**，单号无效"。
+**宁可承认没办成，也不能让用户以为办成了。**
+
+> 这类"输出后校验"的思路在 Agent 系统里很常用：**不要相信模型说了什么，要核验它做了什么。**
+
+#### 2.6 ★★ 发现的第三个问题：项目级的工具注册 bug
+
+这个最有意思。`submit_return_request` 需要 4 个参数，调用时报：
+
+```
+Too many arguments to single-input tool submit_return_request.
+```
+
+顺着查下去，一路查到 `langchain_core/tools/simple.py` 的源码：
+
+```python
+args, kwargs = super()._to_args_and_kwargs(tool_input, tool_call_id)
+# For backwards compatibility. The tool must be run with a single input
+all_args = list(args) + list(kwargs.values())
+if len(all_args) != 1:
+    raise ToolException(f"Too many arguments to single-input tool {self.name}. "
+                        "Consider using StructuredTool instead.")
+```
+
+**`Tool` 其实就是 `SimpleTool`，它硬编码了"只能有一个参数"** —— 加 `args_schema` 也没用，
+因为它是在参数已经绑定完之后才数的个数。报错信息自己给了答案：用 `StructuredTool`。
+
+而项目的 `register_tool()` 用的正是 `Tool`。
+
+**为什么这个 bug 一直没被发现？** 因为项目原有的工具**恰好都只需要 1 个参数**：
+
+| 工具 | 参数 | LLM 实际怎么传 |
+|---|---|---|
+| `hybrid_search` | query, top_k, vector_weight | 只传 query，其余走默认值 → 1 个 arg → **侥幸通过** |
+| `query_order` | order_id | 只有 1 个 → 通过 |
+| `create_ticket` | issue, user_id, priority | **只要 LLM 同时传 2 个就会失败** ← 一直是坏的 |
+
+所以这不是"新工具引入的 bug"，而是**新工具把一个潜伏已久的 bug 暴露了出来**。
+`create_ticket` 从写下的那天起，只要模型同时传 `issue` + `user_id` 就调不通。
+
+**修法**：`register_tool` 改用 `StructuredTool.from_function()`，
+用调用方**已经写好的 `parameters` 声明**生成 Pydantic `args_schema`。
+
+```python
+args_schema = _build_args_schema(name, parameters, actual_func)
+tool = StructuredTool.from_function(func=actual_func, ..., args_schema=args_schema)
+```
+
+修完 6 种调用方式全部通过（多参、单参、显式覆盖默认值、缺必填报错、schema 格式不变）。
+
+**这个 bug 教了三件事：**
+
+1. **「一直能跑」和「是对的」是两回事。** 原来的工具单参数调用能过，不等于注册方式正确。
+2. **潜伏 bug 会因为"幸存者偏差"长期存活** —— 所有现存用法恰好绕开了它。
+3. **遇到第三方库的报错，去读它的源码比猜快得多。** 我一开始猜是 `is_single_input` 的问题，
+   打印出来发现它其实是 `False`，说明猜错了方向；直接 grep 错误信息定位到源码，
+   一眼就看到是 `len(all_args) != 1` 的硬编码。
+
+### 3. 人类怎么学这部分
+
+#### 3.1 该动手看的
+
+1. **读 `_verify_write_claim()`** —— 二十来行，是"不信任模型输出、改为核验行为"的完整范例
+2. **读 `_build_args_schema()`**（[langchain_tools.py](llm/langchain_tools.py)）——
+   看它怎么把 JSON Schema 声明翻译成 Pydantic 模型（`create_model` 是 Pydantic 的动态建模入口）
+3. **亲手复现那个工具 bug**：
+   ```python
+   from langchain_core.tools import Tool
+   def f(order_id, user_id, reason): return "ok"
+   t = Tool(name="x", func=f, description="d")
+   t.invoke({"order_id":"A","user_id":"B","reason":"C"})   # 抛错
+   ```
+   再换成 `StructuredTool.from_function(..., args_schema=...)` 跑一遍 —— 对比之下印象最深
+4. **把 `max_iterations` 改回 5**，重跑退货场景，看它会不会又开始编单号。
+   **这是最好的"参数即正确性"演示**
+
+#### 3.2 背后的通用概念
+
+| 概念 | 一句话解释 | 为什么重要 |
+|---|---|---|
+| **ReAct 循环** | Think → Act → Observe 反复直到收敛 | Agent 的基本形态；理解它才知道为什么会"演" |
+| **工具调用（Function Calling）** | 把函数签名+描述交给 LLM，由它决定何时调 | Agent 的手脚 |
+| **幻觉的两种形态** | ①答错内容 ②**描述没发生的事** | 第二种更危险 —— 它看起来完全正常 |
+| **软约束 vs 硬约束** | 提示词是软的（可违背），代码校验是硬的（必执行） | 关键路径上的正确性必须靠硬约束 |
+| **输出后校验（post-hoc validation）** | 生成完再核验，不信任生成结果 | Agent 系统里最有效的防幻觉手段之一 |
+| **显式传参 vs 对象状态** | 能走参数就别挂 self | 并发场景下对象状态极易串号 |
+| **SimpleTool vs StructuredTool** | LangChain 里前者只收单参数 | 用错会踩"多参数静默不可用"的坑 |
+
+#### 3.3 看完应该能回答的问题
+
+- 为什么"描述了一个没发生的动作"比"答错一个知识点"更危险？
+- 提示词写了硬规则，为什么还要再加代码级校验？两者各自解决什么？
+- `max_iterations` 设小了会发生什么？为什么说它是正确性参数而不是性能参数？
+- 为什么把情绪状态挂在 `self` 上会出问题？换成参数传递解决了什么？
+- LangChain 的 `Tool` 和 `StructuredTool` 本质区别是什么？怎么一眼判断该用哪个？
+- 这个工具注册 bug 为什么能潜伏那么久没被发现？
+
+---
+
 <!-- 下一个阶段从这里往下追加 -->

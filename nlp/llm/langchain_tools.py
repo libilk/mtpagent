@@ -6,12 +6,78 @@ LangChain Tool 封装
 使用 LangChain 的 StructuredTool + Pydantic Schema 实现工具注册与自动参数校验
 """
 
+import inspect
 import logging
-from typing import List, Dict, Any, Callable, Union
+from typing import List, Dict, Any, Callable, Optional, Union
 from langchain_core.tools import Tool, StructuredTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
 logger = logging.getLogger(__name__)
+
+# JSON Schema 类型 → Python 类型。用于把调用方声明的 parameters 转成 Pydantic 字段。
+_JSON_TYPE_MAP = {
+    "string": str,
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "array": list,
+    "object": dict,
+}
+
+
+def _build_args_schema(tool_name: str, parameters: dict, func: Callable) -> Optional[type]:
+    """
+    根据调用方声明的 parameters（JSON Schema 片段）构造 Pydantic 模型。
+
+    **为什么需要这一步：** LangChain 的 `Tool` 在没有 args_schema 时，会一律把
+    工具当成"单参数工具"（只有一个 input）。此时如果 LLM 一次传了 2 个以上参数，
+    invoke() 会直接抛 `Too many arguments to single-input tool`。
+
+    所以凡是参数多于一个的工具，都必须带上 args_schema 才能真正被调用。
+
+    Args:
+        tool_name: 工具名，用于生成模型名，便于报错时定位
+        parameters: 注册时提供的 JSON Schema 形式参数声明
+        func: 实际函数，用来核对声明的参数名是否真的存在
+
+    Returns:
+        Pydantic 模型类；没有可用字段时返回 None（保持旧行为）
+    """
+    properties = (parameters or {}).get("properties") or {}
+    required = set((parameters or {}).get("required") or [])
+
+    # 用函数签名核对声明：声明了但函数里没有的参数会被剔除。
+    # 这样即使某处 tool 的声明和签名对不上，也只是少传一个参数，
+    # 而不是整个工具调不通 —— 同时打日志把问题暴露出来。
+    try:
+        sig_names = set(inspect.signature(func).parameters) - {"self"}
+    except (TypeError, ValueError):
+        sig_names = set(properties)   # 拿不到签名就不核对
+
+    fields = {}
+    for prop_name, spec in properties.items():
+        if prop_name not in sig_names:
+            logger.warning(
+                f"工具 '{tool_name}' 声明了参数 '{prop_name}'，"
+                f"但函数签名里没有它（实际参数: {sorted(sig_names)}），已忽略"
+            )
+            continue
+
+        py_type = _JSON_TYPE_MAP.get((spec or {}).get("type"), str)
+        desc = (spec or {}).get("description", "")
+
+        if prop_name in required:
+            fields[prop_name] = (py_type, Field(..., description=desc))
+        elif "default" in (spec or {}):
+            fields[prop_name] = (py_type, Field(default=spec["default"], description=desc))
+        else:
+            # 可选且没给默认值 → 允许 None，避免 Pydantic 报"字段必填"
+            fields[prop_name] = (Optional[py_type], Field(default=None, description=desc))
+
+    if not fields:
+        return None
+
+    return create_model(f"{tool_name}_Args", **fields)
 
 
 class ToolRegistry:
@@ -62,20 +128,48 @@ class ToolRegistry:
         """
         注册普通工具（兼容其他 Agent 使用）
 
-        推荐使用 register_structured_tool 以获得 Pydantic 自动参数校验。
+        Args:
+            parameters: JSON Schema 形式的参数声明。**强烈建议提供** ——
+                它有两个作用：一是决定喂给 LLM 的工具描述，
+                二是用来生成 args_schema，让多参数工具真正能被调用。
         """
         actual_func = func or function
         if actual_func is None:
             raise ValueError(f"注册工具 '{name}' 失败：必须提供 func 或 function 参数")
 
-        tool = Tool(
-            name=name,
-            func=actual_func,
-            description=description,
-            handle_tool_error=handle_tool_error
-        )
+        # 用声明的 parameters 生成 args_schema。
+        #
+        # ★ 必须用 StructuredTool，不能用 Tool ★
+        # Tool 其实是 langchain_core 的 SimpleTool，源码 tools/simple.py 里写死了：
+        #     if len(all_args) != 1:
+        #         raise ToolException("Too many arguments to single-input tool ...")
+        # 也就是说 Tool **永远只接受一个参数**，哪怕传了 args_schema 也没用。
+        # 结果就是：只要 LLM 一次传 2 个以上参数（比如 create_ticket 同时传
+        # issue + user_id + priority），调用就会失败。
+        #
+        # 只有声明了 parameters 的工具才能算出 args_schema，才用 StructuredTool；
+        # 没声明的走旧路径，保持兼容。
+        args_schema = _build_args_schema(name, parameters, actual_func) if parameters else None
+
+        if args_schema is not None:
+            tool = StructuredTool.from_function(
+                func=actual_func,
+                name=name,
+                description=description,
+                args_schema=args_schema,
+                handle_tool_error=handle_tool_error,
+            )
+        else:
+            tool = Tool(
+                name=name,
+                func=actual_func,
+                description=description,
+                handle_tool_error=handle_tool_error,
+            )
 
         if parameters:
+            # 保留原始声明：get_tools_schema() 会优先用它，保证喂给 LLM 的
+            # schema 格式不变（Pydantic 生成的 schema 会多出 title 等噪音字段）
             tool._raw_parameters = parameters
 
         self.tools.append(tool)
@@ -152,8 +246,10 @@ class ToolRegistry:
             if tool.name == tool_name:
                 try:
                     if isinstance(tool_input, dict):
-                        # 普通 Tool 不支持 dict 输入，空参数时转为空字符串
-                        if isinstance(tool, Tool) and not tool_input:
+                        # 没有 args_schema 的原生 Tool 不接受 dict，
+                        # 无参调用时退化成传空字符串（保持旧行为）。
+                        # 有 args_schema 的走 invoke，由 Pydantic 校验参数。
+                        if not tool_input and getattr(tool, "args_schema", None) is None:
                             result = tool.run("")
                         else:
                             result = tool.invoke(tool_input)
