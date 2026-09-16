@@ -2002,8 +2002,29 @@ function showIntervention(event) {
 
     const detailEl = document.getElementById('interventionDetail');
     const data = event.data || {};
+
+    // 后端（enhanced_nodes.py 的写操作闸门）会同时给出两样东西：
+    //   summary  —— 已经整理成人话的一句摘要，给审批人看的
+    //   operations —— 原始结构化数据，排查时用
+    // 这里优先展示 summary —— 直接 stringify 整个 data 会把审批人淹没在字段里，
+    // 他真正需要知道的只有"这次批的是什么"。原始数据折叠起来备用。
+    let html = '';
+
+    if (Array.isArray(data.summary) && data.summary.length > 0) {
+        html += '<div style="line-height:1.9;color:var(--text-primary)">'
+              + data.summary.map(s => `· ${escHtml(String(s))}`).join('<br>')
+              + '</div>';
+    }
+
     if (Object.keys(data).length > 0) {
-        detailEl.textContent = JSON.stringify(data, null, 2);
+        html += '<details style="margin-top:10px">'
+              + '<summary style="cursor:pointer;opacity:.7">查看原始数据</summary>'
+              + `<pre style="margin-top:8px;white-space:pre-wrap">${escHtml(JSON.stringify(data, null, 2))}</pre>`
+              + '</details>';
+    }
+
+    if (html) {
+        detailEl.innerHTML = html;
         detailEl.style.display = 'block';
     } else {
         detailEl.style.display = 'none';
