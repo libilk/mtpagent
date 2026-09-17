@@ -1,614 +1,194 @@
-# 基于LangGraph的多Agent RAG编排系统
+# 云集优选 · 售后助手
 
-## 项目概述
+> 一个基于 **LangGraph 多 Agent 编排**的电商售后系统。
+> 能答售后政策、能查订单物流、能**真的办理退换货**，办理前会停下来请人确认。
 
-基于LangGraph构建的多Agent RAG系统，以StateGraph状态机驱动，实现从问题分类、任务规划、并行执行到质量闭环的全链路自动化编排，通过FastAPI暴露SSE流式接口，支持节点级实时进度推送、异步执行与人工介入，覆盖知识检索、数据库查询、多格式文档处理、智能客服、图表智能解读等企业场景。
-
----
-
-## 技术亮点
-
-### 一、LangGraph全局编排
-
-- **难度分类节点：** LLM对用户问题进行简单/复杂二分类，复杂问题进入DAG规划
-- **DAG规划节点：** LLM根据问题语义生成含依赖关系的任务有向无环图（DAG），每个任务声明输入输出内容与上下游参数传递规则
-- **Agent并行执行节点：** 基于LangGraph的Send机制，按照任务依赖情况实现DAG波次调度
-- **Agent通信质量保障节点：** 检测上游输出是否满足下游所需字段与类型、检测Agent重跑结果是否重复、检测不同Agent输出结果是否不一致
-- **结果汇总节点：** 单Agent结果直接输出，多Agent场景由LLM综合各子任务结果生成融合答案
-- **质量评估节点：** LLM从相关性、完整性、准确性三维度打分，生成针对性反馈，注入改进要求后路由回Agent重做
-
-### 二、LangChain框架集成
-
-- **工具体系：** 基于LangChain框架实现工具统一注册，生成Function Calling格式的描述供LLM调用，Pydantic对LLM输出的工具调用参数校验，最后统一执行返回结果
-- **输出解析：** 任务规划和Agent路由中，通过Few-Shot引导LLM输出标准JSON格式，再通过PydanticOutputParser解析并验证字段，确保输出符合预期结构
-- **对话记忆：** 基于ConversationSummaryBufferMemory实现跨Agent共享记忆层，早期对话LLM自动摘要压缩（超过2000tokens触发），Agent执行前读取历史完成指代消解
-- **MCP协议集成：** 通过stdio协议接入SQLite，数据库查询Agent自主探索表结构（有哪些表→表有什么字段→数据长什么样），生成SQL执行查询，结果回注上下文生成答案
-
-### 三、单Agent ReAct自主决策
-
-- **Think-Act-Observe循环：** LLM综合系统指令、对话历史和用户问题后，自主判断需要调的工具；多个工具并行执行，结果反馈给LLM，驱动下一轮思考与决策
-- **渐进式收敛策略：** 第4轮追加"最后工具调用机会"提示词引导LLM收敛，第5轮强制输出最终答案；同时记录每轮已调用过的工具和参数，重复调用则跳过，避免浪费Token
-- **20+注册工具：** 覆盖查询扩展、查询分解、并行检索、多文档合并去重、元数据过滤检索、提取结构化信息等能力
-- **三层缓存：** 业务层（查询→答案）、检索层（查询→文档缓存）、LLM层（messages→响应），命中缓存时直接返回，支持Redis持久化
-
-### 四、文档处理及其他
-
-- **多格式文档处理：** PDF/Word/Excel/CSV/TXT/Markdown等格式统一解析，跨页表格识别与合并，异常页面自动切换OCR；基于角色的文档权限过滤，增量索引自动检测文档变更，避免全量重建
-- **语义分块：** 多级分割策略（段落→句子→标点→字符逐级回退），控制块大小同时保留语义完整性
-- **双路召回融合：** ChromaDB语义检索 + BM25关键词检索，加权RRF算法（k=60, 向量权重0.8）融合排序
-- **三层阈值过滤：** 向量检索余弦相似度 < 0.45 过滤 → BM25分数 < 0.5 或关键词命中率 < 20% 过滤 → RRF融合分 < 0.005 过滤，源文件级去重（同源保留最高分chunk）
-- **检索统计可视化：** 前端实时展示每次检索的粗排数量、过滤数量、通过数量，每个文档卡片显示三种原始分数（向量/BM25/RRF）
+不是问答机器人 —— 它带工具、会查数据、会写数据，并且在动数据之前有一道人工审批。
 
 ---
 
-## 项目结构
+## 它能做什么
 
-```
-RAG_Project/
-├── main.py                                     # 系统主入口，CLI交互模式
-├── api.py                                      # FastAPI Web服务入口（SSE流式/非流式聊天接口）
-├── requirements.txt                            # Python依赖清单
-├── .env.example                                # 环境变量配置模板
-├── .gitignore                                  # Git忽略规则
-│
-├── config/                                     # ========== 配置文件 ==========
-│   ├── agents.yaml                             # Agent注册配置（ID、能力、优化开关）
-│   ├── models.yaml                             # LLM模型配置（Qwen-Max/Plus参数）
-│   └── skills.yaml                             # 工具技能配置
-│
-├── langgraph_orchestrator/                     # ========== LangGraph编排核心 ==========
-│   ├── enhanced_entry.py                       # 系统初始化入口（LLM/Redis/Agent统一创建）
-│   ├── enhanced_graph.py                       # StateGraph构建（全部节点注册与边连接）
-│   ├── enhanced_state.py                       # 全局状态定义（TypedDict，30+字段）
-│   ├── enhanced_nodes.py                       # 增强节点（重复检测、人工介入）
-│   ├── nodes.py                                # 核心节点（Agent执行、评估、聚合）
-│   ├── router.py                               # 路由与调度（复杂度分类、DAG波次调度）
-│   ├── clarification.py                        # 参数校验与对齐（上下游字段类型检查）
-│   └── critic.py                               # Critic一致性验证（跨Agent输出冲突检测）
-│
-├── orchestrator/                               # ========== 编排组件 ==========
-│   ├── planner.py                              # 任务规划器（LLM生成DAG任务图）
-│   ├── router.py                               # 智能路由器（向量相似度+LLM精排选Agent）
-│   ├── registry.py                             # Agent注册表（统一发现与管理）
-│   └── parameter_aligner.py                    # 参数对齐器（跨Agent字段映射与填槽）
-│
-├── agents/                                     # ========== Agent实现 ==========
-│   ├── knowledge_agent/                        # 知识检索Agent
-│   │   ├── agent.py                            #   ReAct循环、20+工具、混合检索、缓存
-│   │   └── openapi.yaml                        #   工具接口描述
-│   ├── database_agent/                         # 数据库查询Agent
-│   │   └── agent.py                            #   MCP协议接入SQLite，自主探索表结构
-│   ├── document_agent/                         # 文档处理Agent
-│   │   ├── agent.py                            #   多格式文档解析（PDF/Word/Excel/CSV/TXT/MD）、智能分析
-│   │   └── openapi.yaml                        #   工具接口描述
-│   ├── customer_service_agent/                 # 智能客服Agent
-│   │   └── agent.py                            #   情感分析、工单管理、知识库检索
-│   ├── vqa_agent/                              # 视觉问答Agent（VQA）
-│   │   ├── __init__.py                         #   模块入口
-│   │   └── agent.py                            #   千问VL多模态：图表分析、多图对比、OCR
-│   ├── chat_agent/                             # 闲聊兜底Agent
-│   │   └── agent.py                            #   处理问候、闲聊、意图不明确的查询
-│   └── critic_agent/                           # 评论家Agent
-│       └── __init__.py                         #   跨Agent输出一致性审计
-│
-├── rag_core/                                   # ========== RAG检索核心 ==========
-│   ├── hybrid_retriever.py                     # 混合检索器（向量+BM25双路召回，RRF融合）
-│   ├── reranker.py                             # 重排序器（DashScope API/本地CrossEncoder/规则）
-│   ├── chroma_store.py                         # ChromaDB向量数据库（存储、检索、元数据过滤）
-│   ├── bm25_retriever.py                       # BM25关键词检索（jieba中文分词）
-│   ├── retriever.py                            # 语义检索器（Sentence-BERT编码、查询扩展）
-│   ├── query_optimizer.py                      # 查询优化器（扩展、分解、HyDE）
-│   ├── cache_manager.py                        # 缓存管理器（三层缓存统一管理，Redis持久化）
-│   ├── monitoring.py                           # 检索性能监控（延迟、命中率统计）
-│   ├── api_embedder.py                         # API向量化器（DashScope Embedding接口）
-│   ├── answer_generator.py                     # 答案生成器（基于检索结果生成回答）
-│   ├── context_compressor.py                   # 上下文压缩（去除冗余信息）
-│   ├── concept_extractor.py                    # 概念提取器（关键概念识别）
-│   └── evaluator.py                            # 检索质量评估
-│
-├── llm/                                        # ========== LLM调用层 ==========
-│   ├── llm_client.py                           # 统一LLM接口（Qwen-Max/Plus，Function Calling）
-│   ├── embedder.py                             # Embedding统一封装
-│   ├── function_calling.py                     # Function Calling格式转换
-│   ├── output_parser.py                        # LLM输出解析（JSON提取、容错处理）
-│   ├── langchain_parser.py                     # LangChain PydanticOutputParser集成
-│   ├── langchain_tools.py                      # LangChain工具注册与Schema生成
-│   └── mcp_client.py                           # MCP协议客户端（stdio方式接入SQLite）
-│
-├── core/                                       # ========== 核心基础设施 ==========
-│   ├── memory.py                               # 对话记忆（ConversationSummaryBufferMemory）
-│   ├── protocol.py                             # Agent通信协议（Pydantic强类型约束）
-│   ├── unified_cache.py                        # 统一缓存基类（LRU+TTL，RetrievalCache等）
-│   ├── cache_manager.py                        # 业务缓存管理（LLM/检索/供应商三级缓存）
-│   ├── persistent_cache.py                     # Redis持久化缓存（内存+Redis双层读写）
-│   ├── semantic_cache.py                       # 语义缓存（余弦相似度匹配，Redis持久化）
-│   ├── unified_monitoring.py                   # 统一监控（性能追踪、成本统计、日志）
-│   ├── monitoring.py                           # 全局监控实例（性能指标采集）
-│   ├── qa_logger.py                            # 问答日志（SQLite持久化，质量追踪）
-│   ├── error_handler.py                        # 全局错误处理与恢复策略
-│   ├── document_filter.py                      # 文档权限过滤（基于角色的访问控制）
-│   ├── sqlite_mcp_service.py                   # SQLite MCP服务（数据库Agent后端）
-│   ├── crm_mock.py                             # CRM模拟数据（客服Agent测试用）
-│   ├── filesystem_service.py                   # 文件系统服务
-│   ├── file_parser.py                          # 统一文档解析（PDF/Word/Excel/CSV/TXT/MD，供document_agent与init共用）
-│   └── industry_standards.py                   # 行业标准数据（合同审核参考）
-│
-├── data/                                       # ========== 数据文件 ==========
-│   ├── knowledge/                              # 知识库文档（12个, ALLOWED_DOC_IDS 白名单管理）
-│   │   ├── rag_optimization_strategies.md      #   RAG核心优化策略
-│   │   ├── hybrid_search_deep_dive.md          #   混合检索深度解析
-│   │   ├── retrieval_methods_comparison.md     #   检索方法对比与选型
-│   │   ├── rag_embedding_and_vectordb.md       #   向量嵌入与向量数据库
-│   │   ├── rag_introduction.pdf                #   RAG系统介绍
-│   │   ├── rag_evaluation_and_monitoring.md    #   RAG评估与监控体系
-│   │   ├── semantic_cache_and_performance.md   #   语义缓存与性能优化
-│   │   ├── document_chunking_best_practices.md #   文档分块与数据预处理
-│   │   ├── llm_prompt_engineering.md           #   LLM提示工程
-│   │   ├── customer_satisfaction_guide.md      #   客户满意度提升策略
-│   │   ├── customer_retention_best_practices.md#   客户留存最佳实践
-│   │   └── customer_data_analytics.md          #   客户数据分析方法论
-│   ├── contracts/                              # 合同文档（审核Agent测试数据）
-│   │   ├── 待审核合同_2026_00x_*.txt           #   待审核合同（高/中/低风险）
-│   │   └── 历史合同_202x_00x.txt               #   历史合同（对比参考）
-│   ├── crm/                                    # CRM数据（客服Agent测试数据）
-│   │   ├── tickets.json                        #   工单数据
-│   │   └── users.json                          #   用户数据
-│   ├── uploads/                                # 用户上传文件（文档/图片，UUID前缀防冲突）
-│   ├── charts/                                 # 生成的图表图片（VQA Agent输出）
-│   └── metadata/                               # 文档元数据
-│       ├── document_metadata.json              #   元数据配置
-│       └── document_metadata_template.json     #   元数据模板
-│
-├── database/                                   # ========== 数据库 ==========
-│   ├── chinook.db                              # SQLite示例数据库（数据库Agent）
-│   └── qa_logs.db                              # 问答日志数据库（质量追踪、统计分析）
-│
-├── vector_db/                                  # ========== 向量存储 ==========
-│   └── chroma_db/                              # ChromaDB持久化数据
-│
-├── tools/                                      # ========== 运维脚本 ==========
-│   └── scripts/
-│       ├── init_vector_db.py                   # 向量数据库初始化（全量重建, 白名单过滤）
-│       ├── incremental_update.py               # 向量数据库增量更新（MD5哈希检测变更）
-│       ├── clean_vector_db.py                  # 向量数据库清理
-│       ├── diagnose_db_agent.py                # 数据库Agent诊断工具
-│       ├── warmup_cache.py                     # 缓存预热脚本
-│       └── init_metadata.py                    # 文档元数据自动生成
-│
-├── ocr_tools/                                  # ========== OCR工具 ==========
-│   ├── tesseract.exe                           # Tesseract OCR引擎
-│   ├── ocr_config.py                           # OCR配置
-│   ├── tessdata/                               # OCR语言模型
-│   ├── scripts/                                # OCR测试脚本
-│   └── docs/                                   # OCR使用文档
-│
-├── frontend/                                   # ========== 前端界面 ==========
-│   ├── index.html                              # Web聊天界面（SSE流式、文件上传、图表展示）
-│   └── monitor.html                            # 系统监控面板
-│
-├── tests/                                      # ========== 测试 ==========
-│   └── test_system_prelaunch.py                # 上线前系统测试（25个用例，覆盖全Agent）
-│
-└── docs/                                       # ========== 项目文档 ==========
-    ├── README.md                               # 项目说明
-    ├── 项目核心架构图.md                         # 完整架构图
-    ├── 项目核心架构图_精简.md                     # 精简版架构图
-    ├── 整体代码架构清单.md                       # 代码结构说明
-    ├── 知识检索Agent执行流程.md                   # KnowledgeAgent流程详解
-    ├── 知识检索Agent执行流程_架构图.md             # KnowledgeAgent架构图
-    ├── 子Agent及对应工具.md                      # Agent工具清单
-    ├── LangGraph相关概念.md                     # LangGraph学习笔记
-    ├── LangChain相关概念.md                     # LangChain学习笔记
-    └── 异步执行_流式输出_调用工具容错.md           # 异步与容错机制说明
-```
+| 能力 | 用户怎么说 | 系统内部怎么走 |
+|---|---|---|
+| **售后政策问答** | 「七天无理由怎么算？」 | 路由 → 售后 Agent → 混合检索政策库 → 依据条款回答 |
+| **订单 / 物流查询** | 「我的快递到哪了？」 | 路由 → 数据 Agent → 生成 SQL → 查订单库 → 回答 |
+| **退换货办理** | 「耳机坏了，我要退货」 | 复杂路径 → DAG（查订单 → 检索政策 → 提交申请）→ **人工审批** |
+| **投诉受理** | 「我要投诉！」 | 情绪分析 → 建工单（优先级按情绪定）→ **人工审批** |
+| **图片识别** | 上传破损商品照片 | `vqa_agent` 识图 → 售后 Agent 据图判断能否退 |
+
+**业务设定**：虚构平台「云集优选」，10 篇售后政策文档 + 一个含订单/物流/退款/工单的 SQLite 库。
 
 ---
 
 ## 快速开始
 
-### 环境准备
-
 ```bash
-# 1. 安装依赖
-pip install -r requirements.txt
+cd nlp
 
-# 2. 配置环境变量
-cp .env.example .env
-# 编辑 .env，填入你的 API Key：
-#   DASHSCOPE_API_KEY=sk-your-key    （必填，通义千问 + 千问VL）
-#   REDIS_URL=redis://localhost:6379/0  （可选，缓存持久化）
+# 1. 建虚拟环境并装依赖（用 uv，走清华镜像）
+uv venv --python 3.12 .venv
+uv pip install -r requirements.txt --index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 3. 初始化向量数据库
-python tools/scripts/init_vector_db.py
+# 2. 配置 API Key
+cp .env.example .env      # 编辑 .env，填入 DASHSCOPE_API_KEY（必填）
+
+# 3. 初始化数据（两个都要跑）
+python tools/scripts/init_ecommerce_db.py    # 订单/物流/退款/工单库
+python tools/scripts/init_vector_db.py       # 售后政策 → 向量库
+
+# 4. 启动
+python api.py     # Web 界面 + API：http://localhost:8000/
+python main.py    # 或者用命令行交互
 ```
 
-### 启动服务
-
-```bash
-# 方式一：CLI交互模式
-python main.py
-
-# 方式二：Web API服务
-python api.py
-# 访问 http://localhost:8000/docs 查看接口文档
-```
-
-### API接口
-
-| 接口 | 方法 | 说明 |
-|------|------|------|
-| `/` | GET | Web 聊天界面（前端页面） |
-| `/chat/stream` | POST | 流式聊天（SSE实时推送节点进度） |
-| `/chat` | POST | 非流式聊天（等待完成后返回） |
-| `/upload` | POST | 上传单个文件（PDF/Word/Excel/CSV/图片/文档） |
-| `/upload/multiple` | POST | 批量上传文件 |
-| `/resume` | POST | 人工介入后恢复执行 |
-| `/agents` | GET | 查询已注册Agent列表 |
-| `/health` | GET | 健康检查（含LLM + Redis状态） |
-| `/static/charts/*` | GET | 图表图片静态文件服务 |
+> **Windows CMD 用户注意**：路径要用反斜杠（`.venv\Scripts\python.exe`），
+> CMD 不把 `/` 当路径分隔符。
 
 ---
 
-## 系统架构流程图
+## 架构
 
-### 1. LangGraph 主编排流程
-
-```
-                                 START
-                                   │
-                                   ▼
-                     ┌───────────────────────┐
-                     │ complexity_classifier │  ← LLM 判断复杂度
-                     └───────────┬───────────┘
-                                 │
-                       route_by_complexity
-                        ╱                ╲
-                   simple              complex
-                     ╱                      ╲
-                    ▼                        ▼
-           ┌──────────────┐        ┌─────────────────┐
-           │    router    │        │    planner      │  ← 生成 DAG 任务计划
-           │ 选择最佳Agent│        │ {tasks:详情如下}  │
-           └──────┬───────┘        └────────┬────────┘
-                  │                         │
-            route_to_agent          fan_out_dag_tasks
-            (单个Agent)            (只send没有 depends_on 的任务)
-                  │                         │
-                  │                ┌────────┴────────┐
-                  ▼                ▼                 ▼
-                  └───────┬───────┘                  │
-                          │                          │
-              ┌───────────▼──────────────────────────▼───┐
-              │        跨Agent共享记忆层（指代消解）         │
-      ┌──────►│  LLM 判断是否有指代词，有则替换后执行        │
-      │       └──────────────────┬───────────────────────┘
-      │                     ┌────┴────┐
-      │                     ▼         ▼
-      │               agent_A    agent_B    ← Send 机制实现 DAG 波次调度，并行执行
-      │                     │         │
-      │                     │  完成时返回 已完成的任务id
-      │                     └────┬────┘
-      │                          │  Fan-in合并（列表拼接）
-      │                          ▼
-      │               ┌─────────────────────┐
-      │               │ parameter_validator │  ← 参数校验与对齐（动态填槽、字段类型检查）
-      │               └──────────┬──────────┘
-      │                     ╱         ╲
-      │               reexecute     continue
-      │                  │              │
-      │          upstream_retry         │
-      │             → 重跑 agent       │
-      │                          ┌─────▼──────────────┐
-      │                          │ duplicate_detection │ ← 语义相似度检测重跑结果是否重复
-      │                          └─────────┬──────────┘
-      │                                    ▼
-      │                          ┌─────────────────┐
-      │                          │ critic_validation│ ← LLM语义一致性检查（跨Agent输出冲突）
-      │                          └────────┬─────────┘
-      │                                ╱     ╲
-      │                          passed    failed → 触发人工介入
-      │                             │
-      │                             ▼
-      │                 ┌──────────────────────────┐
-      │                 │ human_intervention_check │ ← 统一检查人工介入场景
-      │                 │ 1.任务规划审核            │
-      │                 │ 2.数据库写入操作          │
-      │                 │ 3.质量低且重试多次        │
-      │                 │ 4.Critic验证失败          │
-      │                 └────────────┬─────────────┘
-      │                         ╱    │    ╲
-      │                   override retry  abort
-      │                   (强制通过)(重跑) (终止)
-      │                       │      │      │
-      │                       │  循环回共享  END
-      │                       │   记忆层
-      │                       ▼
-      │                ┌─────────────┐
-      │                │ aggregator  │  ← 汇总（中间波次跳过，最后LLM综合生成答案）
-      │                └──────┬──────┘
-      │                       │
-      │              ┌────────┴────────┐
-      │              │ wave_scheduler  │  ← 找就绪任务（依赖全满足且未完成）
-      │              └────────┬────────┘
-      │                       │
-      │          ┌────────────┼────────────┐
-      │          │                         │
-      │     有就绪任务                无就绪任务
-      │     (Send下一波)             (所有任务完成)
-      │          │                         │
-      └──────────┘                         ▼
-       下一波Agent执行              ┌─────────────┐
-       （循环回共享记忆层）          │  evaluator  │  ← LLM 三维度打分（相关性/完整性/准确性）
-                                   └──────┬──────┘
-                                          │
-                                    ╱          ╲
-                              质量达标        质量不达标
-                                │               │
-                               END         注入反馈，路由回Agent重做
-```
-
-### 2. 单Agent ReAct执行流程（以知识检索Agent为例）
+### 分层
 
 ```
-                                    START
-                                      │
-                        用户查询: "RAG 和传统搜索引擎有什么区别？"
-                                      │
-                                      ▼
-                    ╔═════════════════════════════════════════╗
-                    ║   第一阶段：入口预处理 (handle)          ║
-                    ╚═════════════════════════════════════════╝
-                                      │
-                                      ▼
-                         ┌────────────────────────┐
-                         │  ① 指代消解             │
-                         │  检查 self.memory      │
-                         │  有代词/省略 → 调 LLM  │
-                         │  查询完整 → 原样返回    │
-                         └───────────┬────────────┘
-                                     │
-                                     ▼
-                         ┌────────────────────────┐
-                         │ ② 精确缓存查询          │
-                         │ cache_manager.         │
-                         │ query_cache.get()      │
-                         └───────────┬────────────┘
-                                ╱         ╲
-                           命中              未命中
-                            ╱                  ╲
-                           ▼                    ▼
-                    ┌──────────┐      ┌────────────────────────┐
-                    │ 直接返回  │      │ ③ 语义缓存查询          │
-                    │ 缓存结果  │      │ semantic_cache.get()   │
-                    │   END    │      │ 余弦相似度 >= 0.95?     │
-                    └──────────┘      └───────────┬────────────┘
-                                             ╱         ╲
-                                        命中              未命中
-                                         ╱                  ╲
-                                        ▼                    ▼
-                                 ┌──────────┐      ┌────────────────────────┐
-                                 │ 直接返回  │      │ ④ 记录到对话记忆        │
-                                 │ 缓存结果  │      │ memory.add_user_       │
-                                 │   END    │      │ message(query)         │
-                                 └──────────┘      └───────────┬────────────┘
-                                                                │
-                                                                ▼
-                                                   ┌────────────────────────┐
-                                                   │ ⑤ 进入 ReAct 循环      │
-                                                   │ _handle_react()        │
-                                                   └───────────┬────────────┘
-                                                               │
-                                                               ▼
-                    ╔═════════════════════════════════════════════════════════╗
-                    ║   第二阶段：ReAct 循环初始化                              ║
-                    ╚═════════════════════════════════════════════════════════╝
-                                                               │
-                                                               ▼
-                                                   ┌────────────────────────┐
-                                                   │ 构建 messages          │
-                                                   │ [0] system: 决策策略   │
-                                                   │ [1] user: 用户查询     │
-                                                   └───────────┬────────────┘
-                                                               │
-                                                               ▼
-                                                   ┌────────────────────────┐
-                                                   │ 获取工具 schema        │
-                                                   │ tool_registry.         │
-                                                   │ get_tools_schema()     │
-                                                   │ → 14 个工具 JSON       │
-                                                   └───────────┬────────────┘
-                                                               │
-                                                               ▼
-                                                   ┌────────────────────────┐
-                                                   │ 初始化控制变量          │
-                                                   │ max_iterations = 5     │
-                                                   │ retrieval_count = 0    │
-                                                   │ seen_tool_calls = {}   │
-                                                   └───────────┬────────────┘
-                                                               │
-                                                               ▼
-                    ╔═════════════════════════════════════════════════════════╗
-                    ║   第三阶段：ReAct 循环执行（最多5轮）                     ║
-                    ╚═════════════════════════════════════════════════════════╝
-                                                               │
-                      ┌────────────────────────────────────────┘
-                      │
-                      ▼
-          ┌───────────────────────────┐
-          │ LLM.chat(messages, tools) │  ← LLM 自主推理决策
-          │ temperature=0.3           │
-          └───────────┬───────────────┘
-                      │
-                      ▼
-          ┌───────────────────────────┐
-          │ parse_tool_calls(response)│  ← 解析 LLM 返回的 JSON
-          └───────────┬───────────────┘
-                      │
-                 ╱         ╲
-            有 tool_calls   无 tool_calls
-               ╱                ╲
-              ▼                  ▼
-    ┌──────────────────┐   ┌─────────────────────┐
-    │_execute_tool_calls│   │ LLM 认为信息充足     │
-    └─────────┬────────┘   │ 返回最终答案         │
-              │            │ 退出 ReAct 循环      │
-              ▼            └──────────┬──────────┘
-    ┌──────────────────┐             │
-    │  去重检测         │             │
-    │ seen_tool_calls  │             │
-    └─────────┬────────┘             │
-         ╱         ╲                 │
-      重复          新调用             │
-       ╱              ╲               │
-      ▼                ▼              │
- ┌─────────┐   ┌──────────────────┐  │
- │跳过该调用│   │  参数验证         │  │
- └────┬────┘   │_validate_tool_    │  │
-      │        │  parameters()     │  │
-      │        └─────────┬─────────┘  │
-      │             ╱         ╲        │
-      │          无效          有效     │
-      │           ╱              ╲     │
-      │          ▼                ▼    │
-      │   ┌─────────────┐  ┌──────────────────┐
-      │   │返回错误信息  │  │ tool_registry.   │
-      │   │给 LLM       │  │ call_tool()      │
-      │   └──────┬──────┘  │ 执行工具          │
-      │          │         └─────────┬────────┘
-      │          │                   │
-      └──────────┴───────────────────┘
-                 │
-                 ▼
-      ┌──────────────────────┐
-      │ 结果回填 messages     │
-      │ [n] assistant:       │
-      │     tool_calls       │
-      │ [n+1] tool: 执行结果 │
-      └──────────┬───────────┘
-                 │
-                 ▼
-      ┌──────────────────────┐
-      │    收敛检查           │
-      └──────────┬───────────┘
-            ╱    │    ╲
-           ╱     │     ╲
-    所有调用  倒数第2轮  继续
-    均重复      │        │
-       │        │        │
-       ▼        ▼        │
-    ┌─────┐ ┌─────┐     │
-    │强制  │ │追加  │     │
-    │收敛  │ │提示  │     │
-    └──┬──┘ └──┬──┘     │
-       │       │        │
-       └───┬───┴────────┘
-           │
-           │ iteration++
-           │
-           ▼
-      ┌──────────────────────┐
-      │ iteration < max (5)? │
-      └──────────┬───────────┘
-            ╱         ╲
-          是            否
-         ╱               ╲
-        │                 ▼
-        │        ┌──────────────────┐
-        │        │ 强制生成最终答案  │
-        │        │ "请基于已有信息   │
-        │        │  给出最终答案"    │
-        │        └─────────┬────────┘
-        │                  │
-        └──────────────────┘
-                 │
-                 ▼
-                    ╔═════════════════════════════════════════════════════════╗
-                    ║   第四阶段：后处理（回到 handle）                         ║
-                    ╚═════════════════════════════════════════════════════════╝
-                                                               │
-                                                               ▼
-                                                   ┌────────────────────────┐
-                                                   │ ① 写入精确缓存          │
-                                                   │ cache_manager.         │
-                                                   │ query_cache.set()      │
-                                                   └───────────┬────────────┘
-                                                               │
-                                                               ▼
-                                                   ┌────────────────────────┐
-                                                   │ ② 写入语义缓存          │
-                                                   │ semantic_cache.set()   │
-                                                   │ 存储 embedding + 答案  │
-                                                   └───────────┬────────────┘
-                                                               │
-                                                               ▼
-                                                   ┌────────────────────────┐
-                                                   │ ③ 记录对话记忆          │
-                                                   │ memory.add_assistant_  │
-                                                   │ message(result)        │
-                                                   └───────────┬────────────┘
-                                                               │
-                                                               ▼
-                                                   ┌────────────────────────┐
-                                                   │ ④ return result        │
-                                                   └───────────┬────────────┘
-                                                               │
-                                                               ▼
-                    ╔═════════════════════════════════════════════════════════╗
-                    ║   第五阶段：回到 LangGraph 外层                           ║
-                    ╚═════════════════════════════════════════════════════════╝
-                                                               │
-                                                               ▼
-                                                   ┌────────────────────────┐
-                                                   │ make_agent_node        │
-                                                   │ 收到 result            │
-                                                   └───────────┬────────────┘
-                                                               │
-                                                               ▼
-                                                   ┌────────────────────────┐
-                                                   │ 写入 State             │
-                                                   │ agent_results: [{      │
-                                                   │   agent: "knowledge_   │
-                                                   │   agent",              │
-                                                   │   result: "...",       │
-                                                   │   iteration: 0        │
-                                                   │ }]                     │
-                                                   └───────────┬────────────┘
-                                                               │
-                                                               ▼
-                                                   ┌────────────────────────┐
-                                                   │ 流转到下游节点          │
-                                                   │ → parameter_validator  │
-                                                   │ → duplicate_detection  │
-                                                   │ → critic               │
-                                                   │ → aggregator           │
-                                                   │ → evaluator            │
-                                                   └───────────┬────────────┘
-                                                               │
-                                                               ▼
-                                                             END
+接入层    api.py（FastAPI + SSE 流式）· frontend/index.html
+   ↓
+编排层    langgraph_orchestrator/  ← StateGraph 状态机，DAG 波次调度
+   ↓
+Agent 层  knowledge · database · customer_service · vqa · chat
+   ↓
+能力层    混合检索（向量+BM25+RRF）· Text-to-SQL · 工单读写
+   ↓
+数据层    data/knowledge/（10 篇政策）· database/ecommerce.db（6 张表）
+```
+
+### 编排主干
+
+```
+START → complexity_classifier ─┬─ simple  → router ──→ 单个 Agent
+                               └─ complex → planner → Send 并行发 DAG 根任务
+各 Agent 汇合 → parameter_validator → duplicate_detection → aggregator
+              → wave_scheduler（还有就绪任务就发下一波）
+              → evaluator（三维打分）→ 人工介入检查 → END
+```
+
+**DAG 是波次调度的**：`fan_out_dag_tasks` 只发依赖为空的根任务，
+每波跑完由 `wave_scheduler` 找"依赖全满足且未完成"的任务再发下一波。
+就绪判据是 `depends_on ⊆ completed_task_ids`。
+
+### Agent 一览
+
+| Agent | 职责 | 工具数 |
+|---|---|---|
+| `knowledge_agent` | 与售后无关的通用知识、概念解释 | 14 |
+| `database_agent` | 订单/物流/退款/会员数据查询（Text-to-SQL） | 4 |
+| `customer_service_agent` | 售后政策问答 + 退换货办理 + 投诉工单 | 11 |
+| `vqa_agent` | 破损商品照、快递单、发票截图识别（三种模式，非工具式） | — |
+| `chat_agent` | 闲聊兜底（无工具） | — |
+
+> Agent 的接口极简：**鸭子类型**，只要实现 `handle(query, context) -> str`。
+> 不要求继承基类，注册时用 `isinstance` 校验。
+
+---
+
+## 三个值得说的设计
+
+### 1. 写操作审批闸门（人机协同）
+
+系统能做写操作（提退货申请、建工单），但**动手之前会停下来等人确认**。
+
+```
+Agent 执行写工具 → 登记 → Agent 节点写入 state["write_operations"]
+                → 人工介入节点据此挂起（interrupt_before）
+                → 前端弹审批框 → 点「批准继续」→ POST /resume → 继续
+```
+
+判据是「**数据是不是真的被改了**」，而不是「用户说了什么关键词」——
+后者容易被措辞绕过。
+
+### 2. 防幻觉兜底
+
+LLM Agent 最危险的失败模式不是答错，而是**描述没发生的事**。
+实测中模型会写出「已为您提交退货申请，单号 RF2026xxx」，而数据库里什么都没有。
+
+所以加了输出后校验：**声称办过事，就必须真调用过写工具**，否则改写答复、
+明确告诉用户"并未提交"。
+
+### 3. 检索与查询的分工
+
+「退货政策是什么」→ Agent 检索文档；「我的订单什么状态」→ Agent 写 SQL。
+两者都靠 LLM，但**一个查规则、一个查数据**，路由时按这个边界分派。
+
+---
+
+## 目录结构
+
+```
+nlp/
+├── api.py                          FastAPI 入口（SSE 流式 / 人工恢复 / 上传）
+├── main.py                         CLI 入口
+├── langgraph_orchestrator/         编排核心（图、状态、节点、路由）
+├── orchestrator/                   planner（DAG 生成）· router（选 Agent）· registry
+├── agents/                         5 个 Agent 的实现
+├── rag_core/                       混合检索、重排、向量库、查询优化
+├── llm/                            模型调用层、工具注册、MCP 客户端
+├── core/                           基础设施：缓存/记忆/监控/日志 + CRM + 写操作审计
+├── config/                         配置（注意：agents.yaml 当前未被消费，见 study.md）
+├── data/knowledge/                 10 篇售后政策文档（向量库语料）
+├── data/metadata/                  文档元数据
+├── database/                       ecommerce.db（脚本生成，不入库）
+├── tools/scripts/                  建库、建向量库、增量更新等运维脚本
+├── frontend/                       单文件 HTML（原生 JS + EventSource）
+└── tests/                          回归测试套件（15 条）
 ```
 
 ---
 
-## 技术栈
+## 测试
 
-| 类别 | 技术 |
-|------|------|
-| 语言 | Python >= 3.11（LangGraph async StreamWriter 依赖 contextvar 传播） |
-| 编排框架 | LangGraph (StateGraph + Send API 并行调度) |
-| LLM | 通义千问 Qwen-Max / Qwen-Plus (DashScope API，OpenAI 兼容接口) |
-| 多模态 | 千问VL Qwen-VL-Max（图表分析、多图对比、OCR） |
-| 向量数据库 | ChromaDB |
-| 关键词检索 | BM25 + jieba中文分词 |
-| 检索融合 | 加权RRF (向量权重0.8) + 三层阈值过滤 |
-| 重排序 | DashScope gte-rerank API / Cross-Encoder / 规则兜底 |
-| 向量化 | DashScope text-embedding-v2 (1536维) |
-| Web框架 | FastAPI + Uvicorn + SSE流式推送 |
-| 前端 | 单文件HTML（原生JS + EventSource，暗色主题） |
-| 缓存 | 三层缓存（内存LRU + Redis持久化） |
-| 数据库协议 | MCP (Model Context Protocol) + SQLite |
-| 文档解析 | pdfplumber + python-docx + pandas + Tesseract OCR |
-| 网络搜索 | Tavily API（补充知识库盲区） |
-| 数据验证 | Pydantic v2（跨Agent通信强类型约束） |
-| 质量追踪 | SQLite问答日志（成功率、评分、延迟统计） |
+```bash
+python tests/test_after_sales.py
+```
 
+15 条用例，分两段跑：
+
+- **第一段（不调 LLM，秒级）** 数据层与纯逻辑：外键约束、退货三重校验、
+  防幻觉兜底、知识库白名单
+- **第二段（调 LLM，约 3 分钟）** 端到端：路由分派、政策问答、订单/物流查询、
+  多轮指代消解、写操作登记链路、边界输入
+
+退出码 0 = 全通过，可直接接 CI。
+
+---
+
+## 改造记录
+
+这个项目是从一个**通用多 Agent RAG 系统**改造成电商售后助手的，过程完整记录在两份文档里：
+
+| 文档 | 内容 |
+|---|---|
+| [study.md](study.md) | **路线图** —— 7 个阶段的计划、里程碑、进度，以及待评估项与已知局限 |
+| [idea.md](idea.md) | **学习笔记** —— 每一处改动「怎么想的 / 为什么这么改 / 人类该从中学到什么」 |
+
+改造过程中挖出并修复的几个真问题（都记在 idea.md 里）：
+
+- **工具注册无法传多参数** —— `register_tool` 用的 LangChain `Tool` 硬编码只接受
+  1 个参数，加 `args_schema` 也无效。原有工具恰好都只传 1 个参数所以从未暴露，
+  `create_ticket` 其实一直是坏的
+- **防幻觉兜底被措辞绕过** —— 固定子串匹配挡不住模型在中间插副词
+- **SQLite 外键默认不生效** —— 建表语句里写了 `FOREIGN KEY` 只是声明，不开
+  `PRAGMA foreign_keys = ON` 就没有执行力，导致臆造的 user_id 能写进库
+- **前端静默失败** —— 渲染抛异常时进度条已移除、异常只打日志，
+  用户看到的是"什么都没有"
+
+---
+
+## 环境要求
+
+| 项 | 版本 |
+|---|---|
+| Python | **3.12**（3.14 太新，chromadb/langchain 的 wheel 还没跟上） |
+| 模型 | 通义千问 Qwen-Plus / Qwen-VL-Max（DashScope，走 OpenAI 兼容接口） |
+| 向量库 | ChromaDB（本地文件，无需服务） |
+| 可选 | Redis（不配就降级为纯内存缓存） |
