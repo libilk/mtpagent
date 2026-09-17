@@ -94,3 +94,7 @@ database/chinook.db
 database/qa_logs.db
 # 电商售后演示库：跑 tools/scripts/init_ecommerce_db.py 即可重建
 database/ecommerce.db
+# 知识图谱：跑 init_knowledge_graph.py + extract_graph_relations.py
+# + review_graph_relations.py 三步重建（注意：抽取是 LLM 做的，
+# 重建后需要重新人工核对，graph_review_decisions.json 不能直接复用）
+database/knowledge_graph.db

@@ -426,6 +426,39 @@ class CustomerServiceAgent:
             function=self.submit_return_request
         )
 
+        # 12. 查政策适用性（知识图谱）
+        self.tool_registry.register_tool(
+            name="query_policy_applicability",
+            description="★判断某件商品适用/不适用哪些售后政策的首选工具★ "
+                        "它查的是知识图谱，返回**确定的结论 + 规则依据**"
+                        "（例如「耳机属于3C数码 → 七天无理由被排除」），"
+                        "而不是靠检索猜。判断「能不能退」「适用哪条通道」时**优先调它**。"
+                        "检索工具（hybrid_search）作为补充，用于取政策条款细节。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "product_name": {
+                        "type": "string",
+                        "description": "商品名，直接用订单里的商品名称，"
+                                       "如「云听 Pro 主动降噪无线耳机」"
+                    },
+                    "activated": {
+                        "type": "boolean",
+                        "description": "商品是否已激活/已拆封/已使用过。"
+                                       "用户说了就传；**没说不确定就不要传**"
+                                       "（不传=未知，系统会返回『待确认』而不是假定可退）"
+                    },
+                    "quality_issue": {
+                        "type": "boolean",
+                        "description": "是否存在质量问题（损坏/故障/发错等）。同样，"
+                                       "不确定就不要传"
+                    }
+                },
+                "required": ["product_name"]
+            },
+            function=self.query_policy_applicability
+        )
+
     @staticmethod
     def _truncate_tool_result(result_str: str, max_len: int = 4000) -> str:
         """截断过长的工具结果"""
@@ -580,7 +613,9 @@ class CustomerServiceAgent:
 1. 先判断用户意图属于下面哪一类，再选对应工具：
 
    政策咨询（"能退吗""运费谁出""几天到账"）
-     → hybrid_search 检索政策 → 依据检索结果回答
+     ★ 如果用户提到了**具体商品**，先调 query_policy_applicability 拿确定结论和依据 ★
+       → 需要条款细节时再用 hybrid_search 补充
+     → 两者结合回答，**优先用图谱给出的依据来组织答复**
 
    查订单 / 查物流（"我的货到哪了""订单什么状态"）
      → query_order 确认订单情况 → query_logistics 查物流
@@ -599,7 +634,8 @@ class CustomerServiceAgent:
 2. 用户没给订单号却又需要查订单时，**先向用户要订单号**，不要猜。
 
 【工具清单】
-知识检索：hybrid_search / vector_search / keyword_search
+知识图谱：query_policy_applicability（★判断能否退的首选，给确定结论 + 规则依据）
+知识检索：hybrid_search / vector_search / keyword_search（补充条款细节）
 订单售后：query_order（查订单）/ query_logistics（查物流）/
           submit_return_request（提交退换货）/ query_refund_status（查退款进度）
 客服办理：analyze_sentiment / create_ticket / query_ticket / query_user_info
@@ -1158,6 +1194,49 @@ class CustomerServiceAgent:
         except Exception as e:
             logger.error(f"查询用户失败: {e}")
             return {"error": f"查询用户失败: {str(e)}"}
+
+    # ==================== 知识图谱查询（阶段 8 新增）====================
+
+    def query_policy_applicability(self, product_name: str,
+                                   activated: bool = None,
+                                   quality_issue: bool = None) -> str:
+        """
+        查「这件商品适用/不适用哪些售后政策」。
+
+        这是图谱查询，返回的是**沿关系推导出来的确定结论 + 依据**，
+        跟向量检索（找相似段落）是两回事 —— 后者答不出「不适用」。
+
+        **关键：只把用户明确说过的条件传进来。**
+        没说不确定的条件**不要传** —— 图谱会把它们标成"待确认"，
+        而不是默认成"适用"。传了个猜测的 False 会得出相反的结论。
+        """
+        try:
+            from core.knowledge_graph import query_policy_applicability as _query, format_result
+
+            facts = {}
+            if activated is not None:
+                facts["ACTIVATED"] = bool(activated)
+            if quality_issue is not None:
+                facts["QUALITY_ISSUE"] = bool(quality_issue)
+
+            logger.info(f"[图谱查询] 商品={product_name}, 已知条件={facts}")
+            result = _query(product_name, facts)
+
+            if result.get("error"):
+                logger.warning(f"[图谱查询] {result['error']}")
+                return result["error"]
+
+            text = format_result(result)
+            logger.info(
+                f"[图谱查询] 类别={result['category']}, "
+                f"不适用 {len(result['excluded'])} 条, 适用 {len(result['applies'])} 条, "
+                f"待确认 {len(result['uncertain'])} 条"
+            )
+            return text
+
+        except Exception as e:
+            logger.error(f"图谱查询失败: {e}")
+            return f"图谱查询失败: {str(e)}（可改用 hybrid_search 检索政策文档）"
 
     # ==================== 售后办理工具实现（阶段 3 新增）====================
 

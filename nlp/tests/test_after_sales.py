@@ -19,7 +19,8 @@
         test_03  匿名工单允许创建
         test_04  退货申请的三重业务校验
         test_05  防幻觉兜底逻辑
-        test_06  知识库白名单
+        test_06  知识图谱政策推导（三值逻辑 + 同族覆盖 + 确定性）
+        test_06b 知识库白名单
 
     第二段（调 LLM，较慢，每个用例数秒到数十秒）—— 端到端
         test_07  系统初始化
@@ -262,7 +263,66 @@ class AfterSalesTester:
 
         return f"{len(lies)} 条编造全拦下 / {len(legits)} 条正常回答零误伤"
 
-    def test_06_knowledge_whitelist(self):
+    def test_06_knowledge_graph(self):
+        """
+        知识图谱：政策适用性推导。
+
+        **这是不调 LLM 的确定性用例** —— 图谱的价值就在于"算出来的"而不是"猜出来的"，
+        所以这里全部是确定断言，而且要求三次结果完全一致（可复现）。
+
+        覆盖三值逻辑的三种情况，以及一个结构性问题（同族覆盖）。
+        """
+        from core.knowledge_graph import query_policy_applicability
+
+        EARPHONE = "云听 Pro 主动降噪无线耳机"
+        PURIFIER = "云净空气净化器 3 代"
+
+        # ---- ① 已激活 + 质量问题：无理由被排除、质量问题通道可用 ----
+        r = query_policy_applicability(EARPHONE, {"ACTIVATED": True, "QUALITY_ISSUE": True})
+        excluded = {e["policy"] for e in r["excluded"]}
+        applies = {e["policy"] for e in r["applies"]}
+
+        assert "七天无理由退货" in excluded, f"3C例外没推导出来: {r}"
+        # 这条是修过的：通用政策原先挂在「一般商品」上，3C数码拿不到，agent 就编了「30天」
+        assert "质量问题退货（15日）" in applies, f"3C 没拿到通用质量问题退货政策: {applies}"
+        # 推导依据要能说出来（"因为耳机属于 3C 数码，无理由被排除"），否则图谱等于白做。
+        # 注意合并后的结构：结论在 policy 上，依据在 reasons 里（一个政策可能有多条依据）。
+        entry = next(e for e in r["excluded"] if e["policy"] == "七天无理由退货")
+        via = {reason["via"] for reason in entry["reasons"]}
+        assert "3C数码产品" in via, f"缺少推导依据: {entry}"
+
+        # ---- ② 没说是否激活：必须"待确认"，绝不能默认成可退 ----
+        r2 = query_policy_applicability(EARPHONE, {})
+        assert any(e["policy"] == "七天无理由退货" for e in r2["uncertain"]), \
+            "未知条件没有被标成待确认（危险：等于默认可以退）"
+        assert not any(e["policy"] == "七天无理由退货" for e in r2["applies"]), \
+            "未知条件被误判成适用"
+
+        # ---- ③ 明确未激活：排除不成立 → 无理由反而适用 ----
+        r3 = query_policy_applicability(EARPHONE, {"ACTIVATED": False})
+        assert any(e["policy"] == "七天无理由退货" for e in r3["applies"]), \
+            "排除条件不成立时没能反向推出适用"
+
+        # ---- ④ 同族覆盖：家电只应拿到 7日/15日，不能同时出现通用的 15日/30日 ----
+        r4 = query_policy_applicability(PURIFIER, {"QUALITY_ISSUE": True})
+        policies4 = {e["policy"] for e in r4["applies"]}
+        assert "家电质量问题退货（7日）" in policies4, f"家电专属时限丢了: {policies4}"
+        assert "质量问题退货（15日）" not in policies4, \
+            f"同族覆盖失效，通用的15日没被家电的7日盖掉: {policies4}"
+
+        # ---- ⑤ 未登记锚点的商品必须显式报错，不能静默兜底 ----
+        r5 = query_policy_applicability("某个没登记过的商品")
+        assert r5.get("error"), "未登记锚点的商品被静默处理了（会掩盖漏配）"
+
+        # ---- ⑥ 确定性：同样输入三次，结果必须完全一致 ----
+        import json as _json
+        sigs = {_json.dumps(query_policy_applicability(EARPHONE, {"ACTIVATED": True}),
+                            sort_keys=True, ensure_ascii=False) for _ in range(3)}
+        assert len(sigs) == 1, "图谱查询结果不可复现"
+
+        return "排除/适用/待确认三值 + 同族覆盖 + 确定性 全部正确"
+
+    def test_06b_knowledge_whitelist(self):
         """知识库只剩售后政策文档，旧的 RAG 技术文档已清空"""
         from pathlib import Path
         knowledge_dir = Path(PROJECT_ROOT) / 'data' / 'knowledge'
@@ -511,7 +571,8 @@ class AfterSalesTester:
             ("03 匿名工单允许",               self.test_03_anonymous_ticket_allowed),
             ("04 退货三重校验",               self.test_04_return_request_validation),
             ("05 防幻觉兜底",                 self.test_05_anti_hallucination_guard),
-            ("06 知识库白名单",               self.test_06_knowledge_whitelist),
+            ("06 知识图谱（政策推导）",        self.test_06_knowledge_graph),
+            ("06b 知识库白名单",              self.test_06b_knowledge_whitelist),
         ]
         slow = [
             ("07 系统初始化",                 self.test_07_system_init),
