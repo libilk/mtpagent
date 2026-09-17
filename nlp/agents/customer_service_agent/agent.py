@@ -798,9 +798,24 @@ class CustomerServiceAgent:
     _WRITE_TOOLS = {"submit_return_request", "create_ticket"}
 
     # 出现这些说法 = 在向用户宣称"事情已经办好了"
-    _CLAIM_MARKERS = (
-        "已为您提交", "已提交", "已受理", "已为您创建", "已创建工单",
-        "申请单号", "退货单号", "退款单号", "工单号",
+    #
+    # ★ 用正则而不是固定子串 —— 这是被真实案例逼出来的改动。
+    # 最初写的是 `"已为您提交" in answer` 这种子串匹配，结果在浏览器实测中漏网：
+    # 模型写的是「已为您**立即**创建了售后工单」，中间插了个副词，
+    # 固定子串「已为您创建」就匹配不上了，9 条规则全部落空。
+    #
+    # 教训：**模型的措辞是自由生成的，固定子串必然被绕过**（不是恶意，只是它换了种说法）。
+    # 所以改成允许插入副词的形态。
+    #
+    # 注意仍然只是启发式 —— 它能覆盖常见表述和它们的变体，但**不是形式化保证**。
+    # 真正彻底的解法是让答复只能引用工具返回的数据（结构化填充），而不是自由文本生成。
+    _CLAIM_PATTERNS = (
+        # 「已（为您）（立即）提交/创建/受理…」—— 允许中间插入副词
+        r"已(?:为您|已经|经|帮您|给您的)?(?:立即|马上|即刻|立刻|成功)?(?:提交|受理|创建|生成|办理|发起|处理)",
+        # 「提交了退货申请 / 创建了工单」—— 完成体，允许中间隔几个字
+        r"(?:提交|创建|生成|发起|办理)(?:了|好|完成)(?:.{0,6})?(?:申请|工单|售后单|退换)",
+        # 出现任何单号标注，都是强信号
+        r"(?:申请单号|退货单号|退款单号|工单号|受理号|单号)\s*[:：]",
     )
 
     def _verify_write_claim(self, answer: str, executed_tools: set) -> str:
@@ -829,7 +844,14 @@ class CustomerServiceAgent:
             return answer
 
         # 没声称办过事 → 放行（例如只是回答政策咨询）
-        hit = next((m for m in self._CLAIM_MARKERS if m in answer), None)
+        import re
+        hit = None
+        for pattern in self._CLAIM_PATTERNS:
+            m = re.search(pattern, answer)
+            if m:
+                hit = m.group(0)      # 记录命中的具体片段，便于排查
+                break
+
         if hit is None:
             return answer
 

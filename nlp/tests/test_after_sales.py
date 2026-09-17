@@ -213,33 +213,54 @@ class AfterSalesTester:
         防幻觉兜底：声称办过事，就必须真调用过写工具。
 
         这是阶段 3 挖出来的最危险的一个问题 —— 模型会在**没调用工具**的情况下
-        写出"已为您提交申请，单号 RFxxx"。这里把它固化成用例，防止以后被改回去。
+        写出"已为您提交申请，单号 RFxxx"。
+
+        下面「应拦下」的第 2 条是**浏览器实测中逃逸过的原句**：
+        模型当时写的是「已为您**立即**创建了售后工单」，中间插了个副词，
+        而最初的实现用的是固定子串（`"已为您创建" in answer`），9 条规则全部落空。
+        现在改成允许插入副词的正则。**这条用例就是为了防止它再次退化。**
+
+        同时「应放行」那几条同样重要 —— 防幻觉不能误伤正常的政策回答。
         """
         from agents.customer_service_agent.agent import CustomerServiceAgent as A
 
         # 借壳调用静态逻辑（不需要实例化整个 Agent）
         class _Probe:
             _WRITE_TOOLS = A._WRITE_TOOLS
-            _CLAIM_MARKERS = A._CLAIM_MARKERS
+            _CLAIM_PATTERNS = A._CLAIM_PATTERNS
             _verify_write_claim = A._verify_write_claim
 
         probe = _Probe()
-        lie = "已为您提交退货申请，单号 RF20260916001"
+        NO_WRITE = {"query_order", "hybrid_search"}
 
-        # 没调写工具却声称办了 → 必须拦截
-        out = probe._verify_write_claim(lie, {"query_order", "hybrid_search"})
-        assert "并未成功提交" in out, "编造办理结果没有被拦下"
+        # ---- 应被拦下：声称已办，但本轮没调用写工具 ----
+        lies = [
+            "已为您提交退货申请，单号 RF20260916001",
+            "我已为您立即创建了售后工单并提交了退货申请。",   # ← 曾逃逸的原句
+            "已经创建了工单，请等待处理",
+            "您的退货单号：RF20260916001",
+        ]
+        for lie in lies:
+            out = probe._verify_write_claim(lie, NO_WRITE)
+            assert "并未成功提交" in out, f"编造办理结果没有被拦下: {lie}"
 
-        # 真调了写工具 → 放行
+        # ---- 应放行：真调了写工具 ----
+        lie = lies[0]
         out = probe._verify_write_claim(lie, {"submit_return_request"})
-        assert out == lie, "正常答复被误伤"
+        assert out == lie, "真办理的答复被误伤"
 
-        # 纯政策回答（不涉及办理）→ 放行
-        policy = "七天无理由需在签收后 7 日内申请，运费由您承担。"
-        out = probe._verify_write_claim(policy, {"hybrid_search"})
-        assert out == policy, "纯咨询被误伤"
+        # ---- 应放行：正常政策回答（不能被误伤）----
+        legits = [
+            "七天无理由需在签收后 7 日内提交退货申请，运费由您承担。",
+            "您的订单已签收，退货申请需在 7 日内提交。",
+            "该商品属于已激活 3C 数码，不适用七天无理由；质量问题可在 15 日内申请。",
+            "订单 SO20260909001 状态为「已签收」，下单时间 2026-09-09 14:23。",
+        ]
+        for text in legits:
+            out = probe._verify_write_claim(text, NO_WRITE)
+            assert out == text, f"正常回答被误伤: {text}"
 
-        return "4 种场景判断正确"
+        return f"{len(lies)} 条编造全拦下 / {len(legits)} 条正常回答零误伤"
 
     def test_06_knowledge_whitelist(self):
         """知识库只剩售后政策文档，旧的 RAG 技术文档已清空"""
