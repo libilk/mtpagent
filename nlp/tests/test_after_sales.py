@@ -29,7 +29,7 @@
         test_11  订单查询（真实 SQL）
         test_12  物流查询（跨表 JOIN）
         test_13  多轮指代消解
-        test_14  写操作闸门 + 审批恢复（★ 直接调 Agent，绕过路由以保证稳定）
+        test_14  写操作登记链路（分段：机制确定性 + 行为不变量）
 
 **已知的不稳定因素：** 第二段依赖 LLM，`temperature` 不为 0，同样的输入偶尔会有不同路径。
 所以 test_14 刻意绕过路由直接调 Agent —— 只验证"写操作会被闸门拦住"这件事，
@@ -393,36 +393,92 @@ class AfterSalesTester:
         )
         return "「它」正确解析为订单 SO20260909001"
 
-    def test_14_write_gate_and_resume(self):
+    def test_14_write_ops_registration(self):
         """
-        ★ 写操作闸门 + 审批恢复。
+        ★ 写操作登记链路。
 
-        **刻意绕过路由**直接调用售后 Agent —— 路由有随机性（同一句话有时走简单
-        路径、有时走复杂路径），而这里只想验证「写操作会被闸门拦住」这一件事。
-        回归测试一个用例只测一件事，否则失败时看不出是哪儿的问题。
+        **这条用例被重写过一次，原因值得记：**
+
+        原版是"让 Agent 处理一句退货请求，断言它必须产生写操作"。
+        实测发现它**时好时坏** —— 模型有时会先要求用户补充凭证再提交
+        （那其实是合理行为，不是 bug），于是测试偶发失败。
+
+        **根因是测试设计缺陷：回归测试不该依赖模型的随机决策。**
+
+        所以拆成两段，对应两种不同的确定性：
+
+        A. **机制是确定的** —— 只要写工具被调用，就必须被登记。
+           走 Agent 的**工具分发路径**（`_execute_tool_calls`）验证，完全不经过 LLM。
+           注意不能直接调 `tool_registry.call_tool()` —— 登记是在分发层做的
+           （阶段 3b 为了线程安全特意从工具函数里挪出来），绕过分发层就不会登记。
+        B. **"Agent 会不会主动去调工具"是概率性的** —— 所以这一段不强制它必须写，
+           只验证**不变量**：只要答复声称"已提交"，就必须真的写过。
+           （这正是防幻觉要守的那条线。）
         """
+        import re
         from core.write_ops import consume_write_ops
 
         agent = self.system.registry.get_agent("customer_service_agent")["instance"]
 
-        consume_write_ops()   # 清掉可能的残留
-        agent.handle(
-            "我是张伟，用户ID是 U10001。订单 SO20260909001 的耳机右耳没声音，我要退货。",
-            {"history": []},
+        # ---------- A. 机制：走分发层调用写工具 → 必须登记 ----------
+        consume_write_ops()
+        import json as _json
+        agent._execute_tool_calls(
+            [{
+                "id": "regression_call_1",
+                "type": "function",
+                "function": {
+                    "name": "submit_return_request",
+                    "arguments": _json.dumps({
+                        "order_id": "SO20260909001",
+                        "user_id": "U10001",
+                        "reason": "回归测试-机制验证",
+                        "refund_type": "退货退款",
+                    }, ensure_ascii=False),
+                },
+            }],
+            retrieval_count=0,
         )
         ops = consume_write_ops()
 
-        assert ops, "售后 Agent 没有登记任何写操作（可能又出现了「只描述不调用」的问题）"
+        assert ops, "调用了写工具却没有登记写操作 —— 登记链路坏了"
+        assert ops[0]["type"] == "submit_return_request", f"登记类型不对: {ops[0]['type']}"
+        refund_id = ops[0]["detail"].get("refund_id")
+        assert refund_id, f"登记详情缺少单号: {ops[0]}"
 
-        op_types = {o["type"] for o in ops}
-        assert op_types & {"submit_return_request", "create_ticket"}, (
-            f"写操作类型不对: {op_types}"
+        # ---------- B. 不变量：声称已办 ⇒ 必须真办 ----------
+        consume_write_ops()
+        answer = agent.handle(
+            "我是张伟，用户ID是 U10001。订单 SO20260909001 的耳机右耳没声音，我要退货。",
+            {"history": []},
         )
+        ops2 = consume_write_ops()
 
-        # 校验登记的详情里有可追溯的单号
-        detail = ops[0]["detail"]
-        assert detail.get("refund_id") or detail.get("ticket_id"), f"写操作详情缺少单号: {detail}"
-        return f"{ops[0]['type']} → {detail.get('refund_id') or detail.get('ticket_id')}"
+        # 三种结果都算通过：
+        #   ① 真办了（ops2 非空）
+        #   ② 没办，也没声称办 —— 正常行为（例如先向用户索取凭证）
+        #   ③ 没办却声称办了，但兜底已经把它改写成「并未成功提交」
+        # 只有一种算失败：声称办了、没真办、**且兜底没拦下**。
+        #
+        # 注意这里必须判断"兜底是否已触发"：兜底的实现是在原文**前面加上**
+        # 一段「并未成功提交」的说明、**再附上原文**，所以原文里那句虚假声明
+        # 仍然在 answer 里 —— 只按正则找声称、不看兜底有没有生效，会误判。
+        guard_fired = "并未成功提交" in answer
+        claims_done = any(re.search(p, answer) for p in agent._CLAIM_PATTERNS)
+
+        if claims_done and not guard_fired:
+            assert ops2, (
+                "★ 声称已办理、却没有写操作、兜底也没拦下 —— 这才是真问题:\n"
+                f"{answer[:200]}"
+            )
+
+        if guard_fired:
+            acted = "编造被兜底拦下（正确）"
+        elif ops2:
+            acted = "已办理"
+        else:
+            acted = "未办理（允许，模型可能先索取凭证）"
+        return f"登记链路 OK（{refund_id}）；Agent {acted}"
 
     def test_15_boundary_inputs(self):
         """边界输入不应让系统崩掉"""
@@ -465,7 +521,7 @@ class AfterSalesTester:
             ("11 订单查询",                   self.test_11_order_query),
             ("12 物流查询（JOIN）",           self.test_12_logistics_query),
             ("13 多轮指代消解",               self.test_13_anaphora_resolution),
-            ("14 写操作闸门",                 self.test_14_write_gate_and_resume),
+            ("14 写操作登记链路",             self.test_14_write_ops_registration),
             ("15 边界输入",                   self.test_15_boundary_inputs),
         ]
 
