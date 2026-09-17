@@ -1467,7 +1467,16 @@ async function sendMessage() {
                         receivedFinal = true;
                     }
                 } catch (e) {
-                    console.warn('SSE parse error:', e, jsonStr);
+                    // 这里原来只 console.warn —— 事件处理过程中抛的任何异常都会被静默吞掉，
+                    // 用户看到的是"进度条消失了、既没有答复也没有报错"，无从排查。
+                    // 现在把异常暴露到界面上：宁可显示一条错误，也不要静默失败。
+                    console.error('处理 SSE 事件失败:', e, jsonStr?.slice(0, 200));
+                    removeElement(progressEl);
+                    appendBotMessage(
+                        `**处理服务端事件时出错**：${e && e.message ? e.message : e}\n\n` +
+                        `（事件类型：${(() => { try { return JSON.parse(jsonStr).type; } catch { return '解析失败'; } })()}）`
+                    );
+                    receivedFinal = true;
                 }
             }
         }
@@ -1525,7 +1534,6 @@ function handleSSEEvent(event, progressEl, steps) {
         showIntervention(event);
 
     } else if (type === 'final') {
-        removeElement(progressEl);
         const result = event.result || {};
         const answer = result.result || '未获取到答案';
         const score = result.quality_score;
@@ -1534,7 +1542,12 @@ function handleSSEEvent(event, progressEl, steps) {
         const plan = result.plan || null;
         const backendSources = result.sources || [];
         const retrievalStats = result.retrieval_stats || {};
+
+        // 注意顺序：**先渲染，再移除进度条**。
+        // 原来反着写（先 removeElement 再 appendBotMessage），一旦渲染抛异常，
+        // 用户就会看到"进度条消失了、但什么答复都没有" —— 无处排查。
         appendBotMessage(answer, score, mode, agentResults, steps, plan, backendSources, retrievalStats);
+        removeElement(progressEl);
 
     } else if (type === 'error') {
         removeElement(progressEl);
@@ -1571,6 +1584,14 @@ function appendUserMessage(text, files) {
 }
 
 function appendBotMessage(text, score, mode, agentResults, traceSteps, plan, backendSources, retrievalStats) {
+    // 兜底：后端偶尔会返回非字符串（例如 result 字段是对象），
+    // 而下面会直接调用 text.match(...) —— 那会抛 TypeError。
+    // 出错时抛异常本身不算最糟，糟的是被上层静默吞掉、用户什么都看不到。
+    if (typeof text !== 'string') {
+        console.warn('appendBotMessage 收到的 text 不是字符串:', typeof text, text);
+        text = text == null ? '（后端未返回内容）' : String(text);
+    }
+
     const el = document.createElement('div');
     el.className = 'message bot';
 
