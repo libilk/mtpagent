@@ -2112,4 +2112,127 @@ grep -c "register_tool" agents/customer_service_agent/agent.py    # ← 陷阱�
 - 为什么我第一轮会漏报 2 处？这暴露了"报数字"这件事的什么风险？
 - 如果这个项目要长期维护，怎么让这类数字**不可能写错**？
 
+---
+
+## 附记 · 英文术语的中文标注（2026-09-19）
+
+> 不是新阶段，是把「代码要方便人类阅读」这条约定**落到一个具体问题上的第一次尝试** ——
+> 起因是读代码读不懂。
+
+### 这处改动做了什么
+
+只改一个文件：[langgraph_orchestrator/enhanced_graph.py](langgraph_orchestrator/enhanced_graph.py)
+（241 → 301 行，**新增 60 行全部是注释/文档字符串，可执行代码一行没动**）。
+
+起因是用户贴了 `_route_after_duplicate` 那段，说："有的我能读懂 duplicate_detection，有的我理解不了。"
+
+动手前先定了两条规则（会问清楚再动手，是因为全项目 85 个 py 文件、约 2.5 万行，一次铺开没法判断效果）：
+
+| 规则 | 取值 | 为什么 |
+|---|---|---|
+| 范围 | **先只改这一个文件** | 效果不好就换方式（比如改成独立术语表），代价可控 |
+| 密度 | **同一术语在本文件首次出现处标注一次** | 每处都标会让注释把代码淹掉；只标一次，读到首次出现就拿到了 |
+
+标注的术语（**每一个都去源码核过**，不是照字面猜的）：
+
+| 术语 | 标注 | 出处 |
+|---|---|---|
+| critic | 评审 —— 检查某 Agent 的输出**能不能接上后续任务** | [critic.py:41](langgraph_orchestrator/critic.py#L41) 找的是下游任务，不是给输出打分 |
+| aggregator | 聚合器 —— 汇总多个 Agent 的结果 | [nodes.py](langgraph_orchestrator/nodes.py) |
+| evaluator | 评估器 —— 最终质量把关，不过关打回重试 | [router.py:174](langgraph_orchestrator/router.py#L174) 的 `check_quality` |
+| fan_out | 扇出 —— 靠 `Send` 列表一次性并发多个分支 | [router.py:65](langgraph_orchestrator/router.py#L65) |
+| wave_scheduler | 波次调度 —— 每轮只发"依赖已全部完成"的那批 | [router.py:120](langgraph_orchestrator/router.py#L120) |
+| checkpointer | 检查点 —— 每步存 state 快照，人工介入/断点续传全靠它 | [enhanced_graph.py:277](langgraph_orchestrator/enhanced_graph.py#L277) |
+| interrupt_before | 执行前中断 —— 走到该节点前先停下，等人工输入再续跑 | [enhanced_graph.py:288](langgraph_orchestrator/enhanced_graph.py#L288) |
+
+另外补了两块"读图最容易卡住"的机制说明：
+
+1. **条件边的契约** —— 函数返回的字符串要去映射表里查，所以两者必须一致（没有类型检查兜底）。
+2. **开关组合 → 走哪条路径** —— `enable_parameter_validation` / `enable_critic` 会改变连边方式，
+   `critic` 和 `duplicate_detection` 谁在前会**随开关翻转**。
+   原代码只有零散的边，看不出这个规律；见 [enhanced_graph.py:217-222](langgraph_orchestrator/enhanced_graph.py#L217-L222)。
+
+**怎么证明"只动了注释"** —— 口说无凭，用 AST 剥掉注释和文档字符串后逐节点比对：
+
+```bash
+python - <<'EOF'
+import ast, subprocess
+old = subprocess.run(['git','show','HEAD:nlp/langgraph_orchestrator/enhanced_graph.py'],
+                     capture_output=True, text=True, encoding='utf-8').stdout
+new = open('nlp/langgraph_orchestrator/enhanced_graph.py', encoding='utf-8').read()
+def strip(src):
+    t = ast.parse(src)
+    for n in ast.walk(t):
+        if isinstance(n, (ast.Module, ast.FunctionDef, ast.ClassDef)) and n.body:
+            if isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant):
+                n.body = n.body[1:]
+    return ast.dump(t)
+print(strip(old) == strip(new))
+EOF
+# → True：逻辑完全一致
+```
+
+### 1. 思路
+
+关键判断是：**"读不懂"和"缺注释"不是一回事。**
+
+用户说的"有的读不懂"其实分三类，只有前两类该用标注解决：
+
+| 类型 | 例子 | 处理 |
+|---|---|---|
+| ① 术语不认识 | evaluator / critic / fan_out | 加（中文解释）—— 本次做的 |
+| ② 机制不了解 | 条件边为什么返回字符串、为什么要 checkpointer | 加解释性注释 —— 本次做的 |
+| ③ **代码本身写得有问题** | 下面那个 `validation_target` | **注释救不了，只能改代码** |
+
+第 ③ 类是这次顺手挖出来的，值得单独记：
+
+`_route_retry_target` 读的是 `state["validation_target"]`，但全项目**没有任何地方写入过这个字段**
+（真正在写的是 [clarification.py](langgraph_orchestrator/clarification.py) 的 `retry_target_task`）：
+
+```bash
+grep -rn "validation_target" nlp --include=*.py
+# enhanced_graph.py:206   读（本处）
+# enhanced_entry.py:117   初始化成 None
+# —— 没有第三处
+```
+
+也就是说，"字段缺了就重跑那个上游 Agent"实际退化成**永远重跑 `agent_ids[0]`**。
+
+**这次没有改它**（本次任务只碰注释），只在代码里如实写了一行说明，避免读者把它当正常逻辑学进去。
+→ 已记进下面「已知的坑」的待办。
+
+### 2. 为什么这么改
+
+1. **注释写错比不写更糟。** 所以每个术语都先去源码核对。
+   最典型的例子是 `critic`：照字面猜是"给输出打分"，实际是**校验任务衔接是否合理** ——
+   猜错了写进去，读者会带着一个错误模型继续往下读。
+2. **不动逻辑。** 这是学习载体，改动越小越容易和已有笔记对上；`git diff` 应当**只出现注释行**。
+3. **先小范围验证。** 一个文件改完看效果，再决定要不要铺开到 `router.py` / `clarification.py`。
+
+### 3. 人类怎么学这部分
+
+**该盯哪里：**
+
+- [enhanced_graph.py:217-222](langgraph_orchestrator/enhanced_graph.py#L217-L222) —— 那段"开关组合 → 执行路径"的对照，
+  是这个文件里最值得拿走的东西。它解释了一件反直觉的事：**同一个文件，跑起来是两张不同的图。**
+- 对照 [enhanced_state.py](langgraph_orchestrator/enhanced_state.py) 一起读：
+  state 里 40 多个字段，**每个字段是谁写的、谁读的**，是读 LangGraph 代码的主线。
+- 复现方式：把 `enable_parameter_validation` / `enable_critic` 四种组合都传一遍，
+  打印 `compiled.get_graph().edges`，你会看到边在变。
+
+**背后的通用概念：**
+
+| 概念 | 一句话解释 | 为什么重要 |
+|---|---|---|
+| **声明式 vs 命令式** | 声明式只说"谁连谁"，命令式说"先做 A 再做 B" | 读图代码要**反过来推**运行时顺序，这正是最容易卡住的地方 |
+| **条件边的契约** | 返回值和映射表的键是一份隐式契约 | 没有类型检查兜底，改一边忘一边 = 运行时才炸 |
+| **"读不懂"要分类** | 术语问题 / 机制问题 / 代码问题 | 前两类加注释，第三类加注释只会把 bug 藏起来 |
+| **注释密度是一种设计** | 同一术语标一次 vs 次次都标 | 标注过量会稀释成噪音，读者反而不看了 |
+
+**看完应该能回答：**
+
+- `enable_critic=True` 而 `enable_parameter_validation=False` 时，一个 Agent 执行完后依次经过哪些节点？
+- `duplicate_detection` 判定重复后为什么直接跳去 `evaluator`，而不是走 `aggregator`？
+- 如果把 `interrupt_before` 那行删掉，"人工介入"会以什么形式坏掉？
+
 <!-- 下一个阶段从这里往下追加 -->

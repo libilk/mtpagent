@@ -433,6 +433,7 @@ Agent 答复里出现了可解释的依据：「该商品属于「3C数码产品
 | 4 | **MCP 其实是关的** | [sqlite_mcp_service.py](core/sqlite_mcp_service.py) 的 `skip_mcp` 默认 `True`（npm 包已下架），实际走 sqlite3 降级 | README 说的「MCP 自主探索表结构」并不生效，别按那个预期调 |
 | 5 | **角色过滤没接线** | [enhanced_entry.py:705](langgraph_orchestrator/enhanced_entry.py#L705) 把 `doc_filter` 硬编码传 `None` | Agent 端有权限过滤逻辑，但运行时不会触发 |
 | 6 | **过期 agent id** | `router.route_simple()`（已删）及 `planner._create_simple_plan()` 里的 `customer_agent` / `code_agent` | 前者是死代码从未执行；**后者在回退路径上，会指向不存在的 Agent** —— 已修 |
+| 7 | **`validation_target` 是空字段** | [enhanced_graph.py:206](langgraph_orchestrator/enhanced_graph.py#L206) 读它，但**全项目无人写入**（真正在写的是 [clarification.py](langgraph_orchestrator/clarification.py) 的 `retry_target_task`） | 参数校验失败要重试时，**恒定回跑 `agent_ids[0]`**，而不是真正缺字段的那个上游 Agent —— 未修，仅在代码里如实注释 |
 
 ---
 
@@ -443,6 +444,9 @@ Agent 答复里出现了可解释的依据：「该商品属于「3C数码产品
 3. **新文件头写用途说明** —— 一小段，说清这个模块负责什么
 4. **不用过度抽象** —— 函数职责单一、命名说人话
 5. **每次修改后 git 推送** —— 每完成一个可验证的阶段就 commit + push，不要攒着
+6. **英文术语在首次出现处标注中文**（2026-09-19 新增）—— 形式：`critic（评审）= ...`，
+   **同一文件只标一次**（次次都标会把代码淹掉）；标注前**必须去源码核过语义** ——
+   `critic` 看着像"给输出打分"，实际是"校验任务衔接"，猜错的注释比没有注释更糟
 
 ---
 
