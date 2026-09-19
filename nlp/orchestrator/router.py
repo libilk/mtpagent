@@ -3,7 +3,22 @@
 Agent路由器
 ===========
 
-使用向量相似度+LLM精排选择最合适的Agent
+router（路由器）= 简单问题：从一堆 Agent 里挑**一个**最合适的
+（复杂问题拆成多个任务的活儿在 planner.py，别在这找）。
+
+⚠ 本文件与 langgraph_orchestrator/router.py 是两个不同的 router，极易混淆：
+   那个文件是"条件边函数"集合（route_by_complexity / route_to_agent …，图上决定
+   下一步走谁，没有类）；本文件是一个类 AgentRouter（用检索的方式选出 Agent）。
+   同名不同物，看 import 路径区分。
+
+选法是两级，和 RAG（检索增强生成）的套路一致：
+  第 1 级 召回（recall）：embedding（向量化）后算余弦相似度，从全量 Agent 里捞出
+          top-3 候选。便宜，但只看语义相近 —— 描述写得不像的 Agent 会被漏掉
+  第 2 级 精排（rerank）：让 LLM 读完候选的能力描述做最终选择。贵，但能纠召回级的漏
+两级之间还有一道前置拦截：闲聊/问候在向量召回**之前**就被短路给 chat_agent（省一次 embedding）。
+
+历史包袱：route_simple() 已被删除（全项目无调用方的死代码），旧文档/旧笔记里出现
+这个名字时，指的是已经不存在的代码。
 """
 
 import json
@@ -22,15 +37,21 @@ class AgentRouter:
 
         Args:
             llm: LLM实例（Qwen-Max）
-            embedder: 向量嵌入器
+            embedder: 向量化模型（把文本变成一串数字，语义相近的文本向量也相近）
         """
         self.llm = llm
         self.embedder = embedder
+        # 向量索引缓存 {agent_id: vector}；惰性填充 —— 没索引的会在 _vector_recall 里
+        # 现场算并回填，所以漏调 index_agents() 也不会崩，只是首次路由会慢一点
         self.agent_vectors = {}  # {agent_id: vector}
 
     def index_agents(self, agents: List[Dict]):
         """
         为Agent建立向量索引
+
+        索引文本 = description + capabilities —— 这两段是"这个 Agent 能干什么"的语义
+        摘要，也就是召回时真正被检索的语料。言下之意：路由选错时第一个该看的是这两段
+        文案写得清不清楚，而不是去调相似度算法。
 
         Args:
             agents: Agent列表
@@ -58,11 +79,17 @@ class AgentRouter:
         1. 向量相似度召回 top-3 候选
         2. LLM 一次调用完成精排+验证（输出选择、置信度、理由）
 
+        三级短路早退，越早越便宜：只有 1 个 Agent → 前置拦截命中 → 召回后只剩 1 个候选，
+        都直接 return，不花 LLM 调用。所以"这次怎么没看到 LLM 日志"往往是短路生效，不是出错。
+
+        注意 enable_auto_correct 参数在函数体内**从未被读取**：自动纠正已融进
+        _llm_select 的提示词（让 LLM 可以从候选之外重选），这个参数只剩签名兼容作用。
+
         Args:
-            task: 任务信息
+            task: 任务信息（只需要 description 字段，其余字段本文件不用）
             agents: 可用的Agent列表
-            use_llm_rerank: 是否使用LLM精排
-            enable_auto_correct: 是否启用自动纠正（保留参数兼容性，已融入精排）
+            use_llm_rerank: 是否使用LLM精排（False 时退化为"直接取相似度最高的候选"）
+            enable_auto_correct: 已失效，见上
 
         Returns:
             选中的Agent ID
@@ -75,6 +102,8 @@ class AgentRouter:
             return agents[0]['id']
 
         # ===== 前置拦截：闲聊/问候/极短查询直接路由到 chat_agent =====
+        # 拦在向量召回之前，是因为"你好"这类 query 语义稀薄，向量可能莫名其妙地
+        # 贴到某个业务 Agent 上；与其让精排去纠，不如一开始就不给它出场机会（还省一次 embedding）
         task_desc = task.get('description', '').strip()
         chat_agent_available = any(a['id'] == 'chat_agent' for a in agents)
         if chat_agent_available and self._is_chitchat(task_desc):
@@ -82,6 +111,8 @@ class AgentRouter:
             return "chat_agent"
 
         # 第一步：向量相似度召回top-3
+        # 取 3 是个折中：候选太少，召回阶段一旦漏了正确的 Agent 就再无补救机会；
+        # 候选太多，精排提示词变长、噪声变大（召回阶段本来就是宁滥勿缺）
         candidates = self._vector_recall(task, agents, top_k=3)
 
         # 如果只有一个候选，直接返回
@@ -89,6 +120,8 @@ class AgentRouter:
             return candidates[0][0]['id']
 
         # 第二步：LLM精排+验证（合并为一次调用）
+        # 精排（rerank）= 对召回结果重新排序/复选，把最合适的顶上来。这里把"排序"和
+        # "验证选中的合不合理"合并成一次 LLM 调用 —— 少一次往返，代价是两者绑在一起了
         if use_llm_rerank:
             selected_agent_id = self._llm_select(task, candidates, agents)
         else:
@@ -102,6 +135,10 @@ class AgentRouter:
     def _is_chitchat(query: str) -> bool:
         """
         判断是否为闲聊/问候/无实质内容的查询
+
+        纯规则、不问 LLM：这类问题在真实对话里占比不低，用关键词表拦掉最便宜也最稳。
+        两条判据是"或"的关系 —— 极短且不含技术词，或整句命中问候白名单；
+        所以它是**保守**的（宁可漏判闲聊，也不误伤真问题）。
 
         Args:
             query: 用户查询文本
@@ -138,13 +175,17 @@ class AgentRouter:
         """
         向量相似度召回
 
+        只做"粗筛"，不做决定 —— 所以它不排序给谁用，只负责把可能相关的捞齐。
+        返回的 similarity 是余弦相似度（比较两个向量方向有多接近，取值 0~1），
+        它会被写进精排提示词让 LLM 参考，但不作为最终判据。
+
         Args:
-            task: 任务信息
+            task: 任务信息（只取 description 当查询）
             agents: Agent列表
-            top_k: 召回数量
+            top_k: 取前 k 条（只保留得分最高的 k 个）
 
         Returns:
-            候选Agent列表（agent, similarity）
+            候选Agent列表 [(agent, similarity), ...]，已按相似度降序
         """
         # 任务描述向量化
         task_desc = task.get('description', '')
@@ -165,6 +206,8 @@ class AgentRouter:
                 agent_vector = self.agent_vectors[agent_id]
 
             # 计算余弦相似度
+            # 就地在循环内 import：Python 会缓存已加载的模块，重复 import 只是查一次
+            # 字典，没有实际开销 —— 看着别扭但不是 bug，别顺手"优化"
             from llm.embedder import cosine_similarity
             sim = cosine_similarity(task_vector, agent_vector)
             similarities.append((agent, sim))
@@ -188,6 +231,13 @@ class AgentRouter:
 
         将原来的 _llm_rerank() + IntentValidator.validate_routing()
         合并为一次 LLM 调用，同时完成选择和验证。
+
+        提示词里特意把"没进候选的 Agent"也列了出来，这是**召回可能漏**的补救：
+        向量只认语义相近，字面不像但职责对的 Agent 会被漏掉，所以给 LLM 一次从候选外
+        重选的机会（日志里那句"精排修正"就是命中了这条路径）。代价是提示词变长。
+
+        LLM 返回的 confidence 和 reason 只用于写日志，**不参与任何决策** ——
+        别误以为低置信度会触发复核（没有这个机制）。
 
         Args:
             task: 任务信息
@@ -247,6 +297,7 @@ class AgentRouter:
             from pydantic import BaseModel, Field
             from llm.langchain_parser import parse_llm_output
 
+            # 模型类定义在函数内：它只为这一次解析服务，放模块级会白白占一个命名空间
             class RouteResult(BaseModel):
                 selected_agent_id: str = Field(description="选择的Agent ID")
                 confidence: str = Field(default="medium", description="置信度")
@@ -283,6 +334,9 @@ class AgentRouter:
     ) -> str:
         """
         LLM精排
+
+        注意：本方法目前**全项目无调用方** —— 它的活儿已被 _llm_select 并进去
+        （后者同时做选择与验证）。保留它是历史遗留，读路由流程时不要把它当成现役的一步。
 
         Args:
             task: 任务信息

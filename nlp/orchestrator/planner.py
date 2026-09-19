@@ -3,7 +3,23 @@
 任务规划器
 ==========
 
-使用LLM生成任务DAG
+planner（规划器）= 复杂问题拆成"带依赖的任务列表"的那个角色（简单问题不走这里，走 router）。
+本文件只负责"生成 + 校验"计划，不执行任务 —— 执行由波次调度按计划一个个发出去。
+
+产出的是 DAG（有向无环图：有依赖顺序、且不能绕回自己的任务图）。"无环"不是修辞：
+_check_circular_dependency 会真的拒绝带环的计划。
+
+每个 task 是一份**跨文件契约**，后面有三个环节按它办事，字段含义如下：
+  task_id            —— 任务唯一标识；depends_on 里引用的就是它
+  agent_id           —— 谁来干，必须等于注册中心里的 agent_id（写错会静默失败）
+  depends_on         —— 这任务的依赖，它就是 DAG 的边；波次调度靠它算"谁现在能跑"
+  input_schema       —— 入参契约：required_fields 声明"我需要哪些字段"
+  output_schema      —— 出参契约：required_fields 声明"我承诺产出哪些字段"
+  parameter_mapping  —— 某字段从哪个上游任务取，如 {"order_detail": "task_1.order_detail"}
+
+两个 schema 和 mapping 的下游读者是 parameter_validator（参数验证器：只查字段、
+不调 LLM，很便宜）和 parameter_aligner（参数对齐器：按 mapping 从上游结果里捞出入参）。
+所以字段名对不上不是"格式小问题"，而是流程直接卡住 —— 提示词里才反复强调要声明它们。
 """
 
 import json
@@ -16,7 +32,13 @@ logger = logging.getLogger(__name__)
 
 
 class TaskPlan(BaseModel):
-    """任务计划模型"""
+    """任务计划模型
+
+    Pydantic（数据校验库）= 用类型标注定义数据结构、运行时自动校验。
+    这里的作用是给 LLM 的自由文本套一层**结构契约**：解析时字段缺失/类型不对会被挡下，
+    而不是等到流程跑到一半才发现 plan 长得不对。注意 tasks 元素仍是裸 Dict ——
+    每个任务内部字段的校验交给了 _validate_plan，不在这里。
+    """
     reasoning: str = Field(description="规划思路")
     tasks: List[Dict[str, Any]] = Field(description="任务列表")
 
@@ -37,9 +59,13 @@ class TaskPlanner:
         """
         生成任务DAG
 
+        三个动作是串起来的：拼提示词 → 调 LLM → 解析并校验。任何一步出错都走同一个
+        出口：退化成单任务计划（宁可简单串行，也不让复杂路径直接崩）。
+
         Args:
             query: 用户查询
-            available_agents: 可用的Agent列表
+            available_agents: 可用的Agent列表（含 id/name/description/capabilities，
+                              既拼进提示词给 LLM 看，也用来校验 LLM 吐出的 agent_id 是否存在）
 
         Returns:
             任务DAG
@@ -66,11 +92,17 @@ class TaskPlanner:
 
         except Exception as e:
             logger.error(f"任务规划失败: {e}")
-            # 返回简单的单任务计划
+            # 返回简单的单任务计划（回退路径：LLM 挂了也要能答，代价是丢失多步拆解能力）
             return self._create_simple_plan(query, available_agents)
 
     def _build_prompt(self, query: str, available_agents: List[Dict]) -> str:
-        """构建规划提示词"""
+        """构建规划提示词
+
+        prompt（提示词）= 喂给 LLM 的指令文本。方法体就是把这个字符串拼出来，
+        注意里面那两段 JSON 是**提示词的一部分**（给 LLM 看的示例，即 few-shot
+        少量示例），不是本文件要执行的数据 —— 读代码时容易在这一大片花括号里迷路。
+        示例的作用是让 LLM 照着格式抄，所以改格式约定时必须连示例一起改。
+        """
         agents_desc = "\n".join([
             f"- {agent['id']}: {agent['name']}\n"
             f"  描述: {agent['description']}\n"
@@ -177,7 +209,12 @@ class TaskPlanner:
         return prompt
 
     def _parse_plan(self, response: str) -> Dict:
-        """解析LLM响应（使用LangChain）"""
+        """解析LLM响应（使用LangChain）
+
+        fallback（降级兜底）参数给的是 None —— 表示"解析失败不兜底"，直接返回 None，
+        再由这里主动抛异常，把降级决策权交给上层 plan()。兜底策略写在哪一层是有讲究的：
+        放在这里就只能返回一个空计划，放在 plan() 才能退化成完整的单任务计划。
+        """
         plan = parse_llm_output(response, TaskPlan, fallback=None)
         if plan is None:
             logger.error("JSON解析失败")
@@ -186,7 +223,14 @@ class TaskPlanner:
         return plan.dict()
 
     def _validate_plan(self, plan: Dict, available_agents: List[Dict]):
-        """验证任务计划"""
+        """验证任务计划
+
+        注意它名字叫"验证"，实际是**就地修补**：先补全 LLM 漏掉的 schema 字段，
+        再剔除指向不存在任务的 parameter_mapping，最后才做检查。传入的 plan 会被改掉，
+        调用方拿到的是同一个对象（所以 plan() 里不需要接收返回值）。
+        校验口径刻意宽松：只查引用完整性（agent 在不在、依赖在不在、mapping 指的对不对），
+        不判断"这个任务拆分是否合理" —— 合理性交给 LLM 自己写在 reasoning 里。
+        """
         if "tasks" not in plan:
             raise ValueError("任务计划缺少tasks字段")
 
@@ -237,8 +281,14 @@ class TaskPlanner:
         self._check_circular_dependency(tasks)
 
     def _check_circular_dependency(self, tasks: List[Dict]):
-        """检查循环依赖"""
-        # 构建依赖图
+        """检查循环依赖
+
+        带环的 DAG 会让波次调度永远等不到"依赖全满足"的那一刻，流程无声地卡死 ——
+        所以在这里直接拒绝，而不是等运行期出问题。
+        算法是 DFS（深度优先搜索：一条路走到底再回溯）；rec_stack 记"当前这条路径上
+        有哪些节点"，撞上它才说明有环 —— 撞上 visited 只说明换个入口走过，不算环。
+        """
+        # 构建依赖图（邻接表：task_id → 它依赖谁）
         graph = {task["task_id"]: task.get("depends_on", []) for task in tasks}
 
         # DFS检测环
@@ -267,6 +317,7 @@ class TaskPlanner:
     def _create_simple_plan(self, query: str, available_agents: List[Dict]) -> Dict:
         """创建简单的单任务计划（回退方案）
 
+        调用时机：仅在 plan() 抛异常时进来，正常路径不会走到这里。
         注意这里的关键词必须能对应上**真实注册的** agent_id，
         否则路由会指向一个不存在的 Agent，静默失败。
         （原代码用的是 code_agent / customer_agent，两个都已经不存在了。）
@@ -299,6 +350,11 @@ class TaskPlanner:
     def should_plan(self, query: str) -> bool:
         """
         判断是否需要任务规划（使用LLM智能判断）
+
+        注意：本方法目前**全项目无调用方**。现役的复杂度判断是
+        langgraph_orchestrator/nodes.py 的 complexity_classifier 节点自己调 LLM 做的
+        （两者提示词口径还不一样：那个问"是否要多个不同类型 Agent 协作"）。
+        这是历史遗留，读的时候不要把它当成入口。
 
         Args:
             query: 用户查询
@@ -337,6 +393,10 @@ class TaskPlanner:
     def _should_plan_heuristic(self, query: str) -> bool:
         """
         启发式规则判断（作为LLM判断的降级方案）
+
+        heuristic（启发式规则）= 不用 LLM，直接拿关键词表、字符串长度这类硬规则下判断：
+        便宜、稳定、可预测，但只认字面（"这个和那个哪个好"里的"和"会被误判成复杂）。
+        它是上面 should_plan() 的降级分支，而 should_plan() 本身已无调用方。
 
         Args:
             query: 用户查询
