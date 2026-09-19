@@ -83,7 +83,7 @@ START → complexity_classifier ─┬─ simple  → router ──→ 单个 Ag
 |---|---|---|
 | `knowledge_agent` | 与售后无关的通用知识、概念解释 | 14 |
 | `database_agent` | 订单/物流/退款/会员数据查询（Text-to-SQL） | 4 |
-| `customer_service_agent` | 售后政策问答 + 退换货办理 + 投诉工单 | 11 |
+| `customer_service_agent` | 售后政策问答 + 退换货办理 + 投诉工单 | 12 |
 | `vqa_agent` | 破损商品照、快递单、发票截图识别（三种模式，非工具式） | — |
 | `chat_agent` | 闲聊兜底（无工具） | — |
 
@@ -140,7 +140,7 @@ nlp/
 ├── database/                       ecommerce.db（脚本生成，不入库）
 ├── tools/scripts/                  建库、建向量库、增量更新等运维脚本
 ├── frontend/                       单文件 HTML（原生 JS + EventSource）
-└── tests/                          回归测试套件（15 条）
+└── tests/                          回归测试套件（16 条）
 ```
 
 ---
@@ -151,10 +151,10 @@ nlp/
 python tests/test_after_sales.py
 ```
 
-15 条用例，分两段跑：
+16 条用例，分两段跑：
 
 - **第一段（不调 LLM，秒级）** 数据层与纯逻辑：外键约束、退货三重校验、
-  防幻觉兜底、知识库白名单
+  防幻觉兜底、知识图谱推导、知识库白名单
 - **第二段（调 LLM，约 3 分钟）** 端到端：路由分派、政策问答、订单/物流查询、
   多轮指代消解、写操作登记链路、边界输入
 
@@ -168,7 +168,7 @@ python tests/test_after_sales.py
 
 | 文档 | 内容 |
 |---|---|
-| [study.md](study.md) | **路线图** —— 7 个阶段的计划、里程碑、进度，以及待评估项与已知局限 |
+| [study.md](study.md) | **路线图** —— 9 个阶段（0~8）的计划、里程碑、进度，以及待评估项与已知局限 |
 | [idea.md](idea.md) | **学习笔记** —— 每一处改动「怎么想的 / 为什么这么改 / 人类该从中学到什么」 |
 
 改造过程中挖出并修复的几个真问题（都记在 idea.md 里）：
