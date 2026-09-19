@@ -3,7 +3,14 @@
 持久化缓存
 ==========
 
-基于Redis的持久化缓存，防止重启丢失
+基于Redis的持久化缓存，防止重启丢失。
+
+【位置】四个 cache 文件里唯一的"继承者"：继承 unified_cache.UnifiedCache，
+只重写 get/ set/ clear 三个方法，在父类的内存字典外再加一层 Redis。
+选它还是选父类由 rag_core/cache_manager.py 决定 —— 有 Redis 用本类（跨重启保留），
+没有就用父类的纯内存类，行为一致、只是重启后要重算。
+
+【Redis 可选】redis_client=None 时本类退化成父类，只是多打一条 warning（见 __init__）。
 """
 
 import json
@@ -51,7 +58,7 @@ class PersistentCache(UnifiedCache):
         Returns:
             缓存值
         """
-        # 先查内存
+        # 先查内存（内存命中率远高于 Redis，先问它最省事）
         cached = super().get(key)
         if cached is not None:
             return cached
@@ -63,8 +70,10 @@ class PersistentCache(UnifiedCache):
                 redis_value = self.redis.get(f"{self.cache_type}:{cache_key}")
 
                 if redis_value:
+                    # 反直觉点：JSON 存进去再取出来，tuple 会变 list、int 键会变 str。
+                    # 所以"Redis 命中"返回的值，类型可能和当初内存里算出来的不完全一样。
                     value = json.loads(redis_value)
-                    # 回填内存缓存
+                    # 回填内存缓存（让下次命中不必再走网络）
                     super().set(key, value)
                     logger.debug(f"[{self.cache_type}] Redis命中，回填内存")
                     return value
@@ -105,6 +114,8 @@ class PersistentCache(UnifiedCache):
         if self.redis_enabled:
             try:
                 # 删除所有该类型的缓存
+                # 反直觉点：Redis 的 keys(pattern) 会遍历整个库并阻塞其他请求，
+                # 生产环境大库不宜这么清缓存；这里数据量小才可接受。
                 pattern = f"{self.cache_type}:*"
                 keys = self.redis.keys(pattern)
                 if keys:

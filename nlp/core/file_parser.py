@@ -13,6 +13,16 @@
 - .xlsx / .xls：pandas 读取，转自然语言
 - .json：直接读取
 
+两类路径，读的时候别混：
+1. 纯文本类（txt/md/json）直接读；结构化文档（pdf/docx/csv/xlsx）交给第三方库解析成文本。
+2. OCR（光学字符识别：从图片里认出文字）**只服务 PDF**，且只是降级手段：
+   扫描版 PDF 没有文字层，得把页渲染成图片再交给 Tesseract（OCR 引擎，外部程序，需另装）。
+   **本模块不解析图片文件**（.png/.jpg 不在支持列表里）—— 图片输入是 vqa_agent 那条路，
+   不经过这里。
+
+pdfplumber / python-docx / pandas 都是可选依赖：缺失时对应格式返回空字符串并记 error 日志，
+不向上抛异常。所以"解析出空文本"有两种可能 —— 文件本身是空的，或者依赖没装。
+
 本模块从 init_vector_db.py 中提取而来，统一前后端的文件解析逻辑。
 """
 
@@ -65,6 +75,9 @@ def has_garbled_text(text: str) -> bool:
 def is_scanned_pdf(file_path: str, sample_pages: int = 3) -> bool:
     """
     文件级检测：判断PDF是扫描版还是文字版
+
+    为什么采样而不是逐页全查：大 PDF 逐页解析很慢，而"整份是扫描件还是文字版"
+    通常前几页就能看出来。代价是极端情况（如前面几页恰好正常、后面全是扫描页）会判错。
 
     检测策略（采样前N页）：
     1. 文本层检测：提取文本，长度 < 50 字符视为无文本
@@ -132,6 +145,10 @@ def _ocr_page(page, page_num: int, pytesseract) -> str:
     """
     对单个PDF页面执行OCR
 
+    先把页渲染成 300dpi 的图片，再交给 Tesseract 识别（分辨率太低中文识别率会明显掉）。
+    异常一律吞掉返回空串 —— 包括"引擎没装"这类环境问题，所以调用方分不清
+    "这页真没字"和"OCR 根本用不了"。
+
     Args:
         page: pdfplumber page对象
         page_num: 页码
@@ -192,8 +209,11 @@ def table_to_natural_language(df, source_name: str = "表格") -> List[str]:
     策略：每行转换为一句话，包含所有列的信息
     例如：产品A的价格是100元，销量是50件，库存是200件
 
+    为什么要转：喂给 LLM 和检索时，"列名是X"这种完整句子比制表符分隔的原始表格
+    更容易被理解、也更容易按语义召回；代价是文本膨胀（列名每行重复一次）。
+
     Args:
-        df: pandas DataFrame
+        df: pandas DataFrame（pandas 的二维表格对象，有行索引和列名）
         source_name: 数据来源名称
 
     Returns:
@@ -231,6 +251,14 @@ def extract_pdf_with_ocr(file_path: str) -> Tuple[str, str]:
     2. 扫描版 → 全部页面统一OCR（保证一致性）
     3. 文字版 → 直接提取文本 + 页级OCR回退（兼顾性能和可靠性）
     4. 表格统一用 pdfplumber 提取，支持跨页合并
+
+    两条分支的取舍：扫描版整本走 OCR 是为了输出口径一致（避免一半文字层一半 OCR）；
+    文字版默认不 OCR 是为了省时间（OCR 一页要几百毫秒起），只在单页文本缺失或乱码时补。
+    has_ocr 为 False（Python 包 pytesseract 都没装）时这两条 OCR 路径全跳过。
+    但要注意 has_ocr 只看 `import pytesseract` 成不成功，**不检查 Tesseract 程序本身在不在** ——
+    本项目当前环境正是"包在、程序不在"：has_ocr=True，于是每页都真去调 OCR、每次都在
+    _ocr_page 里抛 TesseractNotFoundError 被吞掉返回空串，白等一遍仍拿不到文本。
+    所以扫描版 PDF 解析出空文本时，先分清是"OCR 没跑"还是"跑了但引擎缺失"。
 
     Args:
         file_path: PDF文件路径
@@ -374,6 +402,10 @@ def extract_docx(file_path: str) -> str:
     对于文本框内容会自动去重（Word 的 mc:AlternateContent 机制
     常导致同一文本框内容出现两份：Fallback + Choice）。
 
+    三段内容来源顺序即最终文本顺序，且不去重跨来源的重复 —— 表格里和段落里出现同一句话，
+    两处都会保留。文本框那段是按"整块文本"去重的，若两个真正不同的文本框恰好内容一字不差，
+    也会被并成一份（实际几乎不会遇到，知道边界在哪即可）。
+
     Args:
         file_path: 文件路径
 
@@ -444,10 +476,16 @@ def _smart_sheet_summary(df, sheet_name: str, sample_rows: int = 5) -> str:
     """
     生成单个 Sheet 的智能摘要（用于大表场景）
 
+    Sheet（工作表）= Excel 文件里的一张表；一个 .xlsx 可以有多张。
+    摘要而非全量，是为了在"大表塞不进 token 预算"时至少让 LLM 知道表的结构。
+
     包含：
     1. Sheet 概述（名称、行列数、列名）
     2. 前 N 行样例数据
     3. 数值列的基础统计（min/max/mean）
+
+    列名里的 "Unnamed:" 是 pandas 对没有表头的列自动起的名字（Excel 常有合并单元格
+    导致表头识别不出来），这里把它们改写成「列N」再展示，避免 LLM 看到一串无意义的键名。
 
     Args:
         df: DataFrame
@@ -605,6 +643,12 @@ def parse_file(file_path: str, max_chars: int = 0) -> dict:
 
     将各种格式的文件解析为纯文本。供 API 接口（用户上传）和向量数据库入库共用。
 
+    按扩展名分派（不是按 MIME type 探测）：所以文件后缀写错就走错分支。
+    失败统一用返回值表达（success=False + error），不抛异常 —— 调用方不必包 try。
+
+    max_chars 有两条不同的落地方式：PDF/DOCX 是先解析完再在末尾整体截断（truncated=True），
+    Excel/CSV 则是在各自函数内部直接降级成摘要（不截断）。同一个参数，行为并不一致。
+
     Args:
         file_path: 文件路径
         max_chars: 最大字符数限制（0=不限制）
@@ -626,10 +670,12 @@ def parse_file(file_path: str, max_chars: int = 0) -> dict:
     try:
         text = ""
 
+        # 纯文本类：不做任何加工，原样读出
         if ext in (".txt", ".md"):
             with open(file_path, "r", encoding="utf-8") as f:
                 text = f.read()
 
+        # PDF：走"文字层 + OCR 降级 + 跨页表格合并"那条重路径，正文与表格拼成一段
         elif ext == ".pdf":
             text_content, tables_content = extract_pdf_with_ocr(file_path)
             if text_content or tables_content:
@@ -637,11 +683,13 @@ def parse_file(file_path: str, max_chars: int = 0) -> dict:
             else:
                 return {"success": False, "error": "PDF 内容为空，无法提取有效文本"}
 
+        # Word：按"段落 / 表格 / 文本框"三处收集，注意 .doc（老二进制格式）实际会被 python-docx 拒掉
         elif ext in (".docx", ".doc"):
             text = extract_docx(file_path)
             if not text:
                 return {"success": False, "error": "Word 文档内容为空或解析失败"}
 
+        # CSV / Excel：带 max_chars 的智能分级（全量 → 超限降级为摘要），所以把参数透传下去
         elif ext == ".csv":
             text = extract_csv(file_path, max_chars=max_chars)
             if not text:
@@ -652,6 +700,7 @@ def parse_file(file_path: str, max_chars: int = 0) -> dict:
             if not text:
                 return {"success": False, "error": "Excel 文件内容为空或解析失败"}
 
+        # JSON：整体美化成缩进文本，不做字段裁剪 —— 深层嵌套会原样展开，可能很长
         elif ext == ".json":
             import json
             with open(file_path, "r", encoding="utf-8") as f:

@@ -16,9 +16,23 @@ Agent 实例在启动时注册一次、之后**被所有请求共享**。如果�
 而 `handle()` 是在节点函数里**同步**调用的，Agent 和节点处在同一个线程中。
 线程本地存储正好保证：每个请求各写入自己的副本，互不干扰。
 
+**为什么登记必须发生在「调用线程」，不能写在工具函数内部（项目真踩过的坑）：**
+
+LLM 一轮里同时调多个工具时，这些工具会被线程池（ThreadPoolExecutor）并发执行，
+跑在 worker 线程上。若把 `record_write_op` 写在工具实现（如 CRM）内部，记录就落在
+**worker 线程**的副本上 —— 节点线程读不到，信号直接丢失。更糟的是线程池的线程会被复用，
+残留记录可能被下一个恰好调度到该线程的请求读走，**跨用户串号**，比丢信号更难查。
+
+所以登记被上移到 Agent 的工具分发层（`customer_service_agent._record_write_operations`，
+在 `_execute_tool_calls` 里所有工具执行完之后），那里已经回到调用线程。
+通用教训：用线程本地 / contextvar 之前，先确认代码有没有开线程池 ——
+「同一次逻辑调用」不等于「同一个线程」。
+
 **用法：**
 
-    # 写入侧（Agent / CRM 在做真正改数据的操作时）
+    # 写入侧（Agent 在做真正改数据的操作时）
+    # 事实说明：上面这行示例原本写作"Agent / CRM"，但按上文那条坑，
+    # 登记点必须落在 Agent 的工具分发层，**不能**下沉到 CRM 工具内部。
     record_write_op("submit_return_request", {"order_id": "SO20260909001", ...})
 
     # 读取侧（编排层的节点，Agent 跑完之后）
@@ -31,7 +45,8 @@ Agent 实例在启动时注册一次、之后**被所有请求共享**。如果�
 import threading
 from typing import Any, Dict, List
 
-# 线程本地存储：每个线程一份，互不可见
+# 线程本地存储（threading.local）：每个线程一份副本，互不可见。
+# 副本按需创建 —— 线程首次访问 _local.ops 前它并不存在，所以两个函数都用 getattr 取而不是直接读。
 _local = threading.local()
 
 
@@ -67,5 +82,9 @@ def consume_write_ops() -> List[Dict[str, Any]]:
 
 
 def clear_write_ops() -> None:
-    """只清空不读取。异常路径上兜底用，防止脏数据影响后续请求。"""
+    """只清空不读取。异常路径上兜底用，防止脏数据影响后续请求。
+
+    实际调用点只有一个：nodes.py 里 Agent 抛异常的 except 分支。
+    那条路径上正常读取被跳过了，不补清一次，残留记录会误触下一个请求的审批闸门。
+    """
     _local.ops = []

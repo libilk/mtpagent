@@ -5,9 +5,14 @@ Memory系统
 
 对话历史管理，支持自动压缩。
 纯Python实现（不依赖 langchain.memory，兼容新版 LangChain）。
+**不要在 langchain 文档里找这套东西** —— 新版 LangChain 移除了 langchain.memory，
+本项目索性自己用字典+列表实现，接口名（ConversationMemory 等）只是沿用旧叫法。
 
 重要：MemoryStore 按 thread_id 隔离记忆实例，
       不同浏览器窗口/会话之间互不干扰。
+
+注意别和 LangGraph 的 MemorySaver（检查点）搞混：MemorySaver 存的是整张 state 快照，
+本项目这套存的是"用户和助手说过的人话"，两者都按 thread_id 分组，但用途不同。
 """
 
 import time
@@ -25,11 +30,17 @@ class ConversationMemory:
     - 存储最近的对话消息
     - 超过 max_messages 条后自动截断旧消息
     - 兼容 make_agent_node 中的 shared_memory 接口
+
+    反直觉点：截断只是"扔掉最旧的"，不做摘要、不提炼要点（摘要能力没实装）。
+    真正的压缩策略是**滑窗**：只保留最近 N 条。
     """
 
     def __init__(self, llm=None, max_token_limit: int = 2000, max_messages: int = 20):
         """
         初始化Memory
+
+        事实核对：前两个参数只是收下不用 —— 本类从不算 token。
+        真正生效的只有 max_messages（按条数截断）。
 
         Args:
             llm: LLM实例（预留，兼容旧接口）
@@ -100,6 +111,9 @@ class ConversationSummaryMemory(ConversationMemory):
     对话摘要记忆（兼容旧API）
 
     继承自ConversationMemory，提供相同功能
+
+    最容易误解的一处：类名里的 Summary 是空头支票 —— 它**没有任何摘要逻辑**，
+    行为与父类一字不差（截断旧消息而已）。留着只为接旧代码的 import。
     """
 
     def __init__(self, llm=None, max_token_limit: int = 2000, **kwargs):
@@ -119,7 +133,11 @@ class ContextMemory:
     """
     上下文记忆管理器
 
-    用于跟踪实体、主题等结构化信息
+    用于跟踪实体、主题等结构化信息。
+
+    与 ConversationMemory 的区别：那边是顺序消息流，这边是无序的键值袋
+    （"当前商品=iPhone 15"这种，只保留最新值）。
+    事实核对：本仓库无调用方，属于定义了没接线的组件。
     """
 
     def __init__(self):
@@ -181,6 +199,9 @@ class MemoryStore:
     - 按需创建：首次访问某 thread_id 时自动创建记忆实例
     - 自动清理：定期清理超过 ttl 未活跃的记忆实例，防止内存泄漏
     - 线程安全：使用 threading.Lock 保护共享数据结构
+
+    澄清一处措辞：所谓"定期"没有后台线程，是**懒清理** —— 只在 get() 被调用时顺手扫一遍。
+    因此会话彻底没人访问后，它占的内存不会被回收，只是不再增长。
     """
 
     def __init__(

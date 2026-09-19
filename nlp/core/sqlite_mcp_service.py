@@ -4,7 +4,17 @@ SQLite MCP 服务
 ===============
 
 封装 SQLite 数据库查询能力。
-优先尝试 MCP Server（需 Node.js + npm），连接失败自动降级为 Python sqlite3。
+
+术语：MCP（模型上下文协议）= 让 LLM 按统一协议调用外部工具的规范；
+Node.js（JavaScript 运行时）与 npm（它的包管理器）是跑 MCP Server 所需的环境；
+fallback / 降级 = 主路径不通时退到备用方案。
+
+⚠ 事实性说明：代码里确有"MCP 优先"的分支，但构造函数 `skip_mcp` 默认就是
+`True`（因为 MCP Server 的 npm 包 @modelcontextprotocol/server-sqlite 已下架），
+而唯一的调用方 `agents/database_agent/agent.py` 用的正是默认参数 —— 所以今天
+**真正跑到的只有 sqlite3（SQLite 的 Python 驱动）直连这条降级路径**，
+`_try_mcp_connect` 根本不会被触发。下面的 MCP 分支属于"留着但进不去"的代码，
+读的时候按 sqlite3 理解，否则会去找并不存在的 MCP 调用。
 """
 
 import os
@@ -17,14 +27,15 @@ logger = logging.getLogger(__name__)
 
 
 class SQLiteMCPService:
-    """SQLite 数据库服务（MCP 优先，sqlite3 降级）"""
+    """SQLite 数据库服务（MCP 优先，sqlite3 降级）—— "MCP 优先"只是代码形态，
+    运行时默认直接走 sqlite3，原因见文件头。"""
 
     # 表名 → 中文描述映射
     #
-    # 这个映射会拼进 list_tables 工具的结果里给 LLM 看。
+    # 这个映射会拼进 list_tables 工具的结果里给 LLM（大语言模型）看。
     # 有了中文描述，LLM 在「哪些表跟退款有关」这类语义判断上会准很多，
     # 不用先去读每个表的列名。表名对不上也没关系 —— 下面的
-    # _get_table_description() 会退化成「从 DDL 解析列名」。
+    # _get_table_description() 会退化成「从 DDL（建表语句）解析列名」。
     #
     # 当前对应 database/ecommerce.db（电商售后演示库）。
     KNOWN_TABLE_DESCRIPTIONS = {
@@ -121,6 +132,8 @@ class SQLiteMCPService:
             cursor = conn.cursor()
             cursor.execute(sql)
 
+            # cursor.description（结果集的列说明）只在执行过 SELECT 之后才有值，
+            # 每项的第 0 个字段就是列名；非查询语句为 None。
             columns = [desc[0] for desc in cursor.description] if cursor.description else []
             rows = cursor.fetchall()
             conn.close()
@@ -138,6 +151,8 @@ class SQLiteMCPService:
         Returns:
             包含表名、中文描述、关键列名的列表
         """
+        # sqlite_master 是 SQLite 内置的元数据表：每个表 / 索引占一行，
+        # 其中 sql 列存着建表语句原文（我们就是靠它反推列名的）。
         sql = "SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         result = self.query(sql)
 
@@ -237,11 +252,16 @@ class SQLiteMCPService:
         Returns:
             表结构信息
         """
+        # PRAGMA（SQLite 的配置 / 内省指令）；table_info 会返回该表的列定义清单
         sql = f"PRAGMA table_info({table_name})"
         return self.query(sql)
 
     def _parse_result(self, result: Any) -> Dict[str, Any]:
-        """解析MCP返回结果"""
+        """解析MCP返回结果
+
+        MCP 工具返回的是一个 content 列表（每项带 type / text），SQL 结果被包在
+        某项的 text 里，所以要先取出 text 再 json.loads。默认走不到这个分支。
+        """
         try:
             if hasattr(result, 'content'):
                 content = result.content

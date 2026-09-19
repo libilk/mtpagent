@@ -5,6 +5,10 @@
 
 基于 tenacity 提供统一的重试、降级和错误处理。
 合并了 core/ 和 rag_core/ 两个版本，移除 Windows 不兼容的 SIGALRM 超时。
+（tenacity = 重试库：把"失败后等一等再试、试几次、哪些异常才值得试"写成声明式参数。）
+
+为什么和网上常见的写法不一样：很多教程用 signal.SIGALRM 给调用加超时，
+但那是 Unix 专有信号，Windows 上根本没有（一用就报错），所以在合并两个版本时被删掉了。
 """
 
 import logging
@@ -29,7 +33,12 @@ logger = logging.getLogger(__name__)
 def retry_llm_call(func: Callable) -> Callable:
     """LLM 调用重试装饰器
 
-    指数退避，最多 3 次重试，适用于 LLM API 调用。
+    指数退避(exponential backoff) = 每失败一次，等待时间翻倍（1s→2s→4s…，
+    上限 10s）—— 避免下游已经扛不住时还被瞬间重试打爆。
+
+    反直觉点：stop_after_attempt(3) 指**总共尝试 3 次**，不是"失败后再重试 3 次"。
+    retry_if_exception_type 决定只有网络类异常才值得重试；业务异常（如参数错）
+    会立刻抛出，重试也没意义。reraise=True 指次数用尽后抛原异常，不吞成 None。
     """
     @retry(
         stop=stop_after_attempt(3),
@@ -64,7 +73,12 @@ class RetryStrategy:
         self.max_delay = max_delay
 
     def execute(self, func: Callable, *args, **kwargs) -> Any:
-        """执行函数（带重试）"""
+        """执行函数（带重试）
+
+        这里沿用"重试次数"口径：max_retries=3 表示首次之外再试 3 次，共 4 次尝试。
+        所以写了 +1 —— 与 retry_llm_call 的"总次数"口径不同，别看串。
+        另外本方法没写 retry_if_exception_type，等于**任何**异常都会重试。
+        """
 
         @retry(
             stop=stop_after_attempt(self.max_retries + 1),
@@ -120,6 +134,10 @@ class ErrorHandler:
 
         Returns:
             降级返回值或用户友好消息
+
+        反直觉点：返回表达式几乎都写成 `fallback_value or 默认消息`，
+        靠 `or` 短路。于是 fallback_value 若是 falsy（0、""、[]）会被当成"没传"，
+        被默认消息顶掉 —— 想把 0 当合法降级值时要注意。
         """
         error_type = type(error).__name__
         key = f"{context}_{error_type}"
@@ -159,7 +177,11 @@ GracefulErrorHandler = ErrorHandler
 # ============================================================================
 
 class FallbackStrategy:
-    """降级策略：按顺序尝试多个降级方案，返回第一个成功的结果。"""
+    """降级策略：按顺序尝试多个降级方案，返回第一个成功的结果。
+
+    与 RetryStrategy 的分工：重试是"同一条路再走一遍"，降级是"这条路不要了，换下一条"。
+    全链失败时抛新异常，但用 `from last_exception` 保留最后一环的原始堆栈。
+    """
 
     def __init__(self):
         self.fallback_chain: List[Callable] = []

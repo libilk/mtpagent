@@ -3,7 +3,15 @@
 文档元数据管理
 ==============
 
-支持文档分层和角色过滤
+支持文档分层和角色过滤。
+
+**现状：过滤逻辑写了，但运行时不会触发 —— 别按"正在生效的权限控制"读。**
+[enhanced_entry.py](../langgraph_orchestrator/enhanced_entry.py) 把 `doc_filter` 硬编码
+传 `None`，而 `KnowledgeAgent` 只在 document_filter 为真时才启用过滤 —— 于是本文件的
+`filter_by_*` 三个方法在现役流程里都走不到。类本身没问题，属"有代码没接线"。
+
+术语：audience（受众）= 读文档的人的角色；domain（领域）= 文档属于哪条业务线。
+过滤的思路是**先猜"用户是谁"再裁可见范围**，所以猜错就会多滤或漏滤。
 """
 
 import json
@@ -15,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class Domain(str, Enum):
-    """文档领域"""
+    """文档领域（Enum：一组固定的命名常量；继承 str 是为了能直接与字符串比较、序列化）"""
     TECH = "tech"  # 技术
     SALES = "sales"  # 销售
     PRODUCT = "product"  # 产品
@@ -127,7 +135,8 @@ class DocumentFilter:
                 if audience in metadata.audiences or Audience.ALL in metadata.audiences:
                     filtered.append(doc_id)
             else:
-                # 没有元数据的文档默认保留
+                # 没有元数据的文档默认保留 —— 这是 fail-open（失败放行）：
+                # 漏登记元数据 = 谁都看得到，而不是谁都看不到。想收紧权限时这里是关键点。
                 filtered.append(doc_id)
 
         logger.debug(f"受众过滤: {len(doc_ids)} -> {len(filtered)} (audience={audience})")
@@ -226,6 +235,9 @@ def infer_audience_from_query(query: str) -> Audience:
 
     Returns:
         推断的受众
+
+    注意：**返回 `Audience.ALL` 不等于"不过滤"** —— 下游 `filter_by_audience` 会拿它
+    当普通角色比对，只有显式标了 ALL 受众的文档才留下。这是最容易读反的一处。
     """
     query_lower = query.lower()
 

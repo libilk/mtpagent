@@ -3,6 +3,10 @@
 电商售后 CRM 服务
 ================
 
+CRM（客户关系管理）= 客户 / 工单 / 会员这类数据的系统。本文件是它在本项目里
+真正在跑的实现；SQLite（轻量关系数据库）= 单文件数据库，无需起服务，下面用
+Python 内置的 sqlite3（SQLite 的 Python 驱动）直接读写，不走网络。
+
 读写 `database/ecommerce.db` 的 `tickets`（工单）和 `customers`（会员）两张表，
 供客服 Agent 的 create_ticket / query_ticket / query_user_info 三个工具调用。
 
@@ -16,6 +20,8 @@
 
 **接口是刻意和 MockCRM 保持一致的**（get_user_info / create_ticket / get_ticket /
 update_ticket_status / get_user_tickets），这样 Agent 那边只需要换一行实例化。
+
+Mock（模拟对象）= 用假的替身顶掉真实依赖；`core/crm_mock.py` 现已无任何调用方。
 """
 
 import os
@@ -69,11 +75,13 @@ class EcommerceCRM:
 
         每次操作都新开连接、用完就关：SQLite 的连接不能跨线程共享，
         而 Agent 可能在多个线程里被调用，共享连接会踩坑。
-        开连接的开销很小，不值得为此做连接池。
+        开连接的开销很小，不值得为此做连接池（预先建好一批连接反复复用）。
 
         ★ 必须显式打开外键约束。
         建表语句里写了 `FOREIGN KEY ... REFERENCES ...`，但那**只是一个声明**：
-        SQLite 默认 FOREIGN KEYS = OFF，不执行任何校验。
+        外键（指向另一张表主键的列，用来保证引用有效）并不自动生效 ——
+        SQLite 默认 FOREIGN KEYS = OFF，不执行任何校验，需靠下面那行
+        PRAGMA（SQLite 的配置指令，如开关某项约束）亲手打开。
         不开这行，往 tickets 里写一个不存在的 user_id 会直接成功 ——
         实测模型就臆造过一个 U87654321 进去。
         """
@@ -188,7 +196,8 @@ class EcommerceCRM:
                     (
                         ticket_id,
                         # 不再把空 user_id 写成字符串 "anonymous" —— 那是个假用户，
-                        # 外键校验会直接拒绝。空就是 NULL，代表"匿名咨询"。
+                        # 外键校验会直接拒绝。空就写 NULL（SQL 里的"没有值"，
+                        # 区别于 0 和空字符串；外键不校验 NULL），代表"匿名咨询"。
                         user_id or None,
                         order_id,
                         category or "咨询",
@@ -207,6 +216,7 @@ class EcommerceCRM:
                 ).fetchone()
 
         except sqlite3.IntegrityError as e:
+            # IntegrityError（完整性约束异常）= 违反外键 / 唯一等约束时抛出。
             # 外键拦下来的情况：user_id / order_id 在库里不存在。
             # 这多半意味着模型臆造了一个编号 —— 把它变成一条明确的错误返回给 Agent，
             # 而不是让脏数据进库之后才被发现。
@@ -248,6 +258,9 @@ class EcommerceCRM:
                 (status, now, ticket_id),
             )
             conn.commit()
+            # rowcount（受影响行数）。事实性说明：SQLite 即使把 status 改成与原来
+            # 相同的值也计入 rowcount（已实测），所以"状态本来就相同"时这里其实
+            # 返回 True，与上面 docstring 的措辞不符。
             changed = cursor.rowcount > 0
 
         if changed:
@@ -347,11 +360,15 @@ class EcommerceCRM:
         amount: Optional[float] = None,
     ) -> Dict:
         """
-        提交退换货申请（写操作）。
+        提交退换货申请（写操作：会改动数据的动作，本项目里这类动作需人工审批）。
 
-        这是整个售后流程里**唯一会改动资金相关数据**的动作，所以做三重校验：
-        订单存在、订单归属正确、订单状态允许售后。校验不过就返回 error，
-        不写库 —— 宁可让 Agent 回一句"这笔订单不能退货"，也不要吞掉脏数据。
+        这是整个售后流程里**唯一会改动资金相关数据**的动作，所以做三重校验
+        （缺一不可，防的是不同形态的幻觉）：
+        1) 订单存在   —— 否则模型可能对臆造出来的订单号"成功"办理退款；
+        2) 归属正确   —— 订单真实存在也不能证明是本人下的，防 A 用户退 B 的订单；
+        3) 状态允许   —— 已取消 / 待发货的订单根本没有可退的货，本该走取消流程。
+        校验不过就返回 error，不写库 —— 宁可让 Agent 回一句"这笔订单不能退货"，
+        也不要吞掉脏数据。
 
         Args:
             order_id:    订单号

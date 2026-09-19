@@ -3,7 +3,20 @@
 统一缓存管理模块
 ================
 
-提供统一的缓存管理，支持多种缓存类型
+提供统一的缓存管理，支持多种缓存类型。
+
+【四个 cache 文件是什么关系】读者最容易被这一堆同义文件名绕晕，先看这里：
+- 本文件 = **统一入口**：定义基类 UnifiedCache（LRU + TTL）和几个具体缓存类。
+  真正在跑的就是这里 —— llm_client 用 LLMCache，rag_core/cache_manager 用
+  RetrievalCache / EmbeddingCache / QueryCache。
+- [persistent_cache.py] = 继承本文件的 UnifiedCache，只是给 get/set 多加一层 Redis，
+  换来"进程重启缓存还在"。rag_core/cache_manager 在 Redis 可用时选它，否则退回本文件的纯内存类。
+- [semantic_cache.py] = **另一套独立实现**（不继承本文件），靠向量相似度命中"问法不同但意思一样"。
+- [cache_manager.py] = 存根（stub），只转发 import，不干活。
+
+【Redis 是可选的，不是必需依赖】外部传 redis_client=None 时，这里所有类都退化为纯内存，
+进程重启缓存即丢。是否创建 Redis 由 enhanced_entry._create_redis_client() 读 REDIS_URL 决定，
+读不到就传 None —— 所以没装 Redis 也能跑，只是重启后缓存冷掉。
 """
 
 import hashlib
@@ -18,7 +31,12 @@ logger = logging.getLogger(__name__)
 
 
 class UnifiedCache:
-    """统一缓存基类（LRU + TTL策略）"""
+    """统一缓存基类（LRU + TTL策略）
+
+    LRU（最近最少使用）= 容量满时淘汰"最久没被访问"的那条，靠 OrderedDict 记访问顺序；
+    TTL（存活时间，秒）= 一条缓存写入后最多留多久，过期即当作未命中。
+    两者各管一头：TTL 管"太旧"，LRU 管"太多"。
+    """
 
     def __init__(self, cache_type: str = 'general', max_size: int = 1000, ttl: int = 3600):
         """
@@ -47,6 +65,9 @@ class UnifiedCache:
         1. 转小写
         2. 去除多余空格
         3. 去除常见标点
+
+        为什么值得做：不归一化的话，"iPhone 15 多少钱？" 和 "iphone 15 多少钱"
+        会各占一条键，缓存命中率直接腰斩。
         """
         # 转小写
         query = query.lower()
@@ -75,6 +96,9 @@ class UnifiedCache:
 
         Returns:
             缓存值，如果不存在或过期返回None
+
+        注意：命中后会把条目移到队尾 —— 这就是 LRU 的"刚刚用过"记号，
+        淘汰时才能从队头挑出最久没用的那条。
         """
         cache_key = self._make_key(key)
 
@@ -131,6 +155,9 @@ class UnifiedCache:
         """
         根据查询成本动态设置TTL
 
+        为什么按耗时定 TTL：一次查询越慢（越贵），越值得多缓存一会儿，
+        用更长的 TTL 把这次成本摊薄。
+
         Args:
             key: 缓存键
             value: 缓存值
@@ -173,7 +200,12 @@ class UnifiedCache:
 # ========== 专用缓存类 ==========
 
 class LLMCache(UnifiedCache):
-    """LLM调用缓存（支持可选 Redis 持久化）"""
+    """LLM调用缓存（支持可选 Redis 持久化）
+
+    两层：内存为准，Redis 兜底。内存未命中才查 Redis，查到后**回填内存** ——
+    否则每次命中都得走一次网络，缓存反而变慢。
+    redis_client 为 None 时只剩内存这一层（见模块头的降级说明）。
+    """
 
     def __init__(self, max_size: int = 500, ttl: int = 3600, redis_client=None):
         super().__init__(cache_type='llm', max_size=max_size, ttl=ttl)
@@ -265,7 +297,11 @@ class CacheManager(UnifiedCache):
     """
     缓存管理器（向后兼容）
 
-    保持与旧代码的兼容性
+    保持与旧代码的兼容性。
+
+    事实核对：本仓库已无任何 import 方 —— 现在真正被用的是
+    rag_core/cache_manager.py 里的同名 CacheManager（它内部组合了下面那几个具体缓存类）。
+    这里留一份只为旧调用路径不报错。
     """
 
     def __init__(self, max_size: int = 1000, ttl: int = 3600):
@@ -275,6 +311,8 @@ class CacheManager(UnifiedCache):
 # ========== 全局缓存实例 ==========
 
 # 为常用缓存提供全局实例
+# 事实核对：下面三个 getter 本仓库暂无调用方（预留的全局单例入口）——
+# 现有代码都是各自 new 一个实例并自己传入 redis_client。
 _global_llm_cache = None
 _global_query_cache = None
 _global_embedding_cache = None

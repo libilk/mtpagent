@@ -3,13 +3,19 @@
 问答日志记录器
 ==============
 
-使用 SQLite 持久化存储每次用户问答记录，包括：
+使用 SQLite（轻量关系数据库：单文件、无需起服务）持久化存储（persistence：
+存到磁盘，进程重启后数据还在）每次用户问答记录，包括：
 - 用户问题、系统答案
-- 使用的 Agent、质量评分、执行模式
+- 使用的 Agent、质量评分（evaluator 评估器 给的 0~1 分）、执行模式
 - 耗时、引用源文档
 - 时间戳
 
 用于上线后收集用户真实使用数据，分析系统效果。
+
+谁写、谁读 —— 它不是"写完没人看"的留档：
+- 写：`langgraph_orchestrator/enhanced_entry.py` 在问答的各条出口调 `log()`；
+- 读：`api.py` 暴露了 /logs（分页查询）、/logs/stats（统计概览）、
+  /logs/export（导出 CSV）三个接口，前端与运维看的就是这里。
 """
 
 import os
@@ -34,6 +40,7 @@ class QALogger:
     问答日志记录器
 
     线程安全的 SQLite 写入，支持分页查询、统计、导出。
+    线程安全 = 多个线程同时调也不会互相踩坏数据，靠下文的锁实现。
     """
 
     def __init__(self, db_path: str = None):
@@ -48,7 +55,8 @@ class QALogger:
         # 确保目录存在
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
 
-        # 线程锁（SQLite 单写）
+        # 线程锁（让临界区同一时刻只允许一个线程进入）：SQLite 的写操作要串行，
+        # 多线程同时 INSERT 会撞出 "database is locked" 之类的错误。
         self._lock = threading.Lock()
 
         # 初始化表结构
@@ -60,6 +68,8 @@ class QALogger:
         """获取数据库连接（每次新建，线程安全）"""
         conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
+        # WAL（Write-Ahead Logging，预写日志）= SQLite 的一种日志模式：读与写可以
+        # 并行进行、不必互相等待，比默认模式并发更好。
         conn.execute("PRAGMA journal_mode=WAL")  # 提高并发性能
         return conn
 
@@ -68,6 +78,8 @@ class QALogger:
         with self._lock:
             conn = self._get_conn()
             try:
+                # id 用 AUTOINCREMENT（自增主键）：编号交给 SQLite 自动分配，
+                # 并发插入也不会撞号。
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS qa_logs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,7 +100,7 @@ class QALogger:
                     )
                 """)
 
-                # 创建索引加速查询
+                # 创建索引（index：在列上额外维护的有序结构，避免全表扫描）加速查询
                 conn.execute("""
                     CREATE INDEX IF NOT EXISTS idx_qa_timestamp
                     ON qa_logs(timestamp DESC)
@@ -240,7 +252,7 @@ class QALogger:
                 f"SELECT COUNT(*) FROM qa_logs WHERE {where_clause}", params
             ).fetchone()[0]
 
-            # 分页数据
+            # 分页数据：LIMIT / OFFSET 表示"跳过 offset 条后，只取 page_size 条"
             offset = (page - 1) * page_size
             rows = conn.execute(
                 f"""
@@ -307,7 +319,7 @@ class QALogger:
             conn.close()
 
     def export_all(self) -> List[Dict]:
-        """导出全部记录（用于 CSV 下载）"""
+        """导出全部记录（用于 CSV 下载；CSV = 逗号分隔的表格文本，Excel 可直接打开）"""
         conn = self._get_conn()
         try:
             rows = conn.execute(

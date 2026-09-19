@@ -5,6 +5,12 @@
 
 基于向量相似度的缓存匹配，提高命中率
 支持可选 Redis 持久化（重启后可恢复缓存）
+
+【在四个 cache 文件里的位置】本文件**不继承** unified_cache 的 UnifiedCache，
+是独立的一套实现：那边的缓存按"键完全相等"命中，这边按"向量足够像"命中。
+组合关系是分层的 —— 精确缓存挡第一道，语义缓存挡"问法被改写过"的第二道。
+实际使用方：knowledge_agent（作为答案层缓存，见其 3.5 节初始化）。
+redis_client=None 时纯内存可用，语义不变。
 """
 
 import json
@@ -21,6 +27,9 @@ class SemanticCache:
 
     不同于精确匹配，使用向量相似度判断缓存命中
     "iPhone 15 Pro的价格" 和 "iPhone 15 Pro多少钱" 可以命中同一缓存
+
+    阈值定在 0.95 是刻意的"宁可漏、不可错"：命中一个语义相近但答案不同的问题，
+    比不命中去重算一次糟得多，所以卡得很严。
 
     支持可选 Redis 持久化：
     - 写入时同步到 Redis（向量 + 文本 + 值 序列化存储）
@@ -70,7 +79,10 @@ class SemanticCache:
         logger.info(f"语义缓存初始化完成 (阈值={similarity_threshold}, max_size={max_size}, 模式={mode})")
 
     def _cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
-        """计算余弦相似度"""
+        """计算余弦相似度（余弦相似度 = 比两个向量方向有多接近，取值 0~1）
+
+        判零是防除零：全零向量没有方向，直接算会得到 NaN。
+        """
         n1, n2 = np.linalg.norm(vec1), np.linalg.norm(vec2)
         if n1 == 0 or n2 == 0:
             return 0.0
@@ -92,6 +104,8 @@ class SemanticCache:
         query_vec = np.array(self.embedder.embed(query))
 
         # 遍历缓存，找最相似的
+        # 注意是线性扫描：每条都算一次相似度，没有向量索引，条目一多就慢。
+        # max_size 默认压到 500 正是为了不让这个循环变长。
         best_similarity = 0
         best_value = None
         best_idx = None
@@ -137,6 +151,8 @@ class SemanticCache:
         self.cache.append((query_vec, query, value, timestamp))
 
         # LRU淘汰：超过容量删除最旧的
+        # 事实核对：这里是 pop(0)（删最早写入的那条），其实是 FIFO 先进先出，
+        # 不是 LRU —— 命中不会把条目挪到队尾，所以"刚用过的"也可能被淘汰。
         if len(self.cache) > self.max_size:
             self.cache.pop(0)
 
@@ -167,6 +183,8 @@ class SemanticCache:
             )
 
             # 维护索引集合（用于启动时恢复）
+            # 为什么要额外的索引：Redis 里条目 key 带 MD5，无法枚举；
+            # 用集合记下所有 entry_id，启动时才能把条目一条条捞回来。
             self.redis.sadd(self._redis_index_key, entry_id)
 
         except Exception as e:
@@ -202,6 +220,7 @@ class SemanticCache:
                     timestamp = data["timestamp"]
 
                     # 检查是否过期（双重保险）
+                    # Redis 的 TTL 和本类的 TTL 各算各的，可能对不齐，所以本地再判一次。
                     if time.time() - timestamp > self.ttl:
                         expired_ids.append(entry_id)
                         continue

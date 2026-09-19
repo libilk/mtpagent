@@ -6,6 +6,8 @@
 把 `database/knowledge_graph.db` 里存的「商品 → 类别 → 政策适用性」关系查出来，
 回答一类问题：**这件商品，能走哪条售后通道？**
 
+RAG（检索增强生成）= 先检索资料、再让 LLM 基于资料作答。
+
 ## 它和 RAG 检索的区别
 
 | | 向量检索（rag_core） | 图谱查询（本模块） |
@@ -28,6 +30,12 @@
 | 条件为 `unknown` / 未提供 | 不确定满不满足 | 输出「待确认」，**绝不能默认成"适用"** |
 
 **把 unknown 当成"适用"，会把本该被排除的商品判成可退 —— 错误方向最危险。**
+
+## 为什么"商品没登记锚点"要当场报错，而不是猜个默认类别
+
+猜默认 = 把"我们漏配了映射"悄悄翻译成"这件商品按某类别处理"：政策照常返回、答案
+看着完整，漏配的 bug 被吞掉 —— 而且**错的方向可能是把不该退的判成能退**。报错则让它
+当场暴露（`resolve_category` 返回 None → 调用方显式处理）。
 
 ## 用法
 
@@ -60,7 +68,7 @@ TRUE, FALSE, UNKNOWN = "true", "false", "unknown"
 # ----------------------------------------------------------
 
 def load_condition_atoms(db_path: str = None) -> List[Dict]:
-    """读出全部条件原子（code / 标签 / 关键词）。"""
+    """读出全部条件原子（condition atom：可校验的封闭枚举，关系只引用它的 code）。"""
     conn = sqlite3.connect(db_path or DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
@@ -82,7 +90,10 @@ def match_conditions(text: str, db_path: str = None) -> Dict[str, str]:
     但**本层保持确定性**，LLM 兜底是可选的外挂，不影响这个函数的可复现性。
 
     Returns:
-        {condition_code: 'true' / 'false' / 'unknown'}
+        {condition_code: 'true' / 'unknown'}
+
+        **只产出 true / unknown，从不产出 false** —— 关键词没命中 ≠ 条件不成立。
+        「明确为假」只能由调用方（人工确认 / LLM 兜底）给出，不能由本函数代劳。
     """
     if not text:
         return {}
@@ -100,7 +111,8 @@ def match_conditions(text: str, db_path: str = None) -> Dict[str, str]:
 
 def resolve_category(conn: sqlite3.Connection, product_name: str) -> Optional[str]:
     """
-    商品名 → 类别名。用 product_categories 里的锚点做子串匹配。
+    商品名 → 类别名。用 product_categories 里的锚点（anchor：营销名到类别的显式映射 ——
+    「云听 Pro 主动降噪无线耳机」这种营销名和文档里的类别词「无线耳机」对不上）做子串匹配。
 
     **返回 None 表示没匹配上，这时候调用方必须显式处理** ——
     静默兜底到"一般商品"会掩盖漏配锚点的问题，导致查不到政策却看不出来。
@@ -123,6 +135,11 @@ def resolve_category(conn: sqlite3.Connection, product_name: str) -> Optional[st
 # 主查询
 # ----------------------------------------------------------
 
+# 递归 CTE（公用表表达式：SQL 里的临时命名子查询，RECURSIVE 版可自引用）：
+# `anc` 从商品所在类别沿 IS_A 逐级向上，得到"它以及它所有祖先类别"；
+# `hit` 把每个祖先类别上挂的 APPLIES_TO（适用）/ EXCLUDES（排除）关系摊平。
+# 关系以 subject_id / predicate / object_id 三元组存储，predicate 即"哪种关系"；
+# 只读 v_rel 视图（已滤掉未核实的抽取结果）；查不到 ≠ 都适用，而是图谱没覆盖。
 _QUERY_SQL = """
 WITH RECURSIVE
 anc(id, depth, path) AS (
@@ -171,8 +188,14 @@ def query_policy_applicability(product_name: str, facts: Dict[str, bool] = None,
           "applies":   [...],
           "uncertain": [{"policy","via","condition","need"}]   ← 需要向用户追问的
         }
+
+        （注：实现返回的条目实为 {"policy","verdict","source_doc","reasons"}，
+        via/why 收在 reasons 里；另会返回上面未列的 "conflicts"。括号内键名为旧版残留。）
     """
     facts = facts or {}
+    # 把调用方的 Python 布尔归一成三值常量（True→"true"、False→"false"）。
+    # 用 `is True`/`is False` 而非真值判断：1、"yes" 这类会被 str() 原样保留，
+    # 之后对不上 TRUE/FALSE 自然落进 unknown —— 不会把随手传的 1 误当成条件成立。
     facts = {k: (TRUE if v is True else FALSE if v is False else str(v))
              for k, v in facts.items()}
 
@@ -223,6 +246,7 @@ def query_policy_applicability(product_name: str, facts: Dict[str, bool] = None,
     #
     # 合并规则：**更确定的结论优先** —— 排除/适用 > 待确认。
     # 同一政策同时被判"排除"和"适用"属于真冲突，单独标出来人工看。
+    # verdict（判定结果）= 每条政策最终的 excluded / applies / uncertain / conflict。
     CERTAINTY = {"excluded": 3, "applies": 3, "uncertain": 1}
     merged: Dict[str, Dict] = {}
 

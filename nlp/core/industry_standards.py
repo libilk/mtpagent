@@ -3,7 +3,15 @@
 行业标准动态计算模块
 ==================
 
-从历史合同数据中统计行业标准，用于风险识别
+从历史合同数据中统计行业标准，用于风险识别。
+
+**现状：本模块没有现役调用方，别当现役逻辑读。**
+唯一的调用方是 `agents/document_agent`，而该 Agent 已在阶段 4 从图里摘除
+（它那 9 个工具全是合同审核专用的，与电商售后无关）。文件保留未删，
+若日后恢复合同审核场景，把 `_register_document_agent` 接回来即可。
+
+术语：retriever（检索器）= 负责从知识库召回文档的组件；
+本模块拿它去捞"历史合同"当统计样本 —— 用检索器做抽样，是这一层最反直觉的地方。
 """
 
 import re
@@ -23,10 +31,10 @@ class IndustryStandardsCalculator:
         初始化
 
         Args:
-            retriever: 向量检索器（用于获取历史合同）
+            retriever: 向量检索器（retriever：负责召回文档的组件，此处用来取历史合同）
         """
         self.retriever = retriever
-        self.standards_cache = {}  # 缓存计算结果
+        self.standards_cache = {}  # 缓存（cache）：按 contract_type 存算过的结果，避免重复统计
 
     def calculate_standards(
         self,
@@ -130,7 +138,9 @@ class IndustryStandardsCalculator:
             else:
                 query = "采购合同 软件开发 硬件采购 云服务"
 
-            # 检索更多合同用于统计
+            # 检索更多合同用于统计。
+            # top_k（取前 k 条）= 只要得分最高的 50 份；样本量直接决定后面统计的可信度，
+            # 而 retrieve 的排序是语义相关性、不是随机抽样，样本天然有偏 —— 这是本方案的弱点。
             results = self.retriever.retrieve(query, top_k=50)
             return results
 
@@ -156,7 +166,8 @@ class IndustryStandardsCalculator:
             match = re.search(pattern, text)
             if match:
                 rate = float(match.group(1))
-                # 合理性检查（0.1% - 5%）
+                # 合理性检查（0.1% - 5%）：越界值整条丢弃（返回 None），不是截断到边界 ——
+                # 截断会凭空造出一个不存在的样本，把均值往中间拉。
                 if 0.1 <= rate <= 5.0:
                     return rate
 
@@ -253,6 +264,8 @@ class IndustryStandardsCalculator:
                 amount = float(amount_str)
 
                 # 转换为万元
+                # 靠 pattern 文本里有没有「万」判断单位，所以上面三条的顺序不能调换：
+                # 必须先试「万元」再试纯「元」，否则 150万 会被当成 150 元。
                 if '万' not in pattern:
                     amount = amount / 10000
 
@@ -263,7 +276,7 @@ class IndustryStandardsCalculator:
         return None
 
     def _calculate_stats(self, values: List[float], name: str) -> Dict:
-        """计算统计指标"""
+        """计算统计指标：mean（均值）/ median（中位数）/ std（标准差，越小说明行业越统一）"""
         if not values:
             return {
                 "count": 0,
@@ -290,7 +303,13 @@ class IndustryStandardsCalculator:
         return stats
 
     def _get_default_standards(self) -> Dict:
-        """获取默认行业标准（基于经验值）"""
+        """
+        获取默认行业标准（基于经验值）
+
+        注意（事实性说明，未改逻辑）：这里各项 count 都是 0，而 `_format_standards_text`
+        只在 count > 0 时才输出 —— 所以这些经验值经 `format_standards_for_prompt`
+        渲染后只剩一行标题，数字其实到不了 prompt 里。
+        """
         logger.info("[行业标准] 使用默认标准")
 
         return {
@@ -339,7 +358,7 @@ class IndustryStandardsCalculator:
         }
 
     def format_standards_for_prompt(self, standards: Dict) -> str:
-        """格式化行业标准为Prompt文本"""
+        """格式化行业标准为 prompt（提示词：喂给 LLM 的指令文本）"""
         if standards["sample_size"] == 0:
             return "【行业标准】（基于经验值）\n" + self._format_standards_text(standards)
         else:
