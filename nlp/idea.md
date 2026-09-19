@@ -2236,3 +2236,115 @@ grep -rn "validation_target" nlp --include=*.py
 - 如果把 `interrupt_before` 那行删掉，"人工介入"会以什么形式坏掉？
 
 <!-- 下一个阶段从这里往下追加 -->
+
+---
+
+## 附记 · 术语标注铺开（1/2）：编排核心 langgraph_orchestrator/（2026-09-19）
+
+上一节只标了一个文件。这一节把同一套规则铺到整个 `langgraph_orchestrator/` ——
+连同上一节已完成的 `enhanced_graph.py`，**本目录 9 个文件全部标完**，可执行逻辑零改动
+（每个文件都过了"剥离注释比对 AST"的机器校验）。
+
+做法是**四个并行 agent 分头改，我逐文件机器校验 + 抽检注释质量**。
+抽检果然抓到 agent 写错的地方 —— 见下面第 3 节，这条经验比代码本身更值钱。
+
+| 文件 | before → after | 它属于哪类 | 标注重点 |
+|---|---|---|---|
+| [enhanced_entry.py](langgraph_orchestrator/enhanced_entry.py) | 1011 → 1103 | 主入口 | 初始 state 为何要写全、注册→建图的顺序、resume 两段式 |
+| [nodes.py](langgraph_orchestrator/nodes.py) | 540 → 606 | 节点包装 | 节点"只返回要更新的字段"这份部分更新契约 |
+| [clarification.py](langgraph_orchestrator/clarification.py) | 362 → 439 | 逻辑文件，但一个文件塞了三件事 | 把三件事拆开讲清，别混 |
+| [router.py](langgraph_orchestrator/router.py) | 198 → 246 | 条件边函数 | 返回字符串 vs 返回 `Send` 列表的区别 |
+| [enhanced_nodes.py](langgraph_orchestrator/enhanced_nodes.py) | 226 → 293 | 重复检测 + 人工介入 | 分层检测的成本差、五条触发通道 |
+| [critic.py](langgraph_orchestrator/critic.py) | 71 → 99 | 薄壳 + 大量提前返回 | 每个提前返回为什么"默认放行" |
+| [enhanced_state.py](langgraph_orchestrator/enhanced_state.py) | 76 → 92 | 纯字段清单 | 每字段标"谁写、谁读" |
+| [__init__.py](langgraph_orchestrator/__init__.py) | 18 → 29 | 包出口 | 三个导出各是什么，别和隔壁 `orchestrator/` 搞混 |
+
+### 1. 思路
+
+上一节的结论是「"读不懂"要分三类：术语 / 机制 / 代码问题」。这次真正落到不同文件上，
+发现**同一个规则在不同文件类型里，落点完全不一样**：
+
+- **`clarification.py`** —— 术语不是难点（parameter_validator / upstream_retry 名字挺直白），
+  难点是**读者会把三件事当成一件事**：验证器、重试节点、条件边判断函数。
+  所以新增的内容主要不是词表，而是开头一段"这三件不是一回事"的拆解。
+  顺带挖出一条真机制：`upstream_retry_node` **自己不重跑 Agent**，
+  只改 `query` + 指向 Agent，靠边把控制权交回去 —— 这是读代码时最容易误解的点。
+- **`enhanced_state.py`** —— 40 多个字段，逐个解释字段名是废话（`quality_score` 谁看不懂？）。
+  它的价值在**字段的读写方**：谁写、谁读、挂了 reducer 没有。
+  所以标注形式统一成 `写：X；读：Y`，并且把"挂了 reducer 是追加、没挂是覆盖"提到文件头。
+- **`critic.py`** —— 亮点是它的 fail-open 设计：五处提前返回全是"判通过"。
+  单看每一处都像随手写的，连起来才看出是**刻意选择"宁可放过也不卡死"**。
+
+### 2. 为什么这么改
+
+1. **标注要挑文件。** `enhanced_state.py` 只有 76 行却最值得标，因为它被所有节点读；
+   反过来 `router.py` 逻辑密集但术语都常见。**行数少 ≠ 不值得标。**
+2. **只标会卡住的地方。** `clarification.py` 里 `_find_downstream_tasks` 一行列表推导，
+   本来不需要注释；但它定义的是"上游/下游"这组关系词，不点一下读者会以为"下游"= 任务列表里靠后的。
+3. **不重复贴。** 同一术语（如 `DAG`）在三个文件里各自标首次出现处，但同一文件内只标一次 ——
+   否则 `clarification.py` 会到处是"DAG（有向无环图）"。
+
+### 3. 又挖出来的"代码问题"（注释救不了的那类）
+
+| 问题 | 位置 | 说明 |
+|---|---|---|
+| **critic 是空跑节点** | [critic.py:38-42](langgraph_orchestrator/critic.py#L38-L42) | `critic_agent` 这个类存在，但 `_register_agents` **从没注册过它** → 取不到实例、直接判"通过"。所以 `enable_critic` 开不开都一样：**没有任何输出真的被评审过**。另外 [critic.py:51](langgraph_orchestrator/critic.py#L51) 的 `state.get("plan", {})` 默认值不生效（键存在、值为 `None`），一旦真把 critic_agent 注册上，单 Agent 路径会在这里抛 `AttributeError` |
+| **两个字段是空的** | `parameters_aligned` / `parameter_alignment_errors` | 只在 entry 初始化，全项目无人读写 |
+| **`stop_reason` 只写不读** | [enhanced_nodes.py:97](langgraph_orchestrator/enhanced_nodes.py#L97) | 重复检测写了命中原因，但代码内没有读取方（前端也没接） |
+
+三处都**只加注释、没动逻辑**，并记进了 [study.md](study.md) 的「已知的坑」（第 8、9 条）。
+
+### 3.1 ★ 抽检抓到 agent 写错了注释
+
+这是本节最值得记的一段。**并行 agent 确实快，但它的结论不能直接信。**
+
+我抽检时发现第一个 agent 在 `critic.py` 里写下的注释是错的：
+
+> 它写：「`enable_critic=True` 走单 Agent 路径**必抛** `AttributeError`，
+> 当前 api/main 默认 `False` 故未触发。」
+
+听起来很有道理，**但条件不对**：真正让这行代码碰不到的是**上方 `critic_agent` 未注册时的提前 return**，
+跟 `enable_critic` 是 `True` 还是 `False` 无关。照它写的读，读者会得出"只要打开开关就会崩"的错误结论 ——
+而实际上是"这个节点整个空跑"。
+
+同一批里它还有两处类似性质的偏差：
+
+| 它写的 | 实际 |
+|---|---|
+| critic.py 里"五处"提前返回判通过 | **四处**（`grep -c` 一数就知道） |
+| "铺到三个文件上" | 同一批实际改了 **8 个文件**（它只看得见自己那三个） |
+
+**为什么会有这类错**：agent 只读了自己负责的文件，看不到全局；
+它会用"局部自洽"的方式补上缺失的因果关系 —— 这恰好就是注释最容易出的错。
+**验证方式也不玄**：`grep` 数一遍、`grep -rn` 查一遍调用方，成本以秒计。
+
+> **可迁移的结论：** 让多个 agent 并行写"解释型内容"时，**解释的正确性必须由读得到全局的那一方复核**。
+> 代码改错了有测试兜底，注释写错了没有任何东西会响 —— 它会安静地教给读者一个错的模型。
+
+### 4. 人类怎么学这部分
+
+**该盯哪里：**
+
+- [clarification.py](langgraph_orchestrator/clarification.py) 文件头那段"三件事拆解" ——
+  读完再往下看函数，就不会把 `should_retry_validation`（判断能不能再试）
+  误当成 `parameter_validator_node`（干活的那个）。
+- [enhanced_state.py](langgraph_orchestrator/enhanced_state.py) 的字段表当"索引"用：
+  读别的文件卡住时，回来查这个字段谁写的，往往比顺着调用链找快。
+- [critic.py](langgraph_orchestrator/critic.py) 数一下有几处 `return {"critic_passed": True}`
+  —— 四处。这就是 fail-open 的密度：
+  `grep -c 'critic_passed.*True' langgraph_orchestrator/critic.py`
+
+**背后的通用概念：**
+
+| 概念 | 一句话解释 | 为什么重要 |
+|---|---|---|
+| **读写方标注** | 字段清单的价值在"谁写谁读"，不在字段名 | 数据流是读多节点系统的唯一主线 |
+| **fail-open vs fail-closed** | 出错时放行还是拦下 | 评审/校验环节多半选放行，因为拦下的代价是流程卡死 |
+| **同名不同义** | critic 的 `quality_score` ≠ evaluator 的 `quality_score` | 跨文件同名变量是最隐蔽的误读源 |
+| **薄壳节点** | 自己不实现逻辑，只打包上下文交给 Agent | 认出薄壳后就知道"真正的逻辑在 prompt 里"，找错方向会白读 |
+
+**看完应该能回答：**
+
+- `upstream_retry_node` 到底有没有"重新执行"上游？如果没有，是谁执行的？
+- `enhanced_state.py` 里哪些字段挂了 reducer？没挂 reducer 的字段被两个节点同时写会怎样？
+- 为什么 `critic.py` 里"取不到 critic_agent"要判**通过**而不是判失败？

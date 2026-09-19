@@ -1,10 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-LangGraph RAG 系统主入口
-========================
+LangGraph（图编排框架）RAG（检索增强生成）系统主入口
+====================================================
+
+本文件是整个系统的门面（facade）：外部（api.py / main.py）只跟
+EnhancedLangGraphRAGSystem 打交道，不直接碰图、Agent（智能体）或检索器。
+一个实例的生命周期就三步，按这个顺序读：
+  1. __init__ 注册 Agent（_register_agents）并拼装依赖（LLM / 向量化模型 / 记忆）
+  2. 把注册结果交给 build_enhanced_graph 连成图（连边逻辑在 enhanced_graph.py）
+  3. handle_query 系列跑图；被 interrupt_before 拦下时，
+     由 resume_after_human_input 从断点接着跑
 
 基于 LangGraph 框架的多 Agent 编排系统。
 支持状态持久化、断点续传、人机共驾、参数对齐验证等高级功能。
+
+为什么查询入口有四个：跑图用的 API 不同（invoke / stream / astream），分别对应
+非流式接口、CLI 同步流式、FastAPI 异步流式；resume 是共用的人工恢复通道。
+四者的字段与流程高度重复，改一个记得同步另外两个，否则 CLI 与 Web 会悄悄分叉。
 """
 
 import os
@@ -28,6 +40,8 @@ def _sanitize_output(obj):
 
     AIMessage / HumanMessage 等 BaseMessage 子类无法被 json.dumps 直接序列化，
     需要转为普通 dict 或 str。
+
+    只在"出口"调用：图内部存的是 LangChain 对象，Web 层最后要 json 序列化，这里做边界转换。
     """
     if isinstance(obj, BaseMessage):
         return {"role": getattr(obj, "type", "unknown"), "content": obj.content}
@@ -47,6 +61,8 @@ def _sanitize_output(obj):
 
 
 # ===== 引用源标记提取 =====
+# 机制：引用溯源（citation）不单独走 state 字段，而是塞进回答文本末尾的 HTML 注释
+# <!-- SOURCES:{...}:SOURCES -->，跟着 final_answer 一起流转，到出口才剥掉、不漏给用户。
 _SOURCES_RE = re.compile(r'\n*<!-- SOURCES:(.*?):SOURCES -->', re.DOTALL)
 
 
@@ -82,6 +98,7 @@ def _extract_sources(text: str) -> Tuple[str, List[Dict], Dict]:
 
 
 # 流式事件的初始状态模板（避免重复定义）
+# 注：handle_query（非流式）与两个流式接口都调用它，并非只有流式用。
 def _make_initial_state(
     query: str,
     image_urls: list = None,
@@ -93,9 +110,16 @@ def _make_initial_state(
     """
     构建查询初始状态
 
+    为什么要手写一整个 dict：state（状态）是**全图共享的字典**，节点靠 `state.get(字段)` 读、
+    靠返回小 dict 合入来写。凡是条件路由函数可能读到的字段，这里必须先给初始值 ——
+    缺键会让路由里的比较/取用直接抛异常，而不是安静地走默认分支。
+    特别注意 write_operations 这类挂了 reducer（归并函数，这里是 operator.add）的字段：
+    多个并行分支会各自往同一字段追加，没有初始值在合并时同样会报错，空列表不是可有可无的。
+    previous_results / has_duplicate 是重复检测要用的跨轮历史位，每条新 query 都清空重来。
+
     Args:
         query: 用户查询文本
-        image_urls: 图片公网URL列表（VQA多模态）
+        image_urls: 图片公网URL列表（VQA 视觉问答：让模型看着图回答问题）
         image_paths: 本地图片路径列表（VQA多模态）
         image_base64_list: base64编码图片列表（VQA多模态）
         file_paths: 已上传文件路径列表（Excel/CSV等）
@@ -161,6 +185,7 @@ class EnhancedLangGraphRAGSystem:
             enable_checkpointer: 是否启用状态持久化
             enable_parameter_validation: 是否启用参数验证与重试
             enable_critic: 是否启用 Critic 验证
+                           （critic=评审：校验"这段输出能不能接上后续任务"，不是给答案打分）
         """
         logger.info("初始化增强版 LangGraph RAG 系统...")
 
@@ -168,14 +193,20 @@ class EnhancedLangGraphRAGSystem:
         self.enable_parameter_validation = enable_parameter_validation
         self.enable_critic = enable_critic
 
+        # 事实：_register_agents 并没有注册 critic_agent，
+        # 所以即便 enable_critic=True，critic 节点也取不到实例、会直接判定通过 ——
+        # 默认 False 的真正原因是"当前没人实现它"，不只是"怕报错"。
+
         # 自动更新索引
         if auto_update_index:
             self._auto_update_vector_index()
 
         # 加载配置
+        # 事实：config/agents.yaml 虽被读进 self.config["agents"]，但全项目无人消费 ——
+        # 真正的 Agent 清单/描述是下面 _register_* 里硬编码的，改 yaml 不产生任何效果。
         self.config = self._load_config()
 
-        # ========== 统一创建 Redis 连接（全局唯一） ==========
+        # ========== 统一创建 Redis（内存数据库）连接（全局唯一） ==========
         self.redis_client = self._create_redis_client()
 
         # 初始化 LLM（传入 redis_client）
@@ -183,7 +214,7 @@ class EnhancedLangGraphRAGSystem:
         self.llm_max = self._create_llm("qwen-max")
         self.llm_plus = self._create_llm("qwen-plus")
 
-        # 初始化 Embedder
+        # 初始化 Embedder（向量化模型）：路由召回与重复检测都靠它算语义相似度
         self.embedder = self._create_embedder()
 
         # 初始化记忆管理器（按 thread_id 隔离，不同窗口/用户互不干扰）
@@ -198,7 +229,7 @@ class EnhancedLangGraphRAGSystem:
         self.shared_memory = None
         logger.info("记忆管理器初始化完成（按 thread_id 隔离）")
 
-        # 初始化编排组件
+        # 初始化编排组件：registry（注册中心，Agent 名册）/ planner（规划器）/ router（路由器）
         from orchestrator.planner import TaskPlanner
         from orchestrator.router import AgentRouter
         from orchestrator.registry import AgentRegistry
@@ -208,9 +239,12 @@ class EnhancedLangGraphRAGSystem:
         self.router = AgentRouter(self.llm_max, self.embedder)
 
         # 注册 Agents
+        # 顺序有约束：必须先注册完才能建图 —— 图上的 Agent 节点就是从这里逐个取出来加的。
         self._register_agents()
 
         # 构建增强图
+        # 这里把注册中心的记录原样交出去；build_enhanced_graph 认的是每条记录里的
+        # "instance" 键（真正能 handle 的 Agent 实例），缺了它建图时会 KeyError。
         agents_dict = {agent["id"]: agent for agent in self.registry.get_all_agents()}
 
         self.graph = build_enhanced_graph(
@@ -243,22 +277,28 @@ class EnhancedLangGraphRAGSystem:
         file_paths: list = None,
     ) -> dict:
         """
-        处理查询（支持 interrupt_before 原生中断）
+        处理查询（支持 interrupt_before（执行前中断）原生中断）
+
+        机制：跑完后不能只看 invoke 的返回值 —— 若图被 interrupt_before 拦下，invoke 会提前
+        返回，返回值只是半成品。必须再查 get_state(config).next 才能区分
+        "真跑完了" 与 "停在中途等人"：next 非空说明还停在断点上（下面据此返回人工介入分支）。
 
         Args:
             query: 用户查询
-            thread_id: 线程ID（用于状态持久化和中断恢复）
+            thread_id: 线程ID（会话 ID，用于状态持久化和中断恢复）
             image_urls: 图片公网URL列表（VQA多模态）
             image_paths: 本地图片路径列表（VQA多模态）
             image_base64_list: base64编码图片列表（VQA多模态）
             file_paths: 已上传文件路径列表（Excel/CSV等）
 
         Returns:
-            dict: 包含结果或人工介入信息。
+            dict: 包含结果或人工介入（human intervention）信息。
                   如果 human_intervention_required=True，
                   调用方应调用 resume_after_human_input() 恢复执行。
         """
 
+        # checkpointer（检查点）靠 config 里的 thread_id（会话 ID）定位"这一份存档"。
+        # 恢复时必须传一模一样的 thread_id，否则接不回断点、会另起一份新存档。
         config = {"configurable": {"thread_id": thread_id}}
         _start_time = time.time()
 
@@ -273,6 +313,8 @@ class EnhancedLangGraphRAGSystem:
 
             if current_state.next:
                 # current_state.next 不为空 = 图还没执行完 = 被 interrupt 暂停了
+                # 此时 final_answer 多半还是空的/半成品，真正有用的是 intervention_reason
+                # 与 intervention_data（前端据此渲染"批准/重试/终止"按钮，再走 resume）。
                 state_values = current_state.values
 
                 return {
@@ -348,8 +390,15 @@ class EnhancedLangGraphRAGSystem:
         """
         人工审核后恢复执行
 
+        机制（两段式，顺序不能反）：
+          1. update_state：只往暂停中的 state 补写几个标志位，不跑图；此时 state 是"活的"。
+          2. invoke(None, config)：第一个参数传 None = "别给我新输入，接着上次的断点跑"。
+             若误传一份新 state，图会从 START 重新开始，人工的批准就白做了。
+        断点是 enhanced_graph.py 编译时用 interrupt_before 钉在 human_intervention_execute
+        之前的；下面写进 state 的 human_feedback 就是喂给那个节点的输入。
+
         Args:
-            thread_id: 与 handle_query 时相同的 thread_id
+            thread_id: 与 handle_query 时相同的 thread_id（必须一致，否则找不到断点）
             human_feedback: 用户输入（"approved" / "accept" / "retry" / "override" / "abort"）
             extra_state: 额外要注入的状态
         """
@@ -360,6 +409,11 @@ class EnhancedLangGraphRAGSystem:
         update_values = {"human_feedback": human_feedback}
 
         # 根据反馈类型自动设置对应的审批标志
+        # 图的逻辑只认 state 里的标志位（plan_approved / db_operation_approved / write_approved），
+        # 并不认识 "approved" 这个词；这一步就是把人的答复翻译成标志位，否则恢复后
+        # check 节点会再次命中同一条通道、又被拦一次。
+        # 判断依据是 intervention_reason 里的中文字样 —— 属于约定式耦合，
+        # 改 enhanced_nodes.py 里那几条 reason 文案时，这里必须同步改。
         if human_feedback == "approved":
             current_state = self.graph.get_state(config)
             # 注意用 `or ""`：intervention_reason 可能是显式的 None，
@@ -380,7 +434,7 @@ class EnhancedLangGraphRAGSystem:
 
         self.graph.update_state(config, values=update_values)
 
-        # 2. 从暂停点继续执行
+        # 2. 从暂停点继续执行（invoke(None) = 接着断点跑，不是开新一轮）
         try:
             result = self.graph.invoke(None, config)
 
@@ -431,11 +485,14 @@ class EnhancedLangGraphRAGSystem:
         file_paths: list = None,
     ) -> Iterator[dict]:
         """
-        同步流式处理查询
+        同步流式处理查询（stream=流式输出：结果分片吐出，不用等全部生成完）
 
         使用 stream_mode=["updates", "custom"] 实现：
-        - "custom" 事件：节点内部通过 StreamWriter 推送的实时进度
+        - "custom" 事件：节点内部通过 StreamWriter（流式事件写入器）推送的实时进度
         - "updates" 事件：节点完成时的状态更新
+
+        为什么要两种模式：custom 让长节点中途也能吐进度（否则用户干等），
+        updates 才带"这一步是谁跑完了"的结构；chunk 是 (模式名, 数据) 二元组，故按 mode 分流。
 
         Yields:
             dict: 流式事件，格式:
@@ -543,6 +600,9 @@ class EnhancedLangGraphRAGSystem:
         使用 astream + stream_mode=["updates", "custom"] 实现非阻塞流式输出。
         适用于 FastAPI / WebSocket 等异步场景。
 
+        与 handle_query_stream 逻辑一一对应，只是 stream 换成 astream、for 换成 async for。
+        两份代码不是冗余：FastAPI 的路由是 async 的，在里面跑同步 stream 会阻塞事件循环。
+
         Yields:
             dict: 流式事件（格式同 handle_query_stream）
         """
@@ -645,7 +705,11 @@ class EnhancedLangGraphRAGSystem:
             logger.warning("自动更新向量索引失败: %s", e)
 
     def _load_config(self) -> dict:
-        """加载配置"""
+        """加载配置：读 models 与 agents 两个 yaml（路径是相对的，依赖进程 CWD 在 nlp/ 下）
+
+        事实：返回值里只有 config["models"] 被真正取用（见 _create_llm）；
+        config["agents"] 读进来了却全项目无人消费 —— 名册实际由 _register_* 硬编码。
+        """
         config = {}
         for path, key in [("config/models.yaml", "models"), ("config/agents.yaml", "agents")]:
             if os.path.exists(path):
@@ -677,6 +741,9 @@ class EnhancedLangGraphRAGSystem:
             api_embedder = APIEmbedder(api_key=api_key, provider="dashscope", model="text-embedding-v2")
             return Embedder(api_embedder=api_embedder)
         except Exception as e:
+            # 注意：这个 except 返回的 Embedder() 没有 api_embedder，
+            # 真正调用时 llm/embedder.py 会抛 "未配置嵌入器" —— 它不是可用的降级兜底，
+            # 只保证"构造不炸"。检索/路由一旦真用到向量，错误会在调用点才暴露。
             logger.warning("无法初始化API Embedder: %s", e)
             return Embedder()
 
@@ -706,23 +773,32 @@ class EnhancedLangGraphRAGSystem:
             return None
 
     def _register_agents(self):
-        """注册 Agents（复用 entry.py 逻辑）"""
-        # 向量检索器
-        retriever = self._init_retriever()
-        bm25_retriever = self._init_bm25_retriever(retriever)
+        """注册 Agents（复用 entry.py 逻辑）
 
+        登记顺序 ≠ 执行顺序：这里只决定"有哪几个 Agent 可选"，
+        谁先谁后由 enhanced_graph.py 的边决定。
+        """
+        # 向量检索器：retriever（检索器）负责从知识库召回文档
+        retriever = self._init_retriever()
+        bm25_retriever = self._init_bm25_retriever(retriever)  # BM25（关键词检索算法）：按词频+稀有度打分
+
+        # 混合检索（hybrid retrieval）= 语义检索 + 关键词检索两路一起用，
+        # 所以 knowledge / customer_service 两个 Agent 都要同时拿到上面两个检索器。
+        #
         # 注册 Agents（文档角色过滤已禁用，所有用户可查询所有文档）
         #
         # 注意：document_agent 已移除（阶段 4）。
         # 它那 9 个工具全是合同审核专用的（风险识别、违约金计算、按供应商检索），
         # 与电商售后无关。原 Agent 代码保留在 agents/document_agent/ 未删除，
         # 只是不再注册 —— 如果以后要恢复，把 _register_document_agent 调用加回来即可。
+        # 第三个参数 doc_filter 恒传 None = 完全不做角色过滤（KnowledgeAgent 内部
+        # 只在 document_filter 为真时才启用过滤逻辑）。该形参保留但已无其它调用方。
         self._register_knowledge_agent(retriever, bm25_retriever, None)
         self._register_database_agent()
         self._register_customer_service_agent(retriever, bm25_retriever)
         self._register_vqa_agent()
 
-        # 更新路由器索引
+        # 更新路由器索引：把 Agent 的描述向量化后建索引，供 router 做语义召回
         agents = self.registry.get_all_agents()
         if agents:
             self.router.index_agents(agents)
@@ -730,7 +806,7 @@ class EnhancedLangGraphRAGSystem:
     def _init_retriever(self):
         """初始化向量检索器"""
         try:
-            from rag_core.chroma_store import ChromaStore
+            from rag_core.chroma_store import ChromaStore  # Chroma（向量数据库）：存向量、按相似度检索
             from rag_core.api_embedder import APIEmbedder
 
             chroma_db_path = "./vector_db/chroma_db"
@@ -749,10 +825,14 @@ class EnhancedLangGraphRAGSystem:
             )
 
             class SimpleRetriever:
-                """简单向量检索器，封装 APIEmbedder + ChromaStore"""
+                """简单向量检索器，封装 APIEmbedder + ChromaStore
+
+                就地定义在方法里是因为只在文件内用一次；作用是给 Agent 一个统一接口
+                （retrieve(query, top_k) → 结果列表），好让向量/BM25 两路结果被同一套代码消费。
+                """
 
                 # 向量相似度最低阈值
-                # 余弦相似度范围 0~1，中文 embedding 场景下：
+                # 余弦相似度（cosine similarity）范围 0~1，中文 embedding（向量化）场景下：
                 #   > 0.7  高度相关
                 #   0.5~0.7 较相关
                 #   0.45~0.55 弱相关
@@ -769,9 +849,10 @@ class EnhancedLangGraphRAGSystem:
                         query_vector = query_embedding.tolist()
                     else:
                         query_vector = list(query_embedding)
-                    # 知识库总 chunk 数
+                    # 知识库总 chunk（文本块）数 = 文档切分后的最小检索单位，下面统计都以它计数
                     corpus_size = self.chroma_store.collection.count()
-                    # 先不过滤获取总数，再按阈值过滤
+                    # 先不过滤获取总数，再按阈值过滤（top_k=取前 k 条，是"取多少候选"的上限）
+                    # 召回（recall）= 先把可能相关的都捞出来这一步，阈值过滤是在召回之后再做的
                     all_results = self.chroma_store.search(query_vector=query_vector, top_k=top_k, min_score=0.0)
                     total_count = len(all_results)
                     passed = [r for r in all_results if r[1] >= self.MIN_VECTOR_SCORE]
@@ -804,6 +885,8 @@ class EnhancedLangGraphRAGSystem:
             bm25 = BM25Retriever()
 
             # 从 ChromaDB 加载所有文档内容，作为 BM25 的语料库
+            # 为什么复用 Chroma 的原文：BM25 只是换一套打分方式（词频 vs 向量），
+            # 语料还是同一批文档，不必再维护第二份数据源。
             try:
                 chroma_store = retriever.chroma_store
                 all_data = chroma_store.collection.get(include=["documents", "metadatas"])
@@ -811,10 +894,13 @@ class EnhancedLangGraphRAGSystem:
                     corpus = all_data["documents"]
                     # 保存元数据供检索时使用
                     bm25._metadatas = all_data.get("metadatas", [{} for _ in corpus])
+                    # fit = 用整个语料库建索引；BM25 的"训练"只是统计词频，不涉及模型参数
                     bm25.fit(corpus)
                     logger.info("BM25检索器从 ChromaDB 加载了 %d 个文档块", len(corpus))
 
                     # 包装 retrieve 方法，返回与向量检索器一致的格式
+                    # 这里改的是实例属性（monkey patch），不是改类定义：为了在拿到语料库后
+                    # 顺手统一出参格式，让上层能用同一套代码消费向量/关键词两路结果。
                     original_retrieve = bm25.retrieve
 
                     # BM25 最低分数阈值
@@ -886,7 +972,7 @@ class EnhancedLangGraphRAGSystem:
         return None
 
     def _register_knowledge_agent(self, retriever, bm25_retriever, doc_filter):
-        """注册 Knowledge Agent"""
+        """注册 Knowledge Agent（doc_filter 目前恒为 None，见 _register_agents 的说明）"""
         try:
             from agents.knowledge_agent.agent import KnowledgeAgent
             agent = KnowledgeAgent(
@@ -901,6 +987,8 @@ class EnhancedLangGraphRAGSystem:
             )
             # 描述会被向量化，用于路由召回 —— 所以要写清楚"什么该找我、什么不该找我"，
             # 并且尽量覆盖用户真实会用的词。
+            # register 内部有 Harness（约束层）校验：实例若没有 handle 方法（不符合
+            # AgentProtocol=Agent 接口契约）会直接抛 TypeError，而不是默默注册进去。
             self.registry.register(
                 agent_id="knowledge_agent",
                 name="知识检索Agent",
@@ -961,7 +1049,7 @@ class EnhancedLangGraphRAGSystem:
             logger.error("CustomerService Agent注册失败: %s", e)
 
     def _register_document_agent(self, retriever):
-        """注册 Document Agent"""
+        """注册 Document Agent（当前无调用方：阶段 4 已把该 Agent 下线，方法保留备恢复）"""
         try:
             from agents.document_agent.agent import DocumentAgent
             agent = DocumentAgent(llm=self.llm_plus, retriever=retriever, embedder=self.embedder)
@@ -977,7 +1065,11 @@ class EnhancedLangGraphRAGSystem:
             logger.error("Document Agent注册失败: %s", e)
 
     def _register_vqa_agent(self):
-        """注册 VQA（视觉问答）Agent"""
+        """注册 VQA（视觉问答）Agent
+
+        方法名只提了 VQA，但 chat_agent 也在这里注册（历史原因跟 VQA 挂在了一起）——
+        找 chat_agent 的注册处时别漏了下面第二个 try 块。
+        """
         try:
             from agents.vqa_agent.agent import VQAAgent
             agent = VQAAgent(

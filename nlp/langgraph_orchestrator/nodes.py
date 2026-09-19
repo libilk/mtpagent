@@ -6,7 +6,13 @@ LangGraph 节点函数定义
 包装现有 Agent 为 LangGraph 节点，不修改任何现有 Agent 代码。
 所有节点函数接收 GraphState，返回需要更新的状态字段字典。
 
-支持 StreamWriter 实时推送进度事件（stream_mode="custom"）。
+节点契约（两条隐式约定，读本文件前先记住）：
+- 返回值是"部分更新"：只有返回里出现的字段会被合进全局 state，其余字段保持原值，
+  所以 `return {}` 合法（表示本轮什么都不改，见 aggregator_node 的中间波次分支）。
+- 同一字段被多个并行分支写入时，按 enhanced_state.py 里挂的 reducer（归并函数）合并，
+  而不是后写覆盖先写 —— 这解释了下面为什么把结果包成"只含一项的列表"。
+
+支持 StreamWriter（流式事件写入器）实时推送进度事件（stream_mode="custom"）。
 """
 
 from __future__ import annotations
@@ -16,17 +22,21 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from langchain_core.messages import AIMessage
-from langgraph.config import get_stream_writer
+from langgraph.config import get_stream_writer  # 取当前节点的 StreamWriter，见 _get_writer 的兜底
 
 from langgraph_orchestrator.enhanced_state import EnhancedGraphState as GraphState
-from core.protocol import AgentProtocol
-from core.write_ops import consume_write_ops, clear_write_ops
+from core.protocol import AgentProtocol  # AgentProtocol（Agent 接口契约）：必须实现 handle(query, context) -> str
+from core.write_ops import consume_write_ops, clear_write_ops  # 写操作的线程本地登记，详见 core/write_ops.py
 
 logger = logging.getLogger(__name__)
 
 
 def _get_writer() -> Optional[Callable]:
-    """安全获取 StreamWriter，非流式调用时返回 None"""
+    """安全获取 StreamWriter，非流式调用时返回 None
+
+    脱离图执行时（如单测里直接调节点函数）没有 stream 上下文，取 writer 会抛异常，
+    这里兜底成 None，节点函数才不必到处判空。
+    """
     try:
         return get_stream_writer()
     except Exception:
@@ -34,7 +44,11 @@ def _get_writer() -> Optional[Callable]:
 
 
 def _emit(writer: Optional[Callable], agent: str, msg: str, **extra):
-    """通过 StreamWriter 发射一条进度事件"""
+    """通过 StreamWriter 发射一条进度事件
+
+    统一外壳 {"event": "progress", "agent", "msg", "ts"}；前端按 agent + stage 区分阶段，
+    调用方可借 **extra 追加字段（如 evaluator 的 score）。
+    """
     if writer is None:
         return
     event = {"event": "progress", "agent": agent, "msg": msg, "ts": time.time()}
@@ -50,6 +64,14 @@ def make_agent_node(agent_instance: Any, agent_name: str, shared_memory=None, me
     """
     将任意 handle(query, context) -> str 的 Agent 包装为 LangGraph 节点。
 
+    这是工厂函数：入参是 Agent 实例，返回值才是节点函数。因为图要求节点函数只接收
+    state 一个参数，Agent 实例和名字这些额外依赖只能靠闭包提前捕获。
+
+    这里也是"Agent 只返回字符串、写操作靠线程本地登记"这条设计的落点：
+    handle() 的签名只能返回 str，没地方附带"我刚改了数据"这个信号，
+    于是改数据的动作由 Agent 内部调 record_write_op 记进线程本地，
+    节点在 handle() 返回后立刻 consume_write_ops() 取走（必须在同一线程内）。
+
     Args:
         agent_instance: Agent 实例，必须实现 AgentProtocol（有 handle 方法）
         agent_name: Agent 标识名（同时也是节点名）
@@ -63,6 +85,8 @@ def make_agent_node(agent_instance: Any, agent_name: str, shared_memory=None, me
         TypeError: Agent实例未实现 AgentProtocol
     """
     # ========== Harness 契约校验（注册阶段拦截，避免运行时崩溃） ==========
+    # Harness（约束层）= 强制 Agent 符合统一接口的基础设施；类型检查放在"连图"阶段做掉，
+    # 而不是等某个请求跑到一半才发现这个 Agent 没有 handle。
     if not isinstance(agent_instance, AgentProtocol):
         raise TypeError(
             f"Agent '{agent_name}' ({type(agent_instance).__name__}) 未实现 AgentProtocol。"
@@ -70,13 +94,15 @@ def make_agent_node(agent_instance: Any, agent_name: str, shared_memory=None, me
         )
 
     def node_fn(state: GraphState) -> dict:
+        # 返回的 dict 是"部分更新"：只有这里出现的字段会写回全局 state
         writer = _get_writer()
         query = state["query"]
 
         _emit(writer, agent_name, f"开始执行", stage="start")
 
         # ========== 解析当前会话的记忆实例 ==========
-        # 优先使用 memory_store（按 thread_id 隔离），兼容旧的 shared_memory
+        # memory_store 按 thread_id（会话 ID）隔离：不同对话窗口/用户互不串记忆。
+        # 优先用它；shared_memory 是全局单例、已废弃，仅为向后兼容保留。
         session_memory = None
         thread_id = state.get("thread_id")
         if memory_store and thread_id:
@@ -85,6 +111,8 @@ def make_agent_node(agent_instance: Any, agent_name: str, shared_memory=None, me
             session_memory = shared_memory
 
         # ========== 共享记忆：指代消解 ==========
+        # 指代消解：把"它/这个/同款"这类代词按最近几轮历史还原成具体对象。
+        # 放在节点层统一做（而非各 Agent 内部各写一套），是为了消解口径一致。
         if session_memory:
             history = session_memory.get_messages()
             if history:
@@ -125,6 +153,7 @@ def make_agent_node(agent_instance: Any, agent_name: str, shared_memory=None, me
                     logger.warning(f"[共享记忆消解] 失败: {e}")
 
         # 构建 context —— 与原始 executor._act() 保持兼容
+        # dependencies = 上游 Agent 的产出，按 agent 名索引；DAG 里任务之间就靠它传数据
         context: Dict[str, Any] = {
             "messages": state.get("messages", []),
             "dependencies": {
@@ -145,8 +174,9 @@ def make_agent_node(agent_instance: Any, agent_name: str, shared_memory=None, me
             context["file_paths"] = file_paths
 
         # 如有反馈（重试场景），注入到 query 中
+        # 阈值 0.7 与 router.check_quality 的放行线一致：那边判"该重试"用的就是这个分
         quality = state.get("quality_score", 1.0)
-        iteration = state.get("iteration", 0)
+        iteration = state.get("iteration", 0)  # iteration（迭代轮次）：当前是第几轮重试
         if quality < 0.7 and iteration > 0:
             feedback = state.get("feedback", "")
             if feedback:
@@ -158,16 +188,17 @@ def make_agent_node(agent_instance: Any, agent_name: str, shared_memory=None, me
 
         _emit(writer, agent_name, "正在调用Agent处理...", stage="executing")
 
-        # 将历史注入 context，供 Agent ReAct 循环使用
+        # 将历史注入 context，供 Agent 的 ReAct（推理-行动循环）使用
         if session_memory:
             context["history"] = session_memory.get_messages()
 
-        # 将 stream_writer 和 agent_name 注入 context，供 Agent ReAct 循环发射中间步骤事件
+        # 把 writer 塞进 context：Agent 内部的 ReAct 循环还想推"正在调哪个工具"这类中间事件，
+        # 但它拿不到图上下文，只能由节点从这里把 writer 递进去。
         context["_stream_writer"] = writer
         context["_agent_name"] = agent_name
 
-        # 取出本次 Agent 调用期间登记的所有写操作（详见 core/write_ops.py）。
-        # 必须在 handle() 之后、且在本线程内读取 —— 记录器是线程本地的。
+        # 取出本次 Agent 调用期间登记的所有写操作（write operation：会改数据的动作，如建单/退款，需人工审批）。
+        # 必须在 handle() 之后、且在本线程内读取 —— 记录器是线程本地的（详见 core/write_ops.py）。
         write_ops: List[Dict[str, Any]] = []
         try:
             result = agent_instance.handle(query, context)
@@ -187,6 +218,8 @@ def make_agent_node(agent_instance: Any, agent_name: str, shared_memory=None, me
         if write_ops:
             logger.info(f"[写操作] {agent_name} 本轮执行了 {len(write_ops)} 个写操作")
 
+        # 注意几个字段都包成"只含一项的列表"：它们在 enhanced_state.py 里挂了 operator.add，
+        # 并行分支各返回一项、由框架累加；直接返回裸对象会与 reducer 的预期不符。
         return {
             "agent_results": [
                 {
@@ -195,9 +228,12 @@ def make_agent_node(agent_instance: Any, agent_name: str, shared_memory=None, me
                     "iteration": iteration,
                 }
             ],
+            # AIMessage（AI 消息对象）：让后续节点和记忆能看到本轮产出；
+            # name 标明出处，截断到 8000 字是防止单条消息把上下文撑爆
             "messages": [
                 AIMessage(content=str(result)[:8000], name=agent_name)
             ],
+            # 登记"本任务已完成"，wave_scheduler 靠它判断下游任务的依赖是否满足
             "completed_task_ids": [state.get("current_task_id") or agent_name],
             "write_operations": write_ops,
         }
@@ -215,6 +251,10 @@ class GraphNodes:
     """
     图节点工厂，持有对现有编排组件的引用。
 
+    做成类而不是一堆裸函数，是因为节点要用 planner/router/registry/llm 这些组件；
+    在 __init__ 注入一次、节点从 self 上取，省得每个函数签名都拖一串参数。
+    （对比 make_agent_node：那边只有 Agent 实例一个依赖，所以闭包工厂就够。）
+
     使用方法::
 
         nodes = GraphNodes(planner, router, registry, llm)
@@ -228,7 +268,7 @@ class GraphNodes:
         Args:
             planner: TaskPlanner 实例（来自 orchestrator/planner.py）
             router:  AgentRouter  实例（来自 orchestrator/router.py）
-            registry: AgentRegistry 实例（来自 orchestrator/registry.py）
+            registry: AgentRegistry 实例（注册中心：Agent 名册，按名字取实例）
             llm: LLM 实例（来自 llm/llm_client.py，用于聚合和评估）
         """
         self.planner = planner
@@ -237,10 +277,14 @@ class GraphNodes:
         self.llm = llm
 
     # ---- Complexity Classifier 节点（职责分离：只判断复杂度）----
+    # complexity_classifier（复杂度分类器）：判断问题该走简单路径还是复杂路径
 
     def complexity_classifier_node(self, state: GraphState) -> dict:
         """
         唯一职责：判断问题复杂度（使用 LLM）
+
+        只写 is_complex 一个字段；"接着走 router 还是 planner"由条件边
+        route_by_complexity 读它决定 —— 判断与分流分开，改分流不必动这里。
         """
         writer = _get_writer()
         query = state["query"]
@@ -280,11 +324,15 @@ class GraphNodes:
     def planner_node(self, state: GraphState) -> dict:
         """
         唯一职责：生成 DAG 任务计划（仅在复杂查询时调用）
+
+        planner（规划器）产出的每个 task 带 agent_id / task_id / depends_on，
+        其中 depends_on 就是 DAG 的边 —— 波次调度靠它算"谁现在可以跑"。
         """
         writer = _get_writer()
         _emit(writer, "planner", "正在生成任务执行计划...", stage="start")
 
         # 构建规划用的 query：附加文件/图片上下文，帮助规划器安排正确的 Agent
+        # 规划器只读得到文本、看不到附件本身；不把这些"有附件"的线索写进文本，它会漏排 vqa/excel 这类 Agent
         plan_query = state["query"]
         file_paths = state.get("file_paths", [])
         image_paths = state.get("image_paths", [])
@@ -317,7 +365,11 @@ class GraphNodes:
         return {"plan": plan}
 
     def router_node(self, state: GraphState) -> dict:
-        """唯一职责：选择最佳 Agent（仅在简单查询时调用）"""
+        """router（路由器）：选一个最合适的 Agent（仅在简单查询时调用）
+
+        只写 selected_agent 一个字段，route_to_agent 拿它当节点名用；
+        这里不决定"走哪条边"，选择与分流同样拆开。
+        """
         writer = _get_writer()
         _emit(writer, "router", "正在选择最佳Agent...", stage="start")
 
@@ -358,7 +410,11 @@ class GraphNodes:
     # ---- Aggregator 节点 ----
 
     def aggregator_node(self, state: GraphState) -> dict:
-        """汇总多个 Agent 的结果为最终答案。"""
+        """aggregator（聚合器）：把多个 Agent 的结果汇总成一份最终答案。
+
+        多 Agent 场景里它会随每一波任务反复路过，所以要自己判断"现在是不是真该汇总"，
+        见下面的波次检查。
+        """
         writer = _get_writer()
         results = state.get("agent_results", [])
 
@@ -372,11 +428,12 @@ class GraphNodes:
             completed = set(state.get("completed_task_ids", []))
             if len(completed) < len(tasks):
                 # 还有未完成任务，不汇总，直接透传（避免中间波次浪费 LLM 调用）
+                # 返回 {} = 本轮不改任何 state 字段（节点契约允许），随后交给 wave_scheduler 发下一波
                 _emit(writer, "aggregator", f"中间波次检查点 ({len(completed)}/{len(tasks)} 完成)", stage="checkpoint")
                 return {}
 
         # ========== 所有任务完成或简单路由，执行汇总 ==========
-        # 取最新一轮迭代的结果
+        # agent_results 是累加的，含历史轮次的旧结果；只取迭代号最大的一轮，免得把上轮废稿也综合进去
         max_iter = max(r.get("iteration", 0) for r in results)
         latest = [r for r in results if r.get("iteration", 0) == max_iter]
 
@@ -391,7 +448,8 @@ class GraphNodes:
         # 多结果用 LLM 综合
         _emit(writer, "aggregator", f"正在综合{len(latest)}个Agent的结果...", stage="merging")
 
-        # 提取并保留各 Agent 结果中的引用源标记（避免 LLM 综合时丢失）
+        # 提取并保留各 Agent 结果中的引用源标记（citation，引用溯源：标出"这句来自哪篇文档"）。
+        # 标记是 Agent 埋在结果里的 HTML 注释，LLM 综合时会丢，所以先摘出来、综合完再贴回。
         import re
         all_sources = []
         all_retrieval_stats = {}  # 保留检索统计（多个 Agent 的统计合并）
@@ -436,6 +494,7 @@ class GraphNodes:
                 import json as _json
                 seen = set()
                 unique_sources = []
+                # score（分数）= 相关性得分；按分排序去重后只留前 3 条，避免引用列表过长
                 for s in sorted(all_sources, key=lambda x: x.get("score", 0), reverse=True):
                     key = s.get("source", "")
                     if key and key not in seen:
@@ -461,7 +520,11 @@ class GraphNodes:
     # ---- Evaluator 节点 ----
 
     def evaluator_node(self, state: GraphState) -> dict:
-        """LLM 语义质量评估，复用 executor.py 中的评估 prompt 逻辑。"""
+        """LLM 语义质量评估（evaluator，评估器：对最终答案做质量把关），复用 executor.py 中的评估 prompt 逻辑。
+
+        产出 quality_score（0~1）和 feedback：check_quality 拿分数决定放行还是重试；
+        真要重试时，feedback 会被 make_agent_node 拼进 query 当成改进要求。
+        """
         writer = _get_writer()
         answer = state.get("final_answer", "")
         query = state.get("query", "")
@@ -495,6 +558,7 @@ class GraphNodes:
             response = self.llm.generate(
                 prompt, temperature=0.1, max_tokens=200
             )
+            # fallback（降级兜底）：模型没吐合法 JSON 时给一组中等分，宁可放过也不因解析失败卡住流程
             scores = parse_llm_json(
                 response,
                 fallback={
@@ -505,7 +569,8 @@ class GraphNodes:
                 },
             )
 
-            # 加权平均（与 executor.py _llm_evaluate 一致）
+            # 加权平均（与 executor.py _llm_evaluate 一致）；
+            # 每项 0-10 分、除以 10 归一到 0-1，因为 check_quality 的 0.7 阈值是 0-1 口径
             total = (
                 scores.get("relevance", 7) * 0.4
                 + scores.get("completeness", 7) * 0.3
@@ -529,6 +594,7 @@ class GraphNodes:
 
         except Exception as e:
             logger.warning("LLM 评估失败: %s，使用基础评分", e)
+            # 评估器自己坏掉时按长度给分：长答案默认"刚好过线"(0.7)，避免因评估故障陷入无限重试
             total = 0.7 if len(str(answer)) > 50 else 0.5
             feedback = ""
             _emit(writer, "evaluator", f"评估降级，基础评分: {total:.2f}", stage="fallback")

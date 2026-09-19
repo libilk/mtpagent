@@ -434,6 +434,8 @@ Agent 答复里出现了可解释的依据：「该商品属于「3C数码产品
 | 5 | **角色过滤没接线** | [enhanced_entry.py:705](langgraph_orchestrator/enhanced_entry.py#L705) 把 `doc_filter` 硬编码传 `None` | Agent 端有权限过滤逻辑，但运行时不会触发 |
 | 6 | **过期 agent id** | `router.route_simple()`（已删）及 `planner._create_simple_plan()` 里的 `customer_agent` / `code_agent` | 前者是死代码从未执行；**后者在回退路径上，会指向不存在的 Agent** —— 已修 |
 | 7 | **`validation_target` 是空字段** | [enhanced_graph.py:206](langgraph_orchestrator/enhanced_graph.py#L206) 读它，但**全项目无人写入**（真正在写的是 [clarification.py](langgraph_orchestrator/clarification.py) 的 `retry_target_task`） | 参数校验失败要重试时，**恒定回跑 `agent_ids[0]`**，而不是真正缺字段的那个上游 Agent —— 未修，仅在代码里如实注释 |
+| 8 | **critic 节点整个是空跑的** | `critic_agent` 类存在（[agents/critic_agent/](agents/critic_agent/)），但 `_register_agents` **从未注册它**；[critic.py:40](langgraph_orchestrator/critic.py#L40) 取不到实例即提前判"通过" | `enable_critic` 开不开都一样：**没有任何输出真的被评审过**。另有潜伏问题：真注册上之后，[critic.py:51](langgraph_orchestrator/critic.py#L51) 的 `state.get("plan", {})` 默认值不生效（键存在、值为 `None`），单 Agent 路径会抛 `AttributeError` —— 未修，仅在代码里如实注释 |
+| 9 | **两个"参数对齐"字段是空的** | `parameters_aligned` / `parameter_alignment_errors` 只在 [enhanced_entry.py:121-122](langgraph_orchestrator/enhanced_entry.py#L121-L122) 初始化，**全项目无人读、无人写** | 不影响运行；但读 state 字段表时别以为它们接了什么逻辑 |
 
 ---
 
