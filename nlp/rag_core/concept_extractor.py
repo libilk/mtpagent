@@ -4,6 +4,13 @@
 ==================
 
 从多个检索到的文档中提取共同的语义概念，构建概念关系图
+
+接线现状（先看这段能省不少时间）：**本模块不在主流程里**。
+它被 agents/knowledge_agent/agent.py 注册成一个 LLM 可调用的工具
+`extract_concepts`（工具描述："从多个检索到的文档中提取跨文档语义概念，构建概念关系图"），
+也就是：只有 LLM 自己决定调这个工具时才会执行，并且要求该 Agent 的优化模块
+初始化成功（失败则工具直接返回空结果）。
+日常问答走的 vector_search 那条路完全不经过本文件。
 """
 
 import logging
@@ -41,7 +48,7 @@ class ConceptExtractor:
 
         Args:
             llm: LLM实例（用于概念提取）
-            embedder: 嵌入器实例（用于概念聚类）
+            embedder: 向量化模型（embedder，用于概念聚类）；传 None 时降级为"按概念名精确分组"，不做语义合并
             similarity_threshold: 概念相似度阈值（默认0.8）
             min_concept_freq: 最小概念频率（默认1）
             max_concepts_per_doc: 每个文档最多提取的概念数（默认5）
@@ -280,10 +287,13 @@ class ConceptExtractor:
             # 向量化概念名称
             embeddings = self.embedder.embed_batch(concept_names)
 
-            # 计算相似度矩阵
+            # 计算相似度矩阵。反直觉点：点积只在向量已归一化时才等于余弦相似度，
+            # 这里没有归一化，所以阈值 0.8 的真实含义取决于 embedder 输出是否已归一化。
             similarity_matrix = np.dot(embeddings, embeddings.T)
 
-            # 聚类：相似度 > threshold 的概念合并
+            # 聚类（贪心单趟）：从前往后扫，谁还没被收走就用它当聚类名、收编所有相似项。
+            # 所以结果依赖遍历顺序 —— 同一批概念换个顺序，聚类名可能不同。
+            # 相似度 > threshold 的概念合并
             clusters = {}
             visited = set()
 
@@ -330,6 +340,10 @@ class ConceptExtractor:
 
         权重计算公式：
         weight = (mentions / total_docs) * (1 + type_bonus)
+
+        注意：上面这行与下面实现不一致（未改逻辑，仅记录事实）：实际算的是
+        doc_coverage * type_bonus —— doc_coverage 是"出现该概念的文档数 / 文档总数"，
+        type_bonus 直接相乘，既没有 mentions、也没有 +1。
 
         Args:
             clustered_concepts: 聚类后的概念
@@ -570,6 +584,8 @@ class ConceptExtractor:
             else:
                 return "相关"
         except:
+            # fallback（降级兜底）：关系抽取失败宁可给一个泛化的"相关"，
+            # 也不让整条关系列表因为一次 LLM 调用失败而中断。
             return "相关"
 
     def _generate_concept_summary(
@@ -631,5 +647,6 @@ class ConceptExtractor:
         }
 
 
-# 导入time模块（补充）
+# 导入time模块（补充）。放在文件末尾：extract() 只在运行时取 time.time()，
+# 所以放这儿有效，但读上面代码时别以为 time 没导入。
 import time

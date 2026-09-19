@@ -4,6 +4,15 @@ API Embedding 模块
 
 通过调用商业 AI 的 Embedding API 实现文本向量化。
 支持通义千问、OpenAI、智谱等主流服务商。
+
+本文件只有一个类，读懂它只需抓住一件事：**它把「文本 → 向量」这一步外包给了远程 API。**
+
+两个容易读歪的点：
+- 「支持三家服务商」指的是下面那张配置表里列了三家，但**本项目实际只跑 dashscope（通义千问）**，
+  调用处写死了 provider="dashscope"；openai / zhipu 两项没有任何地方使用。所以这不是多厂商适配工程，
+  只是「配置表 + 默认值」的写法，别按多适配层的复杂度去读。
+- 「OpenAI 兼容接口」是行业通行说法：指各家服务商都照 OpenAI 的 HTTP 协议收发请求，
+  于是可以统一用 openai 这个 SDK 去调它们，**不需要各装各家自己的 SDK**（本项目就没装 dashscope 包）。
 """
 
 import logging
@@ -15,6 +24,9 @@ logger = logging.getLogger(__name__)
 __all__ = ['APIEmbedder', 'EMBEDDING_PROVIDERS']
 
 # 预设的 Embedding API 提供商配置
+# 三家都遵循同一套 OpenAI 兼容协议，所以同一份调用代码能通吃，差别只在地址、模型名、维度。
+# 本项目只用得到 'dashscope' 这一项；另两项留在这里当下拉选项，没有代码路径会选到它们。
+# dimension / model_dimensions：同一家的不同模型维度不同（如 v2=1536、v3=1024），所以维度是「跟着模型走」的。
 EMBEDDING_PROVIDERS = {
     'dashscope': {
         'base_url': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
@@ -40,10 +52,13 @@ EMBEDDING_PROVIDERS = {
 
 class APIEmbedder:
     """
-    API Embedding 生成器
+    API Embedding 生成器（embedder，向量化模型）
 
     通过 OpenAI 兼容接口调用各类商业 Embedding 服务。
     与本地 SemanticRetriever 的 encode_texts 接口一致，可直接替换。
+
+    这层「接口一致」是刻意的契约：调用方只认 encode_texts / encode_query / get_embedding_dim 三个方法，
+    所以把本地模型换成远程 API（或反过来）时，上层检索器一行都不用改。
     """
 
     def __init__(
@@ -82,6 +97,8 @@ class APIEmbedder:
         self.model = model or provider_config.get('default_model', 'text-embedding-v3')
 
         # 设置向量维度（优先使用显式指定，其次按模型查找，最后用提供商默认值）
+        # 隐式契约：这个维度必须和向量库里已存的向量维度一致 —— 建库时用哪个模型，检索时就得用同一个模型。
+        # 换模型（v2 的 1536 维 ↔ v3 的 1024 维）会让新旧向量没法比较，只能重新建库，这是最容易踩的坑。
         if dimension:
             self.embedding_dim = dimension
         else:
@@ -89,6 +106,8 @@ class APIEmbedder:
             self.embedding_dim = model_dims.get(self.model, provider_config.get('dimension', 1024))
 
         # 尝试导入 openai 库
+        # openai 是本项目的硬依赖（requirements.txt 里没注释掉），所以实际总是走 try 这条分支；
+        # 而 requests 那条备用通道本项目跑不到 —— 读的时候知道它存在、不必当主逻辑读。
         try:
             import openai
             self.use_openai_lib = True
@@ -103,6 +122,7 @@ class APIEmbedder:
             logger.info(f"openai 库未安装，使用 requests 调用 {self.provider} Embedding API")
 
         # 使用统计
+        # token（词元）= LLM 计费与长度计量的最小单位，按 token 数收费，所以这里单独累计 total_tokens。
         self.usage_stats = {
             'total_calls': 0,
             'total_tokens': 0,
@@ -128,14 +148,15 @@ class APIEmbedder:
             show_progress: 是否显示进度
 
         Returns:
-            向量数组 (n, dimension)
+            向量数组 (n, dimension)，行顺序与入参 texts 严格一一对应 ——
+            调用方靠下标把向量对回原文，所以下面的失败兜底必须按位补足，不能少塞。
         """
         if not texts:
             return np.array([])
 
         all_embeddings = []
 
-        # 分批处理
+        # 分批处理：一次请求捎带多条能省往返开销，但服务商对单批条数/长度有上限，超限会整批报错。
         for i in range(0, len(texts), batch_size):
             batch_texts = texts[i:i + batch_size]
 
@@ -148,6 +169,9 @@ class APIEmbedder:
             except Exception as e:
                 logger.error(f"批次 {i}-{i+len(batch_texts)} 编码失败: {e}")
                 # 失败时返回零向量
+                # 为什么不抛出异常：补零是为了让返回数组的行数仍与 texts 对齐，调用方按位取不会错位。
+                # 代价是调用方分不清「这条编码失败了」还是「它真的不相关」—— 零向量与任何向量相似度都是 0，
+                # 通常会被下游的分数阈值滤掉，于是表现为「静默少了几条结果」。
                 all_embeddings.extend([np.zeros(self.embedding_dim) for _ in batch_texts])
 
         return np.array(all_embeddings)
@@ -190,7 +214,11 @@ class APIEmbedder:
             raise
 
     def _encode_with_requests(self, texts: List[str]) -> List[np.ndarray]:
-        """使用 requests 库编码"""
+        """使用 requests 库编码
+
+        备用通道：只在 openai 库装不上时才会被 _encode_batch 选中（见 __init__ 里的 use_openai_lib）。
+        它绕开 SDK、直接手拼 HTTP 请求打同一套 OpenAI 兼容协议，本项目不会走到这里。
+        """
         import requests
         import json
 
@@ -269,6 +297,9 @@ class APIEmbedder:
         }
 
     # 方法别名，兼容不同接口
+    # embed_query / embed_documents 是 LangChain 那套 Embeddings 接口约定的方法名：
+    # 外部组件（如 LangChain 的向量库封装）按这两个名字来认，所以这里保留别名，但内部实现就是上面的 encode_*。
+    # 注意返回类型不同：encode_* 给的是 numpy 数组，别名给的是普通 list（便于直接序列化）。
     def embed_query(self, query: str) -> List[float]:
         """embed_query别名，调用encode_query"""
         return self.encode_query(query).tolist()

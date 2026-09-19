@@ -9,6 +9,20 @@
 3. SimpleReranker: 基于规则的轻量方案（兜底）
 
 使用 RerankerFactory.create_reranker() 创建实例。
+
+reranker（重排序器）= 对 recall（召回）结果做精排，把最相关的顶上来。
+cross-encoder（交叉编码器）= 把「查询+文档」一起送进模型打分，比向量更准但更慢，
+所以只用来精排少量候选。本文件同时给出 API / 本地模型 / 纯规则三种实现。
+
+⚠️ 降级是**静默**的 —— 这是读本文件最该警惕的点：
+- 工厂选型降级（api → cross_encoder → rule）只写 log，返回值里没有任何"我最终用了谁"的标记；
+- 单个 rank() 内部失败也一样：API 调用失败会返回 [0.5]*n 的均匀分数（见 rank 的 except），
+  调用方拿到的是一份"看起来正常"的分数列表，但排序其实已退化成原始顺序。
+  也就是说，上层若只看结果、不看日志，根本无法察觉重排序没生效。
+
+⚠️ 接线现状：本文件只在 enable_rerank=True 时被创建，而挂着它的 HybridRetriever
+只在 knowledge_agent 的降级路径生效，customer_service_agent 显式 use_rerank=False；
+另一处调用 _rerank_with_reranker 只在被 LLM 当工具调用时才走，且每次新建实例。
 """
 
 import os
@@ -29,6 +43,9 @@ class DashScopeReranker:
 
     调用 DashScope 的 gte-rerank 模型，通过 API 实现交叉编码重排序。
     无需下载模型，无需 GPU，成本极低（0.0008元/千tokens）。
+
+    代价是**多一次网络往返**：每次 rank 都是一个 HTTP 请求，失败只能静默降级
+    （见 rank 的 except）—— 这也是它不适合放在主路径、只适合精排少量候选的原因。
 
     使用方式：
         reranker = DashScopeReranker()
@@ -124,6 +141,8 @@ class DashScopeReranker:
         except Exception as e:
             logger.error(f"[DashScope Rerank] API 调用失败: {e}")
             # 降级：返回均匀分数，不影响后续流程
+            # ⚠️ 这就是"静默降级"的核心：所有文档同分 → 排序保持不变，
+            # 但调用方从返回值里看不出与正常结果的区别，只有上面那行 log 能证明降级发生过。
             return [0.5] * len(documents)
 
 
@@ -139,6 +158,9 @@ class CrossEncoderReranker:
     无需 API 调用，但需要下载模型文件（约 400MB）。
 
     推荐模型：BAAI/bge-reranker-base（中文效果好）
+
+    ⚠️ 构造时就会同步下载/加载模型，第一次很慢；所以别在请求路径上反复 new，
+    应复用实例（knowledge_agent._rerank_with_reranker 每调一次就新建，属已知开销）。
 
     使用方式：
         reranker = CrossEncoderReranker(model_path="BAAI/bge-reranker-base")
@@ -247,8 +269,11 @@ class SimpleReranker:
     """
     简单的重排序器（基于规则）
 
-    不依赖任何模型或 API，纯规则打分。
+    不依赖任何模型或 API，纯规则打分 —— 本质是 fallback（降级兜底）。
     当 API 和本地模型都不可用时作为兜底方案。
+
+    注意它没有"语义"：规则只看长度、关键词命中、出现位置，排序质量接近启发式，
+    作用是"聊胜于无"—— 它的分数不能当相关性读（见 rank 里的三条规则）。
     """
 
     def __init__(self):
@@ -316,6 +341,10 @@ class RerankerFactory:
     - rule: SimpleReranker（兜底）
     - auto: 按 api → cross_encoder → rule 顺序尝试
 
+    "降级"发生在两处，且都静默：构造失败在 _auto_create 里吞掉异常换下一档，
+    运行失败在各自 rank() 里吞掉异常返回均匀分。想知道当前实际用的是哪一档，
+    只能去看日志里那句"[Reranker Auto] 选择/降级为 ..."。
+
     使用方式：
         reranker = RerankerFactory.create_reranker("api")
         reranker = RerankerFactory.create_reranker("auto")
@@ -381,6 +410,8 @@ class RerankerFactory:
         尝试顺序：API → Cross-Encoder → Rule
         """
         # 1. 优先尝试 API（最方便，无需本地资源）
+        # ⚠️ 这里只检查"环境变量存在"，不校验 key 是否有效：填了个错的 key 也会选中 API 档，
+        # 直到第一次 rank() 失败才暴露 —— 而且失败后不会回头重选本地模型，只会返回均匀分。
         api_key = kwargs.get("api_key") or os.getenv("DASHSCOPE_API_KEY")
         if api_key:
             try:

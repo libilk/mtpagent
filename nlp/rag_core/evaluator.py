@@ -4,6 +4,16 @@ RAG评估体系
 ===========
 
 提供离线和在线评估指标
+
+【调用状态 —— 核实自 knowledge_agent/agent.py，别把它当成主链路的质量把关】
+- 真接线：`OnlineMetrics.record_query`（agent.py:851，主路径 handle 开头）；
+  `RAGEvaluator.get_summary` / `OnlineMetrics.get_metrics` 只被 get_stats 报表调（1664）。
+- 只在降级路径 `_handle_with_optimizations` 生效：`RAGEvaluator.evaluate_latency`（1271）。
+- **完全没有调用方**：`evaluate_retrieval` / `evaluate_generation` —— 全仓库只有定义，
+  没有任何地方调用（离线评估需要人工标注，线上请求拿不到）。
+
+⚠️ 命名易混：本文件的 `RAGEvaluator` 只统计延迟这类运行指标，**不给答案打质量分**。
+编排层那个"不过关就打回重试"的 evaluator（评估器）是另一个东西，别对号入座。
 """
 
 import logging
@@ -16,16 +26,18 @@ logger = logging.getLogger(__name__)
 
 class RAGEvaluator:
     """
-    RAG评估器
+    RAG（检索增强生成：先检索资料、再让 LLM 基于资料回答）评估器
 
-    功能：
-    1. 检索评估（Recall, Precision, MRR）
-    2. 生成评估（ROUGE, Faithfulness）
-    3. 端到端评估（Latency, Throughput）
+    功能（第 1、2 项目前无调用方，见文件头）：
+    1. 检索评估（Recall 召回 / Precision 精确率 / MRR 平均倒数排名）
+    2. 生成评估（ROUGE 与参考答案的文本重合度 / Faithfulness 忠实度）
+    3. 端到端评估（Latency 延迟 / Throughput 吞吐量 —— 后者未实现）
     """
 
     def __init__(self):
         """初始化评估器"""
+        # defaultdict(list)：指标名 → 历史值的列表。之所以留全量历史而不是只存均值，
+        # 是因为 get_summary 要算 p95/p99 —— 只留均值就再也算不出分位数了。
         self.metrics = defaultdict(list)
 
         logger.info("RAG评估器初始化")
@@ -41,22 +53,27 @@ class RAGEvaluator:
 
         Args:
             retrieved_docs: 检索到的文档列表
-            relevant_docs: 相关文档ID列表（ground truth）
-            k: 评估前k个结果
+            relevant_docs: 相关文档ID列表（ground truth = 人工标注的标准答案）；
+                           有标注才判得出"检索得对不对"，线上请求没有标注，
+                           这正是本方法无调用方的原因
+            k: 评估前k个结果（top_k 取前 k 条）
 
         Returns:
             评估指标字典
         """
+        # doc_id（文档 ID）= 每篇文档的唯一标识；这里只取 id 不取正文——判相关性只需要 id
         retrieved_ids = [doc.get("metadata", {}).get("doc_id") for doc in retrieved_docs[:k]]
 
-        # Recall@k: 召回率
+        # Recall@k: 召回率 —— 全部相关文档里捞回来了几成，衡量"漏没漏"
         relevant_retrieved = set(retrieved_ids) & set(relevant_docs)
         recall = len(relevant_retrieved) / len(relevant_docs) if relevant_docs else 0
 
-        # Precision@k: 精确率
+        # Precision@k: 精确率 —— 取回的 k 条里几条真相关，衡量"准不准"。
+        # 分母写死 k，不足 k 条时等价于按"没凑够数"扣分
         precision = len(relevant_retrieved) / k if k > 0 else 0
 
-        # MRR (Mean Reciprocal Rank): 平均倒数排名
+        # MRR (Mean Reciprocal Rank): 平均倒数排名 —— 只看第一条命中的位置：
+        # 排第 1 得 1、第 2 得 1/2、第 3 得 1/3，反映"用户要往下翻多久"
         mrr = 0.0
         for i, doc_id in enumerate(retrieved_ids):
             if doc_id in relevant_docs:
@@ -90,10 +107,11 @@ class RAGEvaluator:
         Returns:
             评估指标字典
         """
-        # ROUGE-L: 最长公共子序列
+        # ROUGE-L: 最长公共子序列 —— 与参考答案的重合度。只比字面、不判对错，
+        # 换个同义词重述就会被判成不重合，所以低分不等于答错
         rouge_l = self._calculate_rouge_l(generated_answer, reference_answer)
 
-        # Faithfulness: 答案是否忠实于检索文档
+        # Faithfulness: 答案是否忠实于检索文档 —— 用来抓"脱离资料自己编"（幻觉）
         faithfulness = self._calculate_faithfulness(generated_answer, retrieved_docs)
 
         # Answer Relevance: 答案与问题的相关性（简化版）
@@ -143,6 +161,8 @@ class RAGEvaluator:
         summary = {}
 
         if self.metrics["latency"]:
+            # p50/p95/p99（百分位数）：延迟从小到大排，95% 的请求都快于 p95 这个值。
+            # 均值会被个别慢请求拉偏，分位数才看得出"长尾拖到多长"
             latencies = self.metrics["latency"]
             summary["latency"] = {
                 "avg_ms": sum(latencies) / len(latencies),
@@ -167,12 +187,15 @@ class RAGEvaluator:
             ROUGE-L分数
         """
         # 简化版：计算字符级别的最长公共子序列
+        # 用动态规划而不是直接比字符串：允许中间插字、跳字，只要求先后顺序一致。
+        # "字符级"对中文正好合适 —— 不用先分词，按字对齐就行
         m, n = len(generated), len(reference)
 
         if m == 0 or n == 0:
             return 0.0
 
-        # 动态规划计算LCS
+        # 动态规划计算LCS（最长公共子序列）
+        # dp[i][j] = 前 i 个生成字符与前 j 个参考字符的最长公共子序列长度
         dp = [[0] * (n + 1) for _ in range(m + 1)]
 
         for i in range(1, m + 1):
@@ -204,6 +227,9 @@ class RAGEvaluator:
             return 0.0
 
         # 简化版：检查答案中的关键词是否出现在文档中
+        # ⚠️ 靠空白切词，中文句子没有空格 → 整句被当成一个"词"，
+        #    交集几乎恒为空。所以中文场景这个分数基本恒为 0，不代表答案不忠实。
+        #    同一处粗糙也存在于 context_compressor._calculate_relevance。
         answer_words = set(answer.lower().split())
 
         # 统计有多少答案词出现在文档中
@@ -264,6 +290,11 @@ class OnlineMetrics:
     在线指标收集器
 
     收集用户反馈和系统指标
+
+    接线现状：只有 `record_query` 在 knowledge_agent.handle 主路径被调（agent.py:851），
+    `get_metrics` 在 get_stats 报表被调（1665）；`record_feedback / record_click /
+    record_impression` **全仓库无调用方** —— 没有前端回调把它们接进来，
+    所以 satisfaction_rate / ctr 现在恒为 0。
     """
 
     def __init__(self):
@@ -312,6 +343,7 @@ class OnlineMetrics:
         total_feedback = self.metrics["thumbs_up"] + self.metrics["thumbs_down"]
         satisfaction = self.metrics["thumbs_up"] / total_feedback if total_feedback > 0 else 0
 
+        # CTR（点击率）= 点击 / 曝光；分母为 0 时返回 0，避免除零
         ctr = self.metrics["clicks"] / self.metrics["impressions"] if self.metrics["impressions"] > 0 else 0
 
         return {

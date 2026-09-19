@@ -3,6 +3,18 @@
 ==============
 
 使用 API Embedding 将文本编码为向量，然后通过向量相似度找到最相关的文档
+
+检索链路的形状（记住这条线，本文件就不难读）：
+    query 文本 --embedder.encode_query--> 向量 --与库里已存的 chunk 向量逐个比相似度--> 排序取 top_k
+所以「语义检索」不是查关键词，而是把文本压成一串数字后比方向；两句话用词完全不同、
+只要意思接近，向量就接近，这是它相对关键词检索的价值所在。
+
+两处容易读错的地方：
+- 本文件的 SemanticRetriever（检索器）**不在生产路径上** —— 全仓库无人 import 它，
+  真要跑检索时用的是 enhanced_entry.py 里就地定义的 SimpleRetriever（APIEmbedder 出向量 +
+  ChromaStore 存/搜）。本文件更像一份可复用的参考实现。
+- 「低于阈值宁可返回空，也不硬凑」这道相关性闸门也不在本文件，而在 SimpleRetriever.MIN_VECTOR_SCORE；
+  本文件的方法只负责排序，不做分数下限过滤（即可能返回一堆弱相关结果，由调用方自己卡）。
 """
 
 import re
@@ -18,6 +30,8 @@ logger = logging.getLogger(__name__)
 __all__ = ['SemanticRetriever']
 
 try:
+    # reranker（重排序器）= 对召回结果做精排，把最相关的顶上来（见术语表 D）。
+    # 它是可选依赖：装不上就把整块能力关掉（RERANKER_AVAILABLE=False），检索仍能跑 —— 这就是 fallback（降级兜底）。
     from .reranker import RerankerFactory
     RERANKER_AVAILABLE = True
 except ImportError:
@@ -26,7 +40,11 @@ except ImportError:
 
 
 class SemanticRetriever:
-    """语义检索器：使用 API Embedding 进行语义相似度检索"""
+    """语义检索器（retriever）：用 embedding（向量化）后的向量比相似度来召回文档
+
+    和关键词检索的分工：关键词检索擅长「词一字不差地出现」，语义检索擅长「换种说法也能找到」；
+    代价是语义相近但不该命中的内容也可能被捞进来，所以排序之后通常还要一道分数阈值。
+    """
 
     def __init__(
         self,
@@ -75,6 +93,7 @@ class SemanticRetriever:
         """
         查询扩展：添加同义词和相关术语，扩展后的查询可以匹配更多使用不同术语但讨论相同主题的文档。
         提高了召回率（找到更多相关文档），但可能会降低精确度（此函数被LLM查询扩展代替）
+        recall（召回）/ precision（精确率）是一对要互相让位的指标：多撒网少漏掉，但混进来的噪声也更多。
 
         Args:
             query: 原始查询 ["机器学习"]
@@ -114,6 +133,8 @@ class SemanticRetriever:
             rewrites.append(query.replace('如何', '').replace('怎么', ''))
 
         # 添加关键词提取形式（移除无意义的停用词）：例："我想学习机器学习的基础" → 添加 "想学习机器学习的基础"（移除了“我”，“的”）
+        # 注意：遍历一个字符串拿到的是「单字符」而不是「词」，所以这里是按字剔除停用字，不是按词；
+        # 变量名叫 word（词）会有点误导。下面的 stopwords 里混着 '一个' 这类双字项，永远不会被匹配到。
         stopwords = ['的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一', '一个']
         keywords = [word for word in query if word not in stopwords]
         if len(keywords) > 0:
@@ -133,6 +154,12 @@ class SemanticRetriever:
         实现了混合检索策略，将语义检索和关键词检索的结果融合在一起
         （此函数未被调用：演示函数使用 纯语义检索（基于 Sentence-BERT + FAISS））
         混合检索 = 0.7 × 语义分数（归一化） + 0.3 × 关键词分数（归一化）
+
+        hybrid retrieval（混合检索）= 向量检索 + 关键词检索一起用（术语表 D）。
+        注意它融合的是「加权求和后的分数」，不是 RRF（倒数排名融合）；两种融合方式没有优劣，
+        只是加权求和要求两路分数先归一化到可比的量纲上。
+        另外文中「Sentence-BERT + FAISS」是历史描述：本仓库既没用 FAISS 也没装 sentence-transformers，
+        实际向量库是 Chroma、向量由远程 API 生成。
 
         Args:
             query: 查询文本
@@ -212,6 +239,9 @@ class SemanticRetriever:
         如果配置了reranker，使用Cross-Encoder或规则重排序
         否则使用简单的相似度重排序
 
+        cross-encoder（交叉编码器）把「问题 + 文档」拼在一起送进模型打分，比各算各的向量更准但更慢，
+        所以只用来精排少量候选，不用于全库召回。
+
         Args:
             query: 查询文本
             results: 初始检索结果
@@ -239,6 +269,8 @@ class SemanticRetriever:
         doc_embeddings = self.encode_texts(doc_texts)
 
         # 计算相似度
+        # 这里直接拿 np.dot 当相似度用：只有当向量已是单位长度时，点积才等于 cosine similarity（余弦相似度）；
+        # 否则点积会被向量长度影响。此处依赖「embedding 服务返回的向量已归一化」这个隐式前提。
         similarities = np.dot(doc_embeddings, query_embedding)
 
         # 重新排序
@@ -288,6 +320,9 @@ class SemanticRetriever:
         """
         追加相关词，丰富词汇(比如“机器学习” 查询扩展后：“人工智能、监督学习、模型训练”)
         (generator.generate() 就是调用商业 API 的入口，配置改为 GENERATOR_TYPE='local'，则 self.generator 变成 调用本地模型)
+
+        这是上面 expand_query 那套规则扩展的 LLM 版本：generator（生成器）= 负责补词的 LLM 客户端，
+        换掉了写死的同义词表。step 4 用 jieba 分词过滤掉与原查询重复的词，防止把原词又拼一遍。
         Args:
             query: 原始查询
             num_terms: 生成的扩展词数量
@@ -296,6 +331,8 @@ class SemanticRetriever:
             扩展后的查询
         """
         if self.generator is None:
+            # 事实说明：日志写「降级使用规则方法」，但此处只把原 query 原样返回，并没有调用 expand_query 那套规则扩展。
+            # 文本与行为不符，此处仅记录，不改逻辑。
             logger.warning("未提供生成器，降级使用规则方法")
             return query
 
@@ -379,6 +416,9 @@ class SemanticRetriever:
         """
         改写成多种表达来实现多路检索（比如“如何学习” → “怎么学习”，这里未启用这个功能），
         (generator.generate() 就是调用商业 API 的入口，配置改为 GENERATOR_TYPE='local'，则 self.generator 变成 调用本地模型)
+
+        多路检索 = 同一个问题生成几种说法，各自去检索，再把结果合并去重；
+        命中面更宽，代价是检索次数按变体数翻倍。
 
         Args:
             query: 原始查询

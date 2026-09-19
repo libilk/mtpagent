@@ -4,6 +4,17 @@
 ==========
 
 结合向量检索和BM25检索，使用RRF算法融合结果
+
+hybrid retrieval（混合检索）= 向量检索 + 关键词检索一起用，再合成一个列表。
+为什么要两路：它们的强项正好互补 —— 向量管"意思相近"，BM25 管精确字符串
+（型号/单号/条款编号）。任何一路单独用，都会在对方的强项上翻车。
+
+RRF（倒数排名融合）= 只看"排第几"、不用原始分数来合成，理由见 _rrf_fusion。
+
+⚠️ 接线现状（别高估本类的作用）：本类实例在 knowledge_agent 里被 CachedRetriever
+包着，而那条链只在**降级路径** _handle_with_optimizations 才被走到；主路径 ReAct
+的混合检索是自己内联实现 RRF 的（knowledge_agent.hybrid_search），不经过本类。
+customer_service_agent 也建了本类，但显式 use_rerank=False。
 """
 
 import logging
@@ -25,6 +36,11 @@ class HybridRetriever:
     2. BM25检索：捕捉关键词匹配
     3. RRF融合：Reciprocal Rank Fusion
     4. 重排序：使用交叉编码器精细打分
+
+    第 4 步的 reranker（重排序器）理想情况下是 cross-encoder（交叉编码器）：把
+    「查询+文档」拼成一对一起送进模型打分，比"各自算出向量再比距离"更准，代价是
+    慢很多 —— 所以只对第 3 步召回的少量候选做精排。注意 auto 档可能降级成纯规则
+    打分（见 reranker.py），此时这一步并不真的"交叉编码"。
     """
 
     def __init__(
@@ -41,7 +57,8 @@ class HybridRetriever:
         Args:
             vector_retriever: 向量检索器
             bm25_retriever: BM25检索器
-            vector_weight: 向量检索权重（0-1）
+            vector_weight: 向量检索权重（0-1）—— 注意它不是"分数权重"：在 RRF 里
+                只按排名倒数分配比例，BM25 那一路拿的是 1-vector_weight。
             use_rerank: 是否使用重排序
             reranker: 重排序器
         """
@@ -62,6 +79,9 @@ class HybridRetriever:
     ) -> List[Dict]:
         """
         混合检索
+
+        第一阶段是 recall（召回）：两路各自多取一些（默认各 20）。这一步别急着砍，
+        漏掉的东西后面重排序也救不回来；要缩小范围靠的是第二阶段融合、第三阶段精排。
 
         Args:
             query: 查询文本
@@ -116,6 +136,11 @@ class HybridRetriever:
 
         公式：RRF_score = Σ 1/(k + rank_i)
 
+        为什么用"排名倒数"而不是把两路分数直接相加：两路的分数量纲根本不同 ——
+        BM25 分数无上界（可能到 8 分），向量余弦相似度被压在 0~1，直接相加会让 BM25
+        整个把向量那一路压死。换成"排第几"后两边都成了 0~1 的排名分，天然可比。
+        k（默认 60）= 平滑项，压低第 1 名（1/1）相对第 2 名（1/2）的悬殊程度。
+
         Args:
             vector_results: 向量检索结果
             bm25_results: BM25检索结果
@@ -126,6 +151,8 @@ class HybridRetriever:
             融合后的结果
         """
         # 使用文档内容作为唯一标识
+        # 用"正文前 100 字符"而非 doc_id 来对齐两路结果：因为两路返回的字段里只有
+        # content 一定都有。代价是前 100 字符相同的两篇文档会被当成同一篇合并掉。
         doc_scores = {}
         doc_map = {}
 
@@ -169,6 +196,9 @@ class HybridRetriever:
     ) -> List[Dict]:
         """
         使用重排序模型对候选结果重新打分
+
+        注意调用约定：reranker.rank() 返回的是"与入参同序"的分数列表，不是排好序的结果，
+        所以这里要自己把分数写回文档、再重新排序（见下）。
 
         Args:
             query: 查询文本
