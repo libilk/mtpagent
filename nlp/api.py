@@ -1,13 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-FastAPI Web 服务入口
-===================
+FastAPI（Python Web 框架）服务入口
+================================
 
-将 LangGraph RAG 系统暴露为 HTTP API，支持：
-- 流式聊天接口（SSE）
-- 非流式聊天接口
-- 人工介入恢复
-- Agent 列表查询
+本文件是一层"薄壳"：自己不跑图、不调 LLM、不做检索，只把
+EnhancedLangGraphRAGSystem（见 langgraph_orchestrator/enhanced_entry.py）的能力
+翻译成 HTTP 接口。业务逻辑全在那一个全局 system 实例里；这里只做
+收参数 → 调 system → 转格式 → 推事件。
+
+接口按"族"分工，读时按族看即可，不必逐行：
+- 对话族  /chat/stream（SSE 流式，用户不用干等）、/chat（非流式，一次返回）
+- 恢复族  /resume —— 人工审批的唯一回程入口，两段式恢复的落点（见该函数注释）
+- 上传族  /upload、/upload/multiple —— 文件先落盘并解析，再用 file_paths 传回对话族
+- 观测族  /agents、/health、/cache/*、/logs*
+- 文档族  /document/{doc_id} —— 知识库原文查看
+
+隐含契约：改这里的路由或返回字段会牵动 frontend/index.html（原生 JS，
+用 fetch 读 SSE 流，不看这个 docstring）。
 """
 
 import os
@@ -28,6 +37,9 @@ class SafeJSONEncoder(json.JSONEncoder):
 
     将 LangChain 的 AIMessage/HumanMessage 等不可序列化对象
     自动转为普通 dict/str，避免 SSE 推送时报错。
+
+    这是"边界转换"：图的 state（状态）里存的是 LangChain 对象，
+    而 HTTP 出口只能吐 JSON，转换必须发生在这一层。
     """
     def default(self, obj):
         # LangChain BaseMessage 子类（AIMessage, HumanMessage 等）
@@ -81,10 +93,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 全局系统实例
+# 全局系统实例（单例：由 lifespan 启动时建一次，所有路由共享）
+# 不是"每请求一实例" —— 而 checkpointer（检查点）就在这个实例内部，
+# 且用的是 MemorySaver（内存存档器），所以暂停中的断点只活在进程内存里：
+# 重启服务 = 断点全丢，此时前端再点"批准"会找不到存档。
 system: Optional[EnhancedLangGraphRAGSystem] = None
 
-# 全局问答日志记录器（与 enhanced_entry.py 共享同一数据库）
+# 全局问答日志记录器（与 enhanced_entry.py 共享同一数据库：Web 与 CLI 的日志是同一份）
 from core.qa_logger import QALogger
 qa_logger: Optional[QALogger] = None
 
@@ -97,7 +112,9 @@ METADATA_PATH = Path(__file__).parent / "data" / "metadata" / "document_metadata
 # 支持的文档扩展名
 _DOC_EXTENSIONS = {".md", ".txt", ".pdf", ".xlsx", ".docx"}
 
-# doc_id → { path: Path, title: str, filename: str, ext: str }
+# doc_id（文档 ID）→ { path: Path, title: str, filename: str, ext: str }
+# 只在启动时扫一次目录（见 lifespan）；运行期往 data/knowledge/ 新丢的文件
+# 不会自动出现，要重启服务或重建索引才可见。
 _document_registry: Dict[str, Dict] = {}
 
 
@@ -158,6 +175,9 @@ def _extract_document_content(file_path: Path, ext: str) -> Tuple[str, str]:
 
     Returns:
         (内容文本, 内容类型) — content_type 为 'markdown' 或 'text'
+
+    注意本函数与 core/file_parser（文件解析器，给 LLM 读的纯文本）是两套：
+    这里保留标题/表格/页序，目标是"给人看原文"，所以不共用。
     """
     if ext == ".md":
         content = file_path.read_text(encoding="utf-8")
@@ -211,7 +231,12 @@ def _extract_document_content(file_path: Path, ext: str) -> Tuple[str, str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理"""
+    """
+    应用生命周期管理（FastAPI 的 startup/shutdown 钩子）
+
+    这是全服务唯一一次构造 system 与 qa_logger 的地方 —— 各路由里反复出现的
+    `if not system: 503` 就是在等这一步完成；这里 raise 则整个服务起不来。
+    """
     global system, qa_logger
 
     # 启动时初始化
@@ -220,6 +245,8 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
 
     try:
+        # 构造参数与 main.py 的 create_system 保持一致（只差 auto_update_index），
+        # 但两个进程各建各的实例 —— CLI 与 Web 不共享会话/断点。
         system = EnhancedLangGraphRAGSystem(
             auto_update_index=False,  # 生产环境建议手动更新索引
             enable_checkpointer=True,
@@ -255,6 +282,9 @@ app = FastAPI(
 )
 
 # 跨域配置（允许前端调用）
+# CORS（跨域资源共享）：浏览器同源策略默认拦住"前端 5500 端口 → API 8000 端口"这类请求，
+# 由服务端加这些响应头放行。allow_origins=["*"] 与 allow_credentials=True 同时开
+# 在生产是不安全的组合，上线要收敛成具体域名。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # 生产环境改成具体域名，如 ["https://your-frontend.com"]
@@ -269,11 +299,13 @@ app.mount("/static/charts", StaticFiles(directory="data/charts"), name="charts")
 
 
 # ========== 请求/响应模型 ==========
+# Pydantic（数据校验库）：用类型标注声明请求体，FastAPI 自动校验并转成对象；
+# 校验不过直接返回 422，路由函数里拿到的已是合法值（所以下面少见手写校验）。
 
 class QueryRequest(BaseModel):
     """聊天请求"""
     query: str = Field(..., description="用户问题", min_length=1)
-    thread_id: str = Field(default="default", description="会话ID（用于状态持久化）")
+    thread_id: str = Field(default="default", description="会话ID（用于状态持久化）")  # 记忆/断点都按它隔离；不传则所有请求挤在 "default" 这一份存档里
     image_urls: Optional[list] = Field(default=None, description="图片公网URL列表（VQA多模态）")
     image_paths: Optional[list] = Field(default=None, description="本地图片路径列表（VQA多模态）")
     image_base64_list: Optional[list] = Field(default=None, description="base64编码图片列表（VQA多模态）")
@@ -282,7 +314,11 @@ class QueryRequest(BaseModel):
 
 class ResumeRequest(BaseModel):
     """人工介入恢复请求"""
+    # thread_id 必须与当初发起对话时一致 —— checkpointer 按它定位断点存档，
+    # 对不上就接不回暂停点，只会另起一份新存档（人工的批准静默作废）。
     thread_id: str = Field(..., description="会话ID")
+    # human_feedback 是自由字符串，但要与 enhanced_nodes.py 的约定对齐：
+    # 只有字面量 "approved" 会触发审批标志置位（见 enhanced_entry.resume_after_human_input）。
     human_feedback: str = Field(..., description="人工反馈（approved/retry/abort/override）")
 
 
@@ -291,9 +327,16 @@ class ResumeRequest(BaseModel):
 @app.post("/chat/stream")
 async def chat_stream(request: QueryRequest):
     """
-    流式聊天接口（SSE - Server-Sent Events）
+    流式聊天接口（SSE = Server-Sent Events，服务端单向推事件）
 
-    前端使用 EventSource 或 fetch 消费实时事件流。
+    用户为什么不用干等：下面把这个函数写成 async 生成器并交给 StreamingResponse，
+    FastAPI 会边产边发；事件源头是 system.handle_query_stream_async 的
+    astream(stream_mode=["custom","updates"]) —— 节点执行途中经
+    get_stream_writer()（流式事件写入器）推的 custom 事件会被立刻转出来，
+    不必等整张图跑完。
+
+    前端消费方式：自带前端用的是 fetch + ReadableStream（因为 EventSource
+    只支持 GET，而本接口是 POST），逐行读 `data: {json}` 帧。
 
     事件类型：
     - progress: 实时进度（节点执行状态）
@@ -319,6 +362,8 @@ async def chat_stream(request: QueryRequest):
                 file_paths=request.file_paths,
             ):
                 # 转换为 SSE 格式：data: {json}\n\n
+                # 末尾两个换行是 SSE 的帧分隔符（一帧一换行会与帧内换行混淆），
+                # 前端也是按 "\n\n" 切帧、按 "data: " 前缀取载荷的。
                 try:
                     event_json = safe_json_dumps(event)
                 except Exception as ser_err:
@@ -356,8 +401,12 @@ async def chat(request: QueryRequest):
     """
     非流式聊天接口
 
-    等待所有处理完成后一次性返回结果。
-    适合不需要实时进度的场景。
+    走 system.handle_query（一次 invoke 跑到底），等全部完成才返回，
+    适合不需要实时进度的场景；与 /chat/stream 是同一条链路的两种取结果方式。
+
+    与流式接口的差别：这里没有独立的事件通道，若图停在断点上，
+    人工介入信息是混在返回体里（human_intervention_required=True）返回的 ——
+    调用方要自己判这个标志再决定是否去 /resume。
     """
     if not system:
         raise HTTPException(status_code=503, detail="系统未初始化，请稍后重试")
@@ -385,10 +434,27 @@ async def chat(request: QueryRequest):
 @app.post("/resume")
 async def resume_after_human(request: ResumeRequest):
     """
-    人工介入后恢复执行
+    人工介入后恢复执行 —— 人工审批这条链路从图里穿到浏览器、再穿回去的落点
 
-    当系统触发人工介入（human_intervention_required=True）时，
-    前端展示审核界面，用户做出决策后调用此接口恢复执行。
+    完整链路（本项目最值得学的一处工程细节）：
+      1. 对话族跑图时，图被 interrupt_before（执行前中断）钉在
+         human_intervention_execute 之前停下，/chat/stream 推
+         human_intervention 事件（带 reason / data / thread_id）。
+      2. 前端据此弹审核框，用户点选后 POST 到这里，thread_id 原样带回。
+      3. 真正干活的是 system.resume_after_human_input —— 它是两段式：
+         a) update_state：只往暂停中的 state 补写审批标志位，不跑图；
+         b) invoke(None, config)：第一个参数传 None = "别给我新输入，
+            接着上次的断点跑"。传了新 state 会从 START 重头跑，批准就白做了。
+
+    怎么判断"图当前正停在暂停点"：读 graph.get_state(config).next，
+    非空即表示还卡在断点上（handle_query 系列与 resume 都靠这一招区分
+    "真跑完" 与 "停在中途等人"）。
+
+    约定式耦合（改文案会静默失效）：human_feedback="approved" 时，后端要判断
+    批准的是哪条审批通道，判据是 intervention_reason 里的中文字样
+    （"任务规划" / "数据库" / "写操作"）。所以改 enhanced_nodes.py 里那几条
+    reason 文案时，必须同步改 enhanced_entry.resume_after_human_input，
+    否则标志位置不上，恢复后会被同一条通道再拦一次。
 
     human_feedback 可选值：
     - approved: 批准继续
@@ -417,7 +483,7 @@ async def resume_after_human(request: ResumeRequest):
 
 # ========== 文件上传接口 ==========
 
-# 允许上传的文件类型
+# 允许上传的文件类型（准入门槛：不在这个集合里直接 400 拒收）
 ALLOWED_EXTENSIONS = {
     # Excel / CSV
     ".xlsx", ".xls", ".csv",
@@ -434,7 +500,8 @@ UPLOAD_DIR = "data/uploads"
 # Excel/CSV 也纳入解析：小表全量转自然语言，大表自动降级为智能摘要
 DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".md", ".xlsx", ".xls", ".csv"}
 
-# 图片类扩展名
+# 图片类扩展名（准入之后还要再分类，决定"是否解析成文本"：
+# 文档类走 file parser（文件解析器），图片类不解析、原样留路径给多模态 Agent）
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 
 # 文件解析后的最大字符数限制（超出则截断并提示）
@@ -472,7 +539,12 @@ async def upload_file(file: UploadFile = File(...)):
     上传后自动解析文件内容为文本（图片除外），返回 parsed_text 字段。
     前端可将 parsed_text 注入到用户消息中，让 LLM 直接理解文件内容。
 
-    前端使用 multipart/form-data 格式上传文件：
+    需要注意的隐式契约：上传是"两段式"的 —— 本接口只负责落盘 + 解析，
+    解析结果不会自动进图；/chat 只认 file_paths（路径），所以"让 LLM 读到
+    文件内容"这件事实际依赖前端把 parsed_text 拼回 query。
+
+    前端使用 multipart/form-data 格式上传文件（FormData = 表单上传格式，
+    浏览器原生支持，不用手写边界分隔符）：
     ```javascript
     const formData = new FormData();
     formData.append('file', fileInput.files[0]);
@@ -549,6 +621,10 @@ async def upload_multiple_files(files: List[UploadFile] = File(...)):
     """
     批量上传文件
 
+    与 /upload 的关键差别：单文件版遇错直接抛 HTTPException（整请求失败）；
+    这里逐文件把失败收进 errors，整批仍返回 200 —— 调用方必须自己检查 errors，
+    只看 HTTP 状态码会以为全部成功。
+
     前端使用 multipart/form-data 格式上传多个文件：
     ```javascript
     const formData = new FormData();
@@ -612,7 +688,7 @@ async def upload_multiple_files(files: List[UploadFile] = File(...)):
 @app.get("/agents")
 async def list_agents():
     """
-    列出所有可用的 Agent
+    列出所有可用的 Agent（智能体）
 
     返回结构化的 Agent 列表，包含 id、名称、描述、能力、类型等字段，
     方便前端渲染为表格或卡片。
@@ -621,6 +697,8 @@ async def list_agents():
         raise HTTPException(status_code=503, detail="系统未初始化，请稍后重试")
 
     try:
+        # 数据源是 registry（注册中心，Agent 名册）；enabled_only=False 表示
+        # 连已停用的也一并列出，由前端的 enabled 字段自行置灰。
         agents = system.registry.get_all_agents(enabled_only=False)
         agent_list = []
         for a in agents:
@@ -642,7 +720,12 @@ async def list_agents():
 
 @app.get("/health")
 async def health_check():
-    """健康检查"""
+    """
+    健康检查
+
+    探活同时探一下 Redis（内存数据库，这里作缓存用）—— 它是可选的：
+    连不上不影响主流程，只影响缓存命中率，所以状态是 disconnected 也照样回 healthy。
+    """
     # Redis 连接状态
     redis_status = "not_configured"
     if system and hasattr(system, 'redis_client') and system.redis_client:
@@ -666,6 +749,10 @@ async def cache_stats():
     查看所有缓存层的统计信息
 
     返回各层缓存的命中率、大小、Redis状态等
+
+    "各层"具体是两层，下面按层收集：Agent 层（cache_manager 通用缓存、
+    semantic_cache 语义缓存，逐个 Agent 取）与 LLM 层
+    （llm_max / llm_plus 各自的 llm_cache）；/cache/clear 清的是同一批。
     """
     if not system:
         raise HTTPException(status_code=503, detail="系统未初始化")
@@ -741,7 +828,9 @@ async def get_document(doc_id: str):
     通过 doc_id（文件名 stem）查找文档，提取文本内容返回。
     前端引用文档卡片点击后调用此接口展示原文。
 
-    安全设计：仅接受 doc_id 字符串，在注册表中查找，不接受任何文件路径。
+    安全设计：仅接受 doc_id 字符串，在注册表中查找，不接受任何文件路径 ——
+    否则调用方传 `../../` 这类路径就能串读到知识库之外的文件
+    （path traversal，路径遍历）。
 
     Args:
         doc_id: 文档ID（文件名不含扩展名，如 'rag_optimization_strategies'）
@@ -811,6 +900,10 @@ async def root():
 
 
 # ========== 问答日志接口 ==========
+
+# 注意别和文件开头的 logger 混：logger 是运行日志（stdout，给人排错用），
+# qa_logger 是业务问答流水（落 sqlite，供前端"日志"页与统计用），
+# 由 enhanced_entry 每次 handle_query 结束后写入。
 
 @app.get("/logs")
 async def get_logs(
@@ -919,7 +1012,14 @@ async def export_logs():
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """全局异常处理"""
+    """
+    全局异常处理（最后一道兜底）
+
+    只接住"路由里没被 try/except 处理掉"的异常；路由内已捕获并转成
+    HTTPException 的，走 FastAPI 自己的处理，不会到这里。
+    """
+    # 注意 detail 把原始异常字符串回给了客户端：便于调试，但上线前应改成通用文案，
+    # 否则可能泄露内部实现细节。
     logger.error(f"未捕获的异常: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
@@ -934,7 +1034,10 @@ async def global_exception_handler(request: Request, exc: Exception):
 if __name__ == "__main__":
     import uvicorn
 
-    # 开发环境直接运行
+    # 开发环境直接运行（python api.py）。
+    # reload=True 会额外起一个监视进程、改文件自动重启，仅开发用；生产
+    # 通常改用 `uvicorn api:app --workers N`（N 个进程 = N 份独立 system 实例，
+    # 断点/Debug 状态不互通，这也是 MemorySaver 的硬限制）。
     uvicorn.run(
         "api:app",
         host="0.0.0.0",
