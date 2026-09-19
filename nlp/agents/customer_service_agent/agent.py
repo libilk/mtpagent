@@ -5,6 +5,24 @@ Customer Service Agent
 
 专门处理客户咨询、投诉、工单管理。支持情感分析、工单创建与跟进、用户信息查询。
 可检索知识库回答客户问题。
+
+本文件是全系统的**业务核心**：12 个工具集中在这里，其中退货 / 建工单那几个
+才是真会改数据的写操作（write operation）。
+
+读之前先建立三个概念：
+
+- agent（智能体）= 能自己决定"调哪个工具、调几次"的 LLM 程序。与"一问一答"的区别：
+  它拿到工具结果后会**接着想下一步**。
+- ReAct（推理-行动循环）= 想一步 → 调工具 → 看结果 → 再想，直到不再调工具、
+  直接给出答案。`_handle_react` 就是这个循环，上限 max_iterations（最大迭代次数）轮。
+- tool（工具）= Agent 可调用的函数，带名字和参数说明。Agent 只看得到注册时给的
+  description / parameters，**看不到函数体** —— 所以参数描述写得准不准，
+  直接决定它会不会用错、以及敢不敢用。
+
+三处非直观设计，读到对应位置时留意（文件里都有详解）：
+1. `_verify_write_claim` —— 防幻觉兜底：模型会"演"出完整流程却没真调工具。
+2. 写操作登记必须发生在**调用线程**（工具可能跑在线程池里）。
+3. 工具一律走 StructuredTool，不能用 Tool —— 后者写死只收 1 个参数。
 """
 
 import logging
@@ -20,10 +38,18 @@ logger = logging.getLogger(__name__)
 
 
 class CustomerServiceAgent:
-    """客服Agent（ReAct模式）"""
+    """客服 agent（智能体，ReAct=推理-行动循环，见模块开头）。
+
+    `handle()` 是它对外唯一入口（handle=处理入口）；其余方法要么是工具实现，
+    要么是 ReAct 循环内部的私有步骤。
+    """
 
     def _emit_progress(self, context: Dict, msg: str, **extra):
-        """通过 StreamWriter 发射中间步骤事件（供前端 trace 面板展示）"""
+        """通过 StreamWriter（流式事件写入器）发射中间步骤事件（供前端 trace 面板展示）。
+
+        writer 由编排层经 context 注入，取不到时静默跳过 —— 这样这个 Agent
+        脱离图单独跑（比如单测）也不会因为缺 writer 而报错。
+        """
         writer = context.get("_stream_writer")
         if writer is None:
             return
@@ -53,11 +79,12 @@ class CustomerServiceAgent:
 
         Args:
             llm: LLM实例
-            retriever: 语义检索器
-            bm25_retriever: BM25检索器
+            retriever: 语义检索器（retriever=检索器，负责召回文档）
+            bm25_retriever: BM25检索器（BM25=按词频与稀有度打分的**关键词**算法，
+                            与向量检索互补：精确词命中得了，改述过的说法命中不了）
             function_calling: Function Calling管理器
-            embedder: 嵌入器实例
-            crm: CRM系统实例
+            embedder: 嵌入器实例（=向量化模型，把文本变成向量）
+            crm: CRM系统实例（CRM=客户关系管理，这里是工单/会员数据的读写入口）
             enable_optimizations: 是否启用优化（默认True）
             enable_memory: 是否启用对话记忆（默认True）
             max_history: 对话历史最大轮数（默认10）
@@ -65,6 +92,10 @@ class CustomerServiceAgent:
             cache_ttl: 缓存TTL秒数（默认3600）
             max_retries: 最大重试次数（默认3）
             vector_weight: 向量检索权重（默认0.5）
+
+        注：上面 Args 有陈旧项 —— function_calling / enable_memory / max_history
+        已不在签名里，而 tool_registry / enable_cache 没列；vector_weight 实际默认
+        是 0.8 而非 0.5。事实已核实，未改动签名。
         """
         self.llm = llm
         self.retriever = retriever
@@ -100,6 +131,9 @@ class CustomerServiceAgent:
 
         工单和会员数据来自 database/ecommerce.db（真实 SQLite 表），
         不再用 crm_mock.py 里那套硬编码的假数据。
+
+        工单（ticket）= 一次售后请求的记录，和订单是两回事：
+        订单记的是"买了什么"，工单记的是"为了解决什么"。
         """
         try:
             from core.ecommerce_crm import EcommerceCRM
@@ -133,7 +167,9 @@ class CustomerServiceAgent:
             self.metrics_collector = metrics_collector
             logger.info("✓ 监控系统初始化完成")
 
-            # 4. 混合检索
+            # 4. 混合检索（hybrid retrieval = 向量检索 + 关键词检索一起用，
+            #    再靠 RRF（倒数排名融合）把两路结果合成一个列表）。
+            #    这里显式 use_rerank=False / reranker=None：不挂重排序器，先守住延迟。
             if self.retriever:
                 from rag_core.hybrid_retriever import HybridRetriever, SimpleReranker
                 self.hybrid_retriever = HybridRetriever(
@@ -161,7 +197,23 @@ class CustomerServiceAgent:
             self.hybrid_retriever = None
 
     def _register_tools(self):
-        """注册工具（11 个 = 3 检索 + 4 客服 + 4 售后办理）"""
+        """注册工具（12 个）
+
+        怎么数的：`grep -c 'name="' agents/customer_service_agent/agent.py`
+        （原文写的是 11 个 = 3 检索 + 4 客服 + 4 售后办理，漏算了阶段 8 新增的
+        query_policy_applicability —— 知识图谱那个。已按源码改成 12。）
+        """
+
+        # ★ 关于 register_tool 的项目级教训（建议先读）★
+        # 每个工具都要写 parameters，即参数的 JSON Schema 声明。它不只是"给 LLM
+        # 看的说明书"：register_tool 会拿它生成 args_schema（参数结构，Pydantic 模型），
+        # 再据此决定用 StructuredTool 还是 Tool。
+        #
+        # 早先这里用的是 LangChain 的 Tool，而 Tool 源码里**写死只接受 1 个参数**：
+        # 只要 LLM 一次传 2 个以上参数就直接抛 Too many arguments to single-input tool。
+        # 结果 create_ticket（6 个参数）长期是坏的 —— Agent 一调就失败，还看不出原因。
+        # 换成 StructuredTool（用 Pydantic 做运行时参数校验）后才修好，详见 llm/langchain_tools.py。
+
         # ========== 知识检索工具 ==========
 
         # 1. 混合检索
@@ -183,7 +235,8 @@ class CustomerServiceAgent:
                     "vector_weight": {
                         "type": "number",
                         "description": "向量检索权重（0-1）",
-                        "default": 0.5
+                        "default": 0.5   # 与 self.vector_weight 的默认 0.8 不一致；
+                                         # LLM 不传时，生效的是这里声明的 0.5
                     }
                 },
                 "required": ["query"]
@@ -255,6 +308,8 @@ class CustomerServiceAgent:
         )
 
         # 5. 创建工单
+        # 这是本文件里参数最多的工具（6 个），也正是当年被 LangChain Tool
+        # 「只收单参数」坑坏的那个 —— 见 _register_tools 开头的教训。
         self.tool_registry.register_tool(
             name="create_ticket",
             description="为用户创建售后工单，适合投诉、问题反馈、需要人工跟进的场景",
@@ -335,6 +390,8 @@ class CustomerServiceAgent:
         # ========== 售后办理工具（阶段 3 新增）==========
         # 这四个把 Agent 从"只能答问题"变成"能办事"。
         # 前三个是只读查询，最后一个是写操作（会触发人工审批）。
+        # 这条分界线很关键：只读工具错了顶多答错一句；写操作会真改资金数据，
+        # 所以要过人工审批、还要被 _verify_write_claim 核验。
 
         # 8. 查订单
         self.tool_registry.register_tool(
@@ -461,7 +518,12 @@ class CustomerServiceAgent:
 
     @staticmethod
     def _truncate_tool_result(result_str: str, max_len: int = 4000) -> str:
-        """截断过长的工具结果"""
+        """截断过长的工具结果。
+
+        为什么必须截：工具结果会原样塞进下一轮 messages，而 token（词元，
+        LLM 的长度与计费单位）是有上限的。掐中间、留头留尾，是为了保住
+        "开头有结论、结尾有汇总"这两处信息量最大的部分。
+        """
         if len(result_str) <= max_len:
             return result_str
         keep = max_len // 2
@@ -471,7 +533,16 @@ class CustomerServiceAgent:
 
     def _execute_tool_calls(self, tool_calls: List[Dict], retrieval_count: int,
                             seen_tool_calls: set = None) -> List[Dict]:
-        """执行工具调用（支持去重 + 并行 + JSON容错）"""
+        """执行工具调用（支持去重 + 并行 + JSON容错）
+
+        - 去重：同一轮里 LLM 偶尔会把同一个调用写两遍（call_key = 工具名 + 参数），
+          写操作重复执行的代价很大，所以先过滤掉。
+        - 并行：这批工具之间没有依赖，用线程池一起发，省的是 LLM 的等待轮次。
+        - JSON 容错：模型给的 arguments 不保证是合法 JSON，解析失败时降级兜底
+          （fallback）到宽松解析，而不是让整个工具调用报错。
+
+        注：形参 retrieval_count 是早期版本留下的，函数体内并未使用（未改动）。
+        """
         if seen_tool_calls is None:
             seen_tool_calls = set()
 
@@ -541,6 +612,8 @@ class CustomerServiceAgent:
 
         tool_results = []
         if len(unique_calls) > 1:
+            # max_workers 封顶 4：瓶颈通常在数据库和 LLM 往返，再开线程收益有限，
+            # 却能避免一个请求占满线程池。
             with ThreadPoolExecutor(max_workers=min(len(unique_calls), 4)) as pool:
                 futures = {pool.submit(_exec_one, tc): tc for tc in unique_calls}
                 for fut in as_completed(futures):
@@ -576,7 +649,10 @@ class CustomerServiceAgent:
         return {"raw": str(result)[:300]}
 
     def _record_write_operations(self, tool_results: List[Dict]) -> None:
-        """把本轮**成功执行**的写操作登记到当前线程，供编排层判断是否需要人工审批。"""
+        """把本轮**成功执行**的写操作登记到当前线程，供编排层判断是否需要人工审批。
+
+        读取侧在编排节点里，用 core/write_ops.py 的 consume_write_ops()（读走并清空）。
+        """
         for tr in tool_results:
             if not tr.get("success") or tr.get("tool") not in self._WRITE_TOOLS:
                 continue
@@ -588,7 +664,12 @@ class CustomerServiceAgent:
             record_write_op(tr["tool"], detail)
 
     def _build_system_prompt(self, context: Dict) -> str:
-        """构建系统提示词（电商售后专用）"""
+        """构建系统提示词（prompt=提示词，相当于给这个 Agent 的"岗位说明书"）。
+
+        下面这段是**软约束** —— 模型可以不听。所以真正要命的红线（不许编单号、
+        办理必须真调工具）除了写在这里，还有 `_verify_write_claim` 的硬兜底盯着。
+        看清这个分工，才不会以为"提示词写了就万事大吉"。
+        """
         prompt = """你是「云集优选」电商平台的售后客服助手。你的职责是解答售后政策、
 查询订单与物流、受理退换货申请、处理投诉。
 
@@ -684,7 +765,7 @@ class CustomerServiceAgent:
         return prompt
 
     def _handle_react(self, query: str, context: Dict, start_time: float) -> str:
-        """ReAct模式处理查询"""
+        """ReAct 循环本体（推理-行动循环）：想 → 调工具 → 看结果 → 再想。"""
         logger.info("[ReAct] 开始ReAct循环")
         logger.info(f"[ReAct查询] {query}")
 
@@ -711,9 +792,9 @@ class CustomerServiceAgent:
         # query_order → query_logistics → hybrid_search → query_user_info
         # → submit_return_request 就要 5 轮，再加一轮生成答案 = 6 轮。
         # 上限卡在 5 会把它逼到"没办成却编一个办成了的答案"。
-        max_iterations = 8
+        max_iterations = 8     # = 最大迭代次数：ReAct 循环的上限，防止无休止调工具
         retrieval_count = 0
-        seen_tool_calls = set()
+        seen_tool_calls = set()     # 已有的 (工具名, 参数) 组合，用于**跨轮**去重
         executed_tools = set()      # 本轮真正执行过的工具名，用于事后核验（见 _verify_write_claim）
 
         for iteration in range(max_iterations):
@@ -767,6 +848,9 @@ class CustomerServiceAgent:
                 result_summary = ", ".join([tr["tool"] for tr in tool_results])
                 self._emit_progress(context, f"工具执行完成: {result_summary}", stage="tool_result")
 
+                # 这是 OpenAI function calling 的协议要求：先回一条带 tool_calls 的
+                # assistant 消息，再对每个结果回一条 role="tool" + 同一个 tool_call_id。
+                # id 对不上，下一轮 LLM 就认不出哪条结果对应自己哪个调用。
                 messages.append({
                     "role": "assistant",
                     "content": None,
@@ -829,6 +913,9 @@ class CustomerServiceAgent:
             return "抱歉，我无法完成您的请求。请尝试重新表述您的问题。"
 
     # ==================== 防幻觉核验 ====================
+    # 幻觉（hallucination）= LLM 生成"读起来合理、实际不存在"的内容。
+    # 普通闲聊里的幻觉一眼能看穿；"已为您办好"式的幻觉最危险 ——
+    # 用户信了、系统里却查无此单，等发现时可能已经错过售后时限。
 
     # 会改动数据的工具。声称办过事，就必须真的调用过其中之一。
     _WRITE_TOOLS = {"submit_return_request", "create_ticket"}
@@ -910,6 +997,9 @@ class CustomerServiceAgent:
         """
         处理查询（ReAct模式 + 对话记忆）
 
+        这是 Agent 对外唯一入口（handle=处理入口，全项目统一的方法签名），
+        编排层的节点函数只认它；内部走 ReAct 还是别的路子，由 Agent 自定。
+
         Args:
             query: 用户查询
             context: 上下文信息
@@ -957,7 +1047,11 @@ class CustomerServiceAgent:
     # ==================== 检索工具实现 ====================
 
     def vector_search(self, query: str, top_k: int = 3) -> List[Dict]:
-        """向量检索"""
+        """向量检索（vector=向量，文本的数字表示；按语义相近程度召回）。
+
+        top_k（取前 k 条）控制只保留得分最高的几条 —— 多召回不等于更好，
+        无关段落会稀释 LLM 的注意力。
+        """
         if not self.retriever:
             return []
 
@@ -1003,7 +1097,11 @@ class CustomerServiceAgent:
         top_k: int = 3,
         vector_weight: float = 0.8
     ) -> List[Dict]:
-        """混合检索（RRF融合）"""
+        """混合检索（RRF=倒数排名融合：两路结果按"排名的倒数"相加）。
+
+        RRF 只用**排名**、不看分数，所以不需要把向量相似度和 BM25 得分
+        归一化到同一量纲 —— 这是它比"分数加权"更省心的地方。
+        """
         vector_results = self.vector_search(query, top_k=top_k * 2)
         keyword_results = self.keyword_search(query, top_k=top_k * 2)
 
@@ -1041,7 +1139,11 @@ class CustomerServiceAgent:
     # ==================== 客服工具实现 ====================
 
     def analyze_sentiment(self, text: str) -> Dict[str, Any]:
-        """情感分析：分析用户情绪（正面/负面/中性）"""
+        """情感分析：分析用户情绪（正面/负面/中性）。
+
+        它在本系统里的真正用途不是"给回答加温度"，而是**驱动 create_ticket 的
+        优先级** —— 对应规则见 _build_system_prompt 末尾那张表。
+        """
         try:
             logger.info("[情感分析] 开始分析")
 
@@ -1126,7 +1228,11 @@ class CustomerServiceAgent:
         category: str = "咨询",
         sentiment: str = None,
     ) -> Dict:
-        """创建售后工单"""
+        """创建售后工单（★写操作，会触发人工审批）。
+
+        6 个参数靠 args_schema 做 Pydantic 校验；参数名和签名对不上会在
+        注册阶段就被剔除并打日志，而不是等到调用时才炸（见 llm/langchain_tools.py）。
+        """
         try:
             if not self.crm:
                 return {"error": "CRM系统未初始化"}
@@ -1202,6 +1308,9 @@ class CustomerServiceAgent:
                                    quality_issue: bool = None) -> str:
         """
         查「这件商品适用/不适用哪些售后政策」。
+
+        知识图谱 = 把「商品→类别→政策」这类关系**显式存下来**，再沿关系推导；
+        所以它能给出确定结论，而向量检索只能找到"相似段落"、答不出「不适用」。
 
         这是图谱查询，返回的是**沿关系推导出来的确定结论 + 依据**，
         跟向量检索（找相似段落）是两回事 —— 后者答不出「不适用」。

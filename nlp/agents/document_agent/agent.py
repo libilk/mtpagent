@@ -3,10 +3,41 @@
 Document Agent
 ==============
 
-统一文档处理Agent（ReAct模式）
+【读这个文件前必须先知道：它是改造前的遗留物，不参与线上运行】
+本 Agent 是「通用合同审核」时代的产物，它的 9 个工具全部为合同业务而写
+（风险识别、违约金计算、按供应商检索历史合同、风险评分），
+与"退货 / 退款 / 工单"这条电商售后主线无关。
 
-支持多种文件格式的解析与智能分析：
-- PDF（含OCR扫描件、跨页表格合并）
+为什么类还在、代码是好的，却从没被调用：
+- 阶段 4 把它的注册调用从 enhanced_entry._register_agents 里摘掉了。
+  现在名册里只有 knowledge / database / customer_service / vqa / chat 五个 Agent，
+  图里根本没有 document_agent 这个节点。
+- 类、方法、_register_document_agent 一行没删，只是没有调用方 ——
+  想恢复就在 _register_agents 里把 `self._register_document_agent(retriever)`
+  那行加回来（enhanced_entry.py 该处有一段说明）。
+- tests/test_after_sales.py 有一条断言，明确要求名册里不含 document_agent。
+- config/agents.yaml 里仍写着 document_agent 且 enabled: true，但那份 yaml
+  全项目无人消费，别被它误导。
+
+所以：读本文件是为了学"一个 ReAct Agent 长什么样"，
+不必去图里找它的节点（找不到），也不必怀疑自己漏看了调用点。
+
+另有两个高频混淆点：
+1. 本文件里的"注册"专指**把这个 Agent 的工具装进它自己的工具箱**
+   （_register_tools / tool_registry），与"把 Agent 注册进编排层名册"是两层事。
+   前者始终在跑，后者已被摘掉 —— 看到 registry 先分清是哪一层。
+2. 工具真正被调用的入口是 handle()，而 handle() 的唯一调用方是编排层的 Agent
+   节点工厂；Agent 不入名册，handle() 就永远不会被触发。
+
+技术形态（学 agent 开发时可参考的部分）：
+- ReAct（推理-行动循环）：想一步 → 调工具 → 看结果 → 再想，
+  由 LLM 自己决定调哪个工具、调几次，而不是写死流程
+- 工具用 StructuredTool + Pydantic 参数结构（args_schema）声明，参数校验自动做
+- 附带一整套优化模块（缓存 / 重试 / 监控），初始化失败会降级为基础模式
+
+支持多种文件格式的解析与智能分析（均面向合同场景）：
+- PDF（含OCR扫描件、跨页表格合并）—— OCR（光学字符识别）= 从图片里认字，
+  扫描件没有文字层，不先 OCR 就解析不出任何文本
 - Word（.docx/.doc，含表格和文本框提取）
 - Excel/CSV（读取并转换为文本）
 - 纯文本（.txt/.md）
@@ -19,16 +50,20 @@ import logging
 import time
 import json
 from typing import Dict, Any, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field  # Pydantic（数据校验库）：用类型标注声明数据结构，运行时自动校验
 
-from llm.output_parser import parse_llm_json, parse_tool_calls
-from llm.langchain_tools import ToolRegistry
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from llm.output_parser import parse_llm_json, parse_tool_calls  # parse_tool_calls：从 LLM 回复里解析出"要调哪个工具、传什么参数"
+from llm.langchain_tools import ToolRegistry  # ToolRegistry（工具注册中心）：本 Agent 自己的工具箱，按名字取工具
+from concurrent.futures import ThreadPoolExecutor, as_completed  # 线程池：让多个独立工具调用并行跑
 
 logger = logging.getLogger(__name__)
 
 
 # ==================== Pydantic 参数 Schema ====================
+# args_schema（参数结构）：每个工具配一个参数类，作用有两个 ——
+# 一是自动生成给 LLM 看的参数说明（即工具 schema），二是调用前先校验参数。
+# 读法：`Field(..., description=...)` 里第一个 `...` 表示「必填」，
+# 写了 `default=` 的才是选填（见下面的 top_k / directory）。
 
 # ---------- 文档解析工具 ----------
 
@@ -75,15 +110,25 @@ class ReadContractFileArgs(BaseModel):
 
 
 class DocumentAgent:
-    """文档处理Agent（ReAct自主决策模式）"""
+    """文档处理Agent（ReAct自主决策模式）
+
+    遗留状态见文件头：本类不在编排层名册里，图里没有它的节点。
+    工具照样会在 __init__ 里被装进自己的工具箱，但没有任何入口触发它们。
+    """
 
     def _emit_progress(self, context: Dict, msg: str, **extra):
-        """通过 StreamWriter 发射中间步骤事件（供前端 trace 面板展示）"""
+        """通过 StreamWriter 发射中间步骤事件（供前端 trace 面板展示）
+
+        StreamWriter（流式事件写入器）= 节点执行过程中往外推进度事件的接口，
+        由编排层塞进 context 的 `_stream_writer`。
+        取不到 writer 就直接返回，所以本方法在脱离图单独运行时是安全的空操作，
+        不需要调用方先判断"有没有接前端"。
+        """
         writer = context.get("_stream_writer")
         if writer is None:
             return
         agent_name = context.get("_agent_name", "document_agent")
-        import time as _time
+        import time as _time  # 局部再导入一次（与顶部 import time 等价），行为无差异
         event = {"event": "progress", "agent": agent_name, "msg": msg, "ts": _time.time()}
         event.update(extra)
         writer(event)
@@ -103,7 +148,9 @@ class DocumentAgent:
             llm: LLM实例
             retriever: 向量检索器（用于检索历史合同）
             function_calling: Function Calling管理器
-            embedder: 嵌入器实例
+                ← 事实核对：本方法没有这个形参。第 4 个形参实际是 tool_registry
+                  （工具注册中心），这行是早期版本的残留描述，未改动。
+            embedder: 嵌入器实例（embedder = 向量化模型）
             enable_optimizations: 是否启用优化模块（默认True）
         """
         self.llm = llm
@@ -113,6 +160,11 @@ class DocumentAgent:
         self.enable_optimizations = enable_optimizations
 
         # 初始化 Filesystem MCP 服务
+        # MCP（模型上下文协议）= 让 LLM 按统一协议调用外部工具的规范，
+        # 这里的 MCP Server 提供文件系统能力（列目录 / 读文件）。
+        # 事实核对：FilesystemService 默认 skip_mcp=True，实际不建立 MCP 连接，
+        # 而是退化为 Python 原生文件操作。所以日志里不会出现"连接成功"，
+        # 且 self.filesystem 通常非空 —— 后面两个 MCP 工具总会被注册。
         from core.filesystem_service import FilesystemService
         try:
             self.filesystem = FilesystemService()
@@ -122,6 +174,10 @@ class DocumentAgent:
             self.filesystem = None
 
         # ========== 初始化优化模块 ==========
+        # 这一整套（缓存 / 重试 / 监控）都是可选的：_init_optimization_modules 里
+        # 任何一步 import 失败，都会把 enable_optimizations 置回 False（降级 fallback）。
+        # 因此下面每个工具里都写着同样的 `if self.enable_optimizations and ...` 守卫 ——
+        # 那是"优化模块可能整体不可用"的兜底，不是冗余判断。
         if enable_optimizations:
             self._init_optimization_modules()
         else:
@@ -142,7 +198,10 @@ class DocumentAgent:
     def _init_optimization_modules(self):
         """初始化优化模块"""
         try:
-            # 1. 缓存管理
+            # 1. 缓存管理（cache = 把算过的结果存起来，下次直接取，省一次 LLM 调用）
+            # max_size=1000：最多存 1000 条；ttl=3600：条目存活 3600 秒（1 小时）后过期。
+            # 事实核对：core.cache_manager 是为兼容旧代码留的存根，LLMCache 等方法体是空的，
+            # 所以这三个 cache 实际不缓存任何东西（另有一处调用签名对不上，见 identify_risks）。
             from core.cache_manager import CacheManager, LLMCache, RetrievalCache, SupplierCache
             self.cache_manager = CacheManager(max_size=1000, ttl=3600)
             self.llm_cache = LLMCache(self.cache_manager)
@@ -151,11 +210,13 @@ class DocumentAgent:
             logger.info("✓ 缓存管理器初始化完成")
 
             # 2. 行业标准计算器
+            # 作用：把"行业惯例数值"（如质保期、预付款比例的常见区间）拼成文本喂给 LLM，
+            # 让风险判断有参照物 —— 否则模型只能说"偏高"，说不出"比行业惯例高多少"。
             from core.industry_standards import IndustryStandardsCalculator
             self.standards_calculator = IndustryStandardsCalculator(self.retriever)
             logger.info("✓ 行业标准计算器初始化完成")
 
-            # 3. 错误处理
+            # 3. 错误处理（retry = 重试：失败后按指数退避等待再试，最多 3 次）
             from core.error_handler import RetryStrategy, ErrorHandler
             self.retry_strategy = RetryStrategy(max_retries=3, initial_delay=1.0)
             self.error_handler = ErrorHandler()
@@ -176,7 +237,15 @@ class DocumentAgent:
             self.enable_optimizations = False
 
     def _register_tools(self):
-        """注册所有工具（使用 StructuredTool + Pydantic Schema，支持多参数调用）"""
+        """注册所有工具（使用 StructuredTool + Pydantic Schema，支持多参数调用）
+
+        这里的"注册"专指把工具装进本 Agent 自己的工具箱，不是注册 Agent 本身
+        （后者在编排层的 registry，且本 Agent 已被摘掉注册，见文件头）。
+        StructuredTool（LangChain 工具类）：用 args_schema 声明参数，并自动把
+        每个字段的 description 拼成给 LLM 看的工具说明。
+        所以下面的 description 不是给人看的注释 —— 它是 LLM 选工具的唯一依据，
+        措辞直接决定模型选不选它、选错没有，这是 agent 开发里最常调的一块。
+        """
 
         # ========== 文档解析工具 ==========
 
@@ -255,6 +324,10 @@ class DocumentAgent:
         """
         处理查询（ReAct模式）
 
+        handle（处理入口）= Agent 对外的统一方法签名。编排层用 `make_agent_node`
+        把各 Agent 包成图节点时，正是靠调用各自的 handle 来触发；
+        所以本 Agent 一旦不入名册，handle 就再没有调用方。
+
         Args:
             query: 用户查询
             context: 上下文信息（包含file_path等）
@@ -276,7 +349,12 @@ class DocumentAgent:
 
     @staticmethod
     def _truncate_tool_result(result_str: str, max_len: int = 4000) -> str:
-        """截断过长的工具结果，保留头尾"""
+        """截断过长的工具结果，保留头尾
+
+        为什么留头尾而不是只留开头：工具结果会被原样塞回 messages，
+        太长会撑爆上下文窗口（context window）也白花 token；
+        而结论性信息常在首尾，中间多为重复正文。
+        """
         if len(result_str) <= max_len:
             return result_str
         keep = max_len // 2
@@ -289,6 +367,11 @@ class DocumentAgent:
         ReAct模式处理查询
         Agent自主决策调用哪些工具、调用顺序、何时停止
 
+        循环骨架（每轮都同一套）：
+        LLM → 若回复带工具调用，就执行、把结果按协议塞回 messages → 下一轮；
+        若不带工具调用，说明模型自认信息够了，直接把那段回复当答案返回。
+        也就是说"何时停"由模型自己决定，max_iterations 只是防止它一直不停的保险丝。
+
         Args:
             query: 用户查询
             context: 上下文信息
@@ -299,13 +382,15 @@ class DocumentAgent:
         """
         logger.info("[ReAct] 开始ReAct循环")
 
-        # 获取工具schema
+        # 获取工具schema（要转成 Function Calling 格式，即 LLM 认得的那种工具清单）
         tools = self.tool_registry.get_tools_schema()
 
         if not tools:
             return "错误：无可用工具"
 
         # 构建系统提示词（定义Agent的能力和决策策略）
+        # prompt（提示词）= 喂给 LLM 的指令文本；system 角色 = 全局人设与规则，
+        # 每轮都会重新带上。它决定了 Agent 的全部行为，改它等于改行为，不是改注释。
         system_prompt = """你是一个企业级文档处理Agent。你支持多种文档格式（PDF、Word、Excel/CSV、TXT/Markdown）的解析与智能分析，同时具备合同审核能力。
 
 【核心能力】
@@ -360,8 +445,8 @@ class DocumentAgent:
             {"role": "user", "content": query}
         ]
 
-        max_iterations = 5  # 最多5轮ReAct循环
-        seen_tool_calls = set()  # 重复调用检测
+        max_iterations = 5  # max_iterations（最大迭代次数）：ReAct 循环上限，防无限调工具
+        seen_tool_calls = set()  # 重复调用检测：以 (工具名, 参数字符串) 为 key 判重
 
         for iteration in range(max_iterations):
             logger.info(f"[ReAct] 第 {iteration + 1}/{max_iterations} 轮")
@@ -369,9 +454,12 @@ class DocumentAgent:
 
             try:
                 # 调用LLM（支持function calling）
+                # function calling：模型不直接给答案，而是返回一个结构化请求
+                # "我要调 X 工具、参数是 Y"，由程序去执行、再把结果喂回。
+                # temperature（采样温度）：越低越稳定、越高越发散，这里 0.3 偏保守。
                 response = self.llm.chat(messages, tools=tools, temperature=0.3)
 
-                # 解析工具调用
+                # 解析工具调用（把模型回复里的结构化请求解出来）
                 tool_calls = parse_tool_calls(response)
 
                 if not tool_calls:
@@ -385,6 +473,8 @@ class DocumentAgent:
                 self._emit_progress(context, f"ReAct 第{iteration + 1}轮：调用工具 {', '.join(tool_names)}", stage="tool_call")
 
                 # ---------- 去重 ----------
+                # 为什么需要：模型有时会在同一轮里重发一模一样的调用（同名同参），
+                # 照单执行会白跑工具、白花 token，还会把重复结果灌满上下文。
                 unique_calls = []
                 for tc in tool_calls:
                     func_name = tc["function"]["name"]
@@ -404,6 +494,8 @@ class DocumentAgent:
                 # ---------- 执行工具（并行/串行） ----------
                 def _exec_one(tc):
                     fn = tc["function"]["name"]
+                    # 两级解析：LLM 给的 arguments 只是"看起来像 JSON"，可能带单引号、尾逗号
+                    # 之类毛病 —— 标准 json 解不动时，退给容错版 parse_llm_json 再试一次。
                     try:
                         args = json.loads(tc["function"]["arguments"])
                     except json.JSONDecodeError:
@@ -414,11 +506,15 @@ class DocumentAgent:
                     logger.info(f"[ReAct] 工具执行完成，耗时 {(time.time()-t0)*1000:.1f}ms")
                     return tc, str(res) if not isinstance(res, str) else res
 
-                results_map = {}  # tool_call_id -> result_str
+                # tool_call_id -> 结果文本。这个 id 是"请求"与"结果"的配对凭据：
+                # 下面回填消息时必须靠它一一对上（协议要求，且返回顺序不保证）。
+                results_map = {}
                 if len(unique_calls) > 1:
+                    # 同一轮的多个工具互不依赖，并行执行可把总耗时压到"最慢的那个"；
+                    # max_workers 上限 4 是为了别把下游（LLM/检索/MCP）打爆。
                     with ThreadPoolExecutor(max_workers=min(len(unique_calls), 4)) as pool:
                         futures = {pool.submit(_exec_one, tc): tc for tc in unique_calls}
-                        for fut in as_completed(futures):
+                        for fut in as_completed(futures):  # as_completed：谁先跑完谁先回来，不按提交顺序
                             tc, res = fut.result()
                             results_map[tc["id"]] = self._truncate_tool_result(res)
                 else:
@@ -426,6 +522,10 @@ class DocumentAgent:
                     results_map[tc["id"]] = self._truncate_tool_result(res)
 
                 # ---------- 标准 tool calling 消息格式 ----------
+                # 这一段不是随手拼的：OpenAI/千问的 function calling 协议规定，
+                # 工具结果必须按「assistant 带 tool_calls（content 置 None）→ 若干条
+                # role=tool 的结果消息（用 tool_call_id 配对）」的顺序回填；
+                # 少一条、或 id 对不上，下一轮模型就会报错或读不懂结果。
                 # 发射工具结果事件
                 result_summary = ", ".join([tc["function"]["name"] for tc in unique_calls])
                 self._emit_progress(context, f"工具执行完成: {result_summary}", stage="tool_result")
@@ -454,6 +554,8 @@ class DocumentAgent:
                     })
 
                 # 仅最后一轮追加 user 消息强制收敛
+                # 从倒数第二轮（-2）就开始提醒：模型可能这一轮仍坚持调工具，
+                # 得留至少一轮给它把"别再调了、直接下结论"消化掉。
                 if iteration >= max_iterations - 2:
                     messages.append({
                         "role": "user",
@@ -468,6 +570,7 @@ class DocumentAgent:
                     return f"处理失败: {str(e)}"
 
                 # 否则尝试基于已有信息生成答案
+                # 取舍：已经花掉几轮调用，直接抛错等于全废；宁可让模型拿半成品总结。
                 messages.append({
                     "role": "user",
                     "content": "工具执行出现问题，请基于已有信息给出答案。"
@@ -480,6 +583,8 @@ class DocumentAgent:
                     return "抱歉，处理您的请求时遇到了问题。"
 
         # 达到最大迭代次数，强制要求给出答案
+        # 注意这次调用没传 tools= —— 模型拿不到工具清单，结构上就无法再发起调用；
+        # 这比"在提示词里求它别调"硬得多，是保证循环一定收敛的关键。
         logger.warning(f"[ReAct] 达到最大迭代次数 {max_iterations}，强制生成答案")
         messages.append({
             "role": "user",
@@ -500,6 +605,10 @@ class DocumentAgent:
         """
         智能解析文件路径：处理 LLM 只传文件名（缺少上传目录前缀）的情况。
 
+        为什么需要这层兜底：LLM 只从对话里看到文件名，常把上传时加的前缀丢掉 ——
+        UUID（一串随机十六进制 ID，api 层为防同名覆盖而加）或目录前缀，
+        丢掉后直接打开就是"文件不存在"，所以这里按下面的顺序逐个试。
+
         搜索顺序：
         1. 原始路径（绝对路径或相对路径直接可达）
         2. data/uploads/ 下精确匹配
@@ -519,6 +628,9 @@ class DocumentAgent:
         basename = os.path.basename(file_path)
 
         # 2. 在 data/uploads/ 下查找
+        # 事实核对：这里两次 dirname 后的基点是 <nlp>/agents/，算出来是
+        # <nlp>/agents/data/uploads；但 api.py 的上传目录是 <nlp>/data/uploads。
+        # 两者对不上，所以这个兜底分支实际找不到任何文件（本 Agent 未注册，不影响运行）。
         upload_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "uploads")
         if os.path.isdir(upload_dir):
             # 2a. 精确匹配
@@ -560,9 +672,10 @@ class DocumentAgent:
                 logger.info(f"[解析文档] 路径解析: {file_path} -> {resolved_path}")
             file_path = resolved_path
 
-            # 统一使用 core/file_parser.py（支持OCR、表格合并、乱码检测等）
+            # 统一使用 core/file_parser.py（file parser = 文件解析器，把各种格式读成纯文本；
+            # 它内部按扩展名分派，支持OCR、表格合并、乱码检测等）
             from core.file_parser import parse_file
-            result = parse_file(file_path, max_chars=8000)
+            result = parse_file(file_path, max_chars=8000)  # max_chars：文本长度上限，超出即截断
 
             if not result["success"]:
                 return f"解析失败: {result.get('error', '未知错误')}"
@@ -594,9 +707,11 @@ class DocumentAgent:
         try:
             logger.info("[提取结构] 开始提取结构化信息")
 
-            # 截断过长的文本
+            # 截断过长的文本（提取字段用不着全文，3000 字足够覆盖合同要素，还能省 token）
             text_preview = document_text[:3000] if len(document_text) > 3000 else document_text
 
+            # 这一段是"提示词里写死 JSON 字段模板"的做法：把期望的输出形状
+            # 连同字段含义一起给模型看，比只写"输出 JSON"稳定得多。
             prompt = f"""请从以下合同中提取结构化信息，输出JSON格式。
 
 合同内容：
@@ -619,9 +734,11 @@ class DocumentAgent:
 
 只输出JSON，不要其他内容："""
 
+            # temperature=0.1 几乎不随机（填字段要的就是稳定）；max_tokens 限制输出长度，防跑偏长篇
             response = self.llm.generate(prompt, temperature=0.1, max_tokens=800)
 
-            # 提取JSON
+            # 提取JSON：模型常会套上 ```json 或前后加点寒暄，parse_llm_json 负责从中抠出 JSON；
+            # fallback = 降级兜底，真解析不出来时返回这个默认值，好过让整个工具崩掉。
             result = parse_llm_json(response, fallback={"error": "无法提取结构化信息"})
             logger.info("[提取结构] 成功")
             return json.dumps(result, ensure_ascii=False)
@@ -634,6 +751,9 @@ class DocumentAgent:
         """
         识别风险点（基于LLM + 行业标准）
 
+        为什么要有"行业标准"这半边：LLM 单靠自己只能定性地说"违约金偏高"，
+        掺进算出来的行业惯例数值当参照物，判断才变成可核对、可复现的。
+
         Args:
             contract_data: 结构化合同数据（JSON字符串）
 
@@ -644,6 +764,8 @@ class DocumentAgent:
             logger.info("[风险识别] 开始识别风险")
 
             # ========== 优化1：计算行业标准 ==========
+            # 标准数值是算出来的（IndustryStandardsCalculator），不是让 LLM 凭空想的；
+            # 把这份参照物拼进 prompt，模型才能给出"比行业惯例高多少"这类可核对的结论。
             standards_text = ""
             if self.enable_optimizations and self.standards_calculator:
                 try:
@@ -691,6 +813,8 @@ class DocumentAgent:
 只输出JSON："""
 
             # ========== 优化2：检查LLM缓存 ==========
+            # 事实核对：core/cache_manager.LLMCache 是空存根，get 只接受 (key,)；这里多传的
+            # temperature/max_tokens 会抛 TypeError 并被外层 except 吞掉 —— 该分支实际走不通。
             if self.enable_optimizations and self.llm_cache:
                 cached_response = self.llm_cache.get(prompt, temperature=0.2, max_tokens=1000)
                 if cached_response:
@@ -710,7 +834,7 @@ class DocumentAgent:
 
                 return response
 
-            # 使用重试策略
+            # 使用重试策略（失败自动重试，最多 3 次、指数退避；省得每处手写 try/except）
             if self.enable_optimizations and self.retry_strategy:
                 response = self.retry_strategy.execute(call_llm)
             else:
@@ -794,6 +918,11 @@ class DocumentAgent:
         """
         计算风险评分
 
+        与 identify_risks 相反：这里完全不调 LLM，而是按固定规则加权求和
+        （金额最多 30 分 + 风险点最多 50 分 + 历史 20 分）。
+        好处是便宜、可复现、能解释"凭什么给这个分"；代价是阈值全是写死的经验值。
+        这正是"该用规则的地方别用 LLM"的一个示例。
+
         Args:
             contract_data: 合同数据
             risk_analysis: 风险分析结果
@@ -848,6 +977,8 @@ class DocumentAgent:
 
             # 3. 历史维度（0-20分）
             # 这里简化处理，实际应该从历史对比中获取
+            # 事实核对：判断依据只是"文本里出现过'违约'两字"，并不是真去查了历史记录，
+            # 所以这一维度属于启发式占位，别当成真实的历史数据来源。
             if "违约" in str(risk_analysis):
                 score += 20
                 reasons.append("供应商有违约记录")
@@ -887,6 +1018,9 @@ class DocumentAgent:
         """
         检索相似合同
 
+        retriever（检索器）= 负责从知识库召回文档的组件，由外部注入（这里是历史合同库）；
+        top_k = 取前 k 条，即只保留相似度最高的几条。本方法不做精排，直接返回召回结果。
+
         Args:
             query: 检索查询
             top_k: 返回结果数量
@@ -923,6 +1057,8 @@ class DocumentAgent:
             logger.info(f"[按供应商检索] 供应商: {supplier}")
 
             # ========== 优化1：检查缓存 ==========
+            # 事实核对：SupplierCache 同样是空存根，get 恒返回 None，
+            # 所以这段缓存永不命中（签名对得上不报错，只白跑一趟）。
             if self.enable_optimizations and self.supplier_cache:
                 cached_result = self.supplier_cache.get(supplier)
                 if cached_result:
@@ -977,6 +1113,9 @@ class DocumentAgent:
     def list_contracts(self, directory: str = "contracts") -> str:
         """
         列出目录下的所有合同文件（通过 Filesystem MCP）
+
+        事实核对：FilesystemService 默认 skip_mcp=True，实际走的是 Python 原生文件操作，
+        并没有真的建立 MCP 连接 —— 名字与行为不一致，原因见 __init__ 处说明。
 
         Args:
             directory: 目录路径（相对于data目录）
@@ -1073,6 +1212,8 @@ class DocumentAgent:
             print(f"  淘汰次数: {cache.get('evictions', 0)}")
 
         # 性能统计
+        # P95 = 95 分位延迟：把所有请求按耗时排序，95% 的请求都快于这个值。
+        # 看 P95 而不是均值，是为了不被少数极慢的请求把真实体验"平均"掉。
         if "performance_stats" in stats and stats["performance_stats"]:
             perf = stats["performance_stats"]
             print("\n【性能统计】")

@@ -4,6 +4,17 @@ Database Agent
 ==============
 
 专门处理数据库查询任务，擅长SQL生成、表结构探索、数据分析。
+
+形态：这是一个"工具式"Agent —— 它自己不含数据，靠 ReAct（推理-行动循环：
+想一步 → 调工具 → 看结果 → 再想，直到给出答案）调用自己在 _register_tools 里
+登记的 4 个工具，其中最核心的是生成一段 SQL 交给 SQLite 执行，再把结果翻译成
+自然语言。和 vqa_agent 那种"直接调多模态模型看图、不注册工具"的形态正好相反。
+
+一个必须知道的事实：代码里到处写着 "SQLite MCP"（MCP = 模型上下文协议，
+让 LLM 按统一协议调用外部工具的规范），但 core/sqlite_mcp_service.py 的
+skip_mcp 默认就是 True（MCP Server 的 npm 包已下架）—— 所以今天真正生效的是
+Python sqlite3（SQLite 的 Python 驱动）直连这条降级路径，MCP 分支根本进不去。
+读下面的代码时请按 sqlite3 理解，否则会去找并不存在的 MCP 调用。
 """
 
 import logging
@@ -21,7 +32,12 @@ class DatabaseAgent:
     """数据库查询Agent（ReAct模式）"""
 
     def _emit_progress(self, context: Dict, msg: str, **extra):
-        """通过 StreamWriter 发射中间步骤事件（供前端 trace 面板展示）"""
+        """通过 StreamWriter（流式事件写入器）发射中间步骤事件（供前端 trace 面板展示）
+
+        writer 不是 Agent 自己的东西，是图节点在调 handle() 之前塞进 context 的
+        （见 nodes.py make_agent_node）—— Agent 内部拿不到图上下文，只能靠转交。
+        这里 writer 为 None 就直接返回，所以脱离 LangGraph 单独调也不报错。
+        """
         writer = context.get("_stream_writer")
         if writer is None:
             return
@@ -53,8 +69,15 @@ class DatabaseAgent:
             cache_size: 缓存大小（默认500）
             cache_ttl: 缓存TTL秒数（默认3600）
             max_retries: 最大重试次数（默认3）
+
+        事实性说明（未改动代码）：上面 function_calling / enable_memory / max_history
+        三项在下面的真实签名里并不存在，是早期版本的残留说明；可传的入参以 def __init__
+        的签名为准。cache（缓存）= 把算过的答案存下来下次直接复用；
+        TTL = 这条缓存最多存活多少秒，过期即失效。
         """
         self.llm = llm
+        # tool_registry（工具注册中心）：Agent 名下的工具名册。
+        # register_tool 按名字登记，call_tool 按名字取用 —— LLM 全程只见到名字和描述。
         self.tool_registry = tool_registry or ToolRegistry()
         self.enable_optimizations = enable_optimizations
         self.enable_cache = enable_cache
@@ -62,7 +85,7 @@ class DatabaseAgent:
         self.cache_ttl = cache_ttl
         self.max_retries = max_retries
 
-        # 初始化 SQLite MCP 服务
+        # 初始化 SQLite 服务。名字里的 MCP 是历史遗留，实际落到 sqlite3 直连（见文件头）
         from core.sqlite_mcp_service import SQLiteMCPService
         try:
             self.sqlite_mcp = SQLiteMCPService()
@@ -123,7 +146,12 @@ class DatabaseAgent:
             self.error_handler = None
 
     def _register_tools(self):
-        """注册工具（4个）"""
+        """注册工具（4个）
+
+        这几个工具的 description 不是给人看的注释，而是提示词的一部分：
+        模型只能靠"工具名 + 描述 + 参数结构（声明入参字段与类型）"来决定调哪个、
+        怎么填参。所以描述里才反复强调"必须先调 list_tables / describe_table"。
+        """
         if not self.sqlite_mcp:
             logger.warning("SQLite MCP 未初始化，跳过数据库工具注册")
             return
@@ -200,7 +228,12 @@ class DatabaseAgent:
 
     @staticmethod
     def _truncate_tool_result(result_str: str, max_len: int = 4000) -> str:
-        """截断过长的工具结果，保留头尾"""
+        """截断过长的工具结果，保留头尾
+
+        工具结果会被原样塞回消息列表再喂给模型，不截断会撑爆上下文窗口、
+        也白烧 token（词元：模型处理文本的最小单位，长度和计费都按它算）。
+        保留头尾是因为中间通常是大段重复行，头尾才是列名和汇总。
+        """
         if len(result_str) <= max_len:
             return result_str
         keep = max_len // 2
@@ -212,6 +245,15 @@ class DatabaseAgent:
                             seen_tool_calls: set = None) -> List[Dict]:
         """
         执行工具调用（支持去重 + 并行 + JSON容错）
+
+        三处非直观的地方：
+        - 去重：seen_tool_calls 由调用方跨轮次传进来，模型反复要调同一个工具时会命中，
+          直接跳过，省下一次真实查询。
+        - 并行：多个调用同时发（下面的 ThreadPoolExecutor）；结果用 as_completed 收集，
+          所以返回顺序和入参顺序并不一致，别按位置一一对应。
+        - JSON 容错：模型偶尔吐出非法 JSON，json.loads 失败就退到 parse_llm_json
+          （fallback = 降级兜底：主路径失败时退到备用方案）。
+        - retrieval_count 这个形参在本函数内自始至终没被用到，属死参数，保持原样未动。
         """
         if seen_tool_calls is None:
             seen_tool_calls = set()
@@ -294,7 +336,16 @@ class DatabaseAgent:
         return tool_results
 
     def _build_system_prompt(self) -> str:
-        """构建系统提示词（增强表名选择逻辑）"""
+        """构建系统提示词（增强表名选择逻辑）
+
+        下面这段是原文，一字未改。读 few-shot（少量示例）时注意三个刻意的设计：
+        - 示例二专门示范 JOIN（联表查询）：订单在 orders、物流在 logistics，
+          两张表靠 order_id 关联。不示范的话模型很容易只查一张表就作答。
+        - 防幻觉约束：示例末尾写明"查不到物流记录 = 订单还没发货，不要编造轨迹" ——
+          模型凭空造数据的毛病，只能靠提示词里的禁令配合示例来压。
+        - 示例给的是完整工具链路（list_tables → describe_table → query_database），
+          目的是让它学"调用次序"，而不是背下示例里那条 SQL。
+        """
         return """你是一个专业的数据库查询助手。你通过调用工具来查询SQLite数据库并回答用户问题。
 
 【最重要的规则】
@@ -345,7 +396,12 @@ class DatabaseAgent:
 
     def _handle_react(self, query: str, context: Dict, start_time: float) -> str:
         """
-        ReAct模式处理查询
+        ReAct 模式处理查询
+
+        每一轮固定动作：把消息发给模型 → 若它返回 tool_calls 就执行工具、把结果
+        作为 role="tool" 消息追回去 → 下一轮；若它没返回 tool_calls，说明模型认为
+        信息够了，这一轮的文本就是最终答案。所以循环只有两个出口：模型主动收口，
+        或者撞上 max_iterations 上限被强制收口。
         """
         logger.info("[ReAct] 开始ReAct循环")
         logger.info(f"[ReAct查询] {query}")
@@ -361,6 +417,8 @@ class DatabaseAgent:
         system_prompt = self._build_system_prompt()
 
         # 获取对话历史（由 LangGraph 共享记忆层注入）
+        # 键名固定是 "history"，写入方是 nodes.py make_agent_node（不是本 Agent 自己填的）；
+        # 脱离图单独调用时这里是空列表，历史就丢了。
         history_messages = context.get("history", [])
 
         messages = [
@@ -369,7 +427,7 @@ class DatabaseAgent:
             {"role": "user", "content": query}
         ]
 
-        max_iterations = 8
+        max_iterations = 8  # 循环上限：防模型反复调工具不收敛，同时也是成本兜底
         retrieval_count = 0
         seen_tool_calls = set()
 
@@ -378,6 +436,8 @@ class DatabaseAgent:
             self._emit_progress(context, f"ReAct 第{iteration + 1}轮：正在思考...", stage="thinking")
 
             try:
+                # temperature（采样温度）：越低输出越确定、越高越发散。调工具这一轮
+                # 要的是可复现的 SQL，所以用 0.3；比闲聊场景的 0.7 明显更冷。
                 response = self.llm.chat(messages, tools=tools, temperature=0.3)
                 if response is None:
                     response = ""
@@ -432,7 +492,10 @@ class DatabaseAgent:
                     else:
                         self._emit_progress(context, f"工具 {tool_name} 执行完成", stage="tool_result")
 
-                # 标准 tool calling 消息格式
+                # 标准 tool calling 消息格式，顺序和 ID 都不能错：
+                # assistant 那条要把 content 置 None、用 tool_calls 声明"我要调这几个"；
+                # 紧跟其后的 role="tool" 消息靠 tool_call_id 与之一一对应。
+                # 一旦顺序错开或 ID 对不上，OpenAI 兼容接口会直接报错。
                 messages.append({
                     "role": "assistant",
                     "content": None,
@@ -457,6 +520,8 @@ class DatabaseAgent:
                         "content": self._truncate_tool_result(result_str)
                     })
 
+                # 提前两轮就打招呼：不留缓冲的话，模型常常在最后一轮被截断，
+                # 答案会草草收尾甚至半句。这句相当于给它一个主动收口的机会。
                 if iteration >= max_iterations - 2:
                     messages.append({
                         "role": "user",
@@ -495,6 +560,8 @@ class DatabaseAgent:
 
     def handle(self, query: str, context: Dict) -> str:
         """
+        handle（处理入口）：Agent 对外统一的方法签名，图节点只认它。
+
         处理查询（ReAct模式 + 对话记忆）
 
         Args:
@@ -503,6 +570,9 @@ class DatabaseAgent:
 
         Returns:
             处理结果
+
+        注意缓存（cache）的键就是 query 原文、不含 history —— 同一句话在不同对话
+        上下文里会命中同一条缓存。这是刻意的取舍：省下一整轮 ReAct 的开销。
         """
         start_time = time.time()
 
@@ -546,6 +616,9 @@ class DatabaseAgent:
     def query_database(self, sql: str) -> str:
         """
         查询数据库（通过 SQLite MCP）
+
+        事实性更正（未改动原描述）：实际走的是 sqlite3 直连而非 MCP —— 原注释里的
+        "通过 SQLite MCP"已不成立，默认 skip_mcp=True，详见文件头。
         """
         try:
             if not self.sqlite_mcp:
@@ -554,6 +627,8 @@ class DatabaseAgent:
             logger.info(f"[数据库查询] SQL: {sql}")
 
             # 安全检查：只允许SELECT语句
+            # 这是写操作（会改数据的操作）的第一道闸门。真正要改数据的动作不走这里，
+            # 而是走 core/write_ops.py 登记 + 人工审批那条独立通道。
             if not sql.strip().upper().startswith("SELECT"):
                 return "安全限制：只允许执行SELECT查询"
 
@@ -572,6 +647,8 @@ class DatabaseAgent:
                     formatted += " | ".join(columns) + "\n"
                     formatted += "-" * (len(" | ".join(columns))) + "\n"
 
+                # 只回显前 10 行：结果集会整段回到提示词里，不限制就会挤掉历史对话。
+                # 但总数故意如实告知 —— 让模型知道"这是被截断的"，避免它以为只有 10 条。
                 for i, row in enumerate(data[:10]):
                     formatted += " | ".join(str(cell) for cell in row) + "\n"
 
@@ -624,6 +701,8 @@ class DatabaseAgent:
                 return "SQLite MCP 未初始化，无法查询数据库"
 
             # 检查缓存
+            # 表结构在一个进程生命周期内不会变，所以这份缓存没有 TTL（对比 __init__ 里
+            # 那个带 cache_ttl 的答案缓存）—— 只要进程活着就一直有效。
             if table_name in self._table_schema_cache:
                 logger.info(f"[数据库] 表结构缓存命中: {table_name}")
                 return self._table_schema_cache[table_name]
@@ -641,6 +720,10 @@ class DatabaseAgent:
                 formatted += "列名 | 类型 | 是否主键\n"
                 formatted += "--- | --- | ---\n"
 
+                # 下面的下标不是随便取的偏移量：这张表来自 SQLite 的 PRAGMA
+                # table_info（SQLite 的配置指令），它的列序固定为
+                # cid(0) / name(1) / type(2) / notnull(3) / dflt_value(4) / pk(5)，
+                # 所以 row[1] 一定是列名、row[2] 是类型、row[5] 才是"是不是主键"。
                 for row in data:
                     col_name = row[1] if len(row) > 1 else "?"
                     col_type = row[2] if len(row) > 2 else "?"

@@ -4,6 +4,20 @@ Knowledge Agent
 ===============
 
 处理知识检索相关任务（已集成8大生产级优化）
+
+在售后系统里扮演什么角色
+------------------------
+这是**通用知识型** Agent，不碰售后业务数据：它只回答"知识库里写了什么 /
+网上说了什么"，不查订单、不办退款、不写库。因为它纯只读（不产生 write
+operation 写操作），所以不经过人工审批那道闸门。
+编排层里它通常作为 DAG 的下游节点被调用（例如"退货政策怎么规定的"），
+与 customer_service / database / document 等业务 Agent 并列注册在同一个名册里。
+
+⚠️ 事实核对（下面这句"8大"是旧口径，阅读时以代码为准）：
+- `_init_optimization_modules` 实际编号到第 9 项（还夹了一个 3.5）。
+- 其中数项只在 `_handle_with_optimizations`（ReAct 失败后的降级路径）里被调用，
+  主路径 ReAct 走的是另一套自带的工具实现 —— 哪些真接线、哪些没接线，
+  在对应初始化块和方法 docstring 上逐一标注了。
 """
 
 import logging
@@ -12,12 +26,17 @@ import json
 import os
 from typing import Dict, Any, List, Optional
 from llm.output_parser import parse_llm_json, parse_tool_calls
-from llm.langchain_tools import ToolRegistry
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from pydantic import BaseModel, Field
+# parse_tool_calls：从 LLM 的文本回复里解析出"工具调用（tool call）"，是 ReAct 循环的入口
+# parse_llm_json：LLM 吐出的 JSON 常带 markdown 围栏等噪声，用它做容错解析
+from llm.langchain_tools import ToolRegistry  # registry（注册中心）：Agent 名册，按名字取工具实例
+from concurrent.futures import ThreadPoolExecutor, as_completed  # 多工具并行执行；as_completed = 谁先完成谁先取
+from pydantic import BaseModel, Field  # Pydantic（数据校验库）：用类型标注声明数据结构，运行时自动校验
 
 
 # ========== 工具参数 Schema（Pydantic 自动校验） ==========
+# schema（结构契约）= 一份字段清单；这里每个类声明一个工具的入参长什么样。
+# 用处：LLM 传参不符合契约时，Pydantic 在函数被调用前就拦下报错，
+# 而不是让工具方法内部崩在半路 —— 错误信息还能回喂给 LLM 让它下一轮改对。
 
 class QueryOnlyArgs(BaseModel):
     """仅需 query 参数的工具"""
@@ -81,10 +100,25 @@ logger = logging.getLogger(__name__)
 
 
 class KnowledgeAgent:
-    """知识检索Agent（生产级优化版）"""
+    """
+    知识检索Agent（生产级优化版）
+
+    "生产级优化版"是自我描述，真实接线情况见模块头的事实核对。
+    agent（智能体）= 能自己决定调哪个工具、调几次的 LLM 程序；
+    本类对外只暴露 handle(query, context) 一个入口（handle = 处理入口），
+    内部主循环是 ReAct（推理-行动循环）：想一步 → 调工具 → 看结果 → 再想，
+    直到 LLM 不再要求调工具、直接给出自然语言答案为止。
+    """
 
     def _emit_progress(self, context: Dict, msg: str, **extra):
-        """通过 StreamWriter 发射中间步骤事件（供前端 trace 面板展示）"""
+        """
+        通过 StreamWriter 发射中间步骤事件（供前端 trace 面板展示）
+
+        StreamWriter（流式事件写入器）= 节点执行过程中往外推进度事件的接口，
+        由调用方塞在 context["_stream_writer"] 里传进来；取不到就静默跳过 ——
+        这样本 Agent 不依赖"有没有前端在听"，离线/脚本调用也能照常跑。
+        trace = 前端的调用链面板，靠这些 progress 事件把每轮 ReAct 画出来。
+        """
         writer = context.get("_stream_writer")
         if writer is None:
             return
@@ -97,11 +131,11 @@ class KnowledgeAgent:
     def __init__(
         self,
         llm,
-        retriever=None,
-        bm25_retriever=None,
+        retriever=None,        # retriever（检索器）：语义检索，负责从向量库召回文档
+        bm25_retriever=None,   # BM25（关键词检索算法）：按词频+稀有度打分，擅长精确匹配
         tool_registry=None,
-        document_filter=None,
-        embedder=None,
+        document_filter=None,  # 按 audience（受众角色）过滤文档，避免越权看到不该看的
+        embedder=None,         # embedder（向量化模型）：把文本转成向量，语义缓存靠它算相似度
 
         # 功能开关（全部默认启用）
         enable_optimizations: bool = True,
@@ -120,7 +154,7 @@ class KnowledgeAgent:
         vector_weight: float = 0.8,
         max_context_length: int = 2000,
 
-        # Redis 支持
+        # Redis（内存数据库）支持：传了它缓存可跨进程共享；不传则退化为进程内内存缓存
         redis_client=None,
     ):
         """
@@ -147,6 +181,12 @@ class KnowledgeAgent:
             max_retries: 最大重试次数（默认3）
             vector_weight: 向量检索权重（默认0.5）
             max_context_length: 上下文最大长度（默认2000）
+
+        Note:
+            上面 Args 与真实签名有两处对不上（只记录，未改代码）：
+            1) 并不存在 "enable_memory" 参数 —— 对话历史是编排层经
+               context["history"] 注入的，本类没有自己的记忆开关；
+            2) vector_weight 真实默认值是 0.8，不是这里写的 0.5。
         """
         self.llm = llm
         self.retriever = retriever
@@ -186,9 +226,25 @@ class KnowledgeAgent:
         logger.info(f"KnowledgeAgent初始化完成 (优化: {enable_optimizations})")
 
     def _init_optimization_modules(self):
-        """初始化8大优化模块"""
+        """
+        初始化"8大优化模块"（实际编号到第 9 项，见下方各块）
+
+        接线现状速查 —— 这才是读这个文件最容易踩空的地方：
+        - 主路径 ReAct 真会用到：缓存/语义缓存（handle 开头判断）、监控 metrics_collector
+        - 只在降级路径 _handle_with_optimizations 用到：查询优化、HybridRetriever、
+          上下文压缩、答案生成、重试策略、评估器、告警
+        - 只在被 LLM 当工具调用时才用到：概念提取器
+        - 初始化了但全文件无调用方：fallback_strategy
+        这些模块来自 rag_core / core 包，也就是 RAG（检索增强生成：
+        先检索资料、再让 LLM 基于资料回答）流水线的各个组件。
+        """
         try:
             # 1. 混合检索 + 重排序
+            # hybrid retrieval（混合检索）= 向量检索 + 关键词检索一起用；
+            # reranker（重排序器）= 对召回结果做精排，把最相关的顶上来。
+            # ⚠️ self.hybrid_retriever 只被下面的 cached_retriever 包着，
+            #    而 cached_retriever 只在降级路径 _handle_with_optimizations 里被调；
+            #    ReAct 主路径调用的 hybrid_search 工具是自己内联实现 RRF 的（见该函数）。
             from rag_core.hybrid_retriever import HybridRetriever
             from rag_core.reranker import RerankerFactory
             if self.enable_rerank:
@@ -205,6 +261,8 @@ class KnowledgeAgent:
             logger.info("✓ 混合检索器初始化完成")
 
             # 2. 查询优化
+            # HyDE（假设文档嵌入）= 先让 LLM 编一个"假答案"，再拿它去检索。
+            # 适合"问题太短、直接检索命中率低"的场景，代价是多一次 LLM 调用。
             from rag_core.query_optimizer import QueryOptimizer
             self.query_optimizer = QueryOptimizer(
                 llm=self.llm,
@@ -213,6 +271,9 @@ class KnowledgeAgent:
             logger.info("✓ 查询优化器初始化完成")
 
             # 3. 缓存机制
+            # cache（缓存）= 把算过的结果存起来，下次直接用。
+            # 这里一次挂三层：答案层（CachedRetriever）、向量层（CachedEmbedder）、
+            # 加上下面 3.5 的语义层 —— 分层是为了"问题换个说法"也少算几次。
             from rag_core.cache_manager import CacheManager, CachedRetriever, CachedEmbedder
             self.cache_manager = CacheManager(
                 max_size=self.cache_size,  # 使用参数
@@ -222,6 +283,8 @@ class KnowledgeAgent:
             self.cached_retriever = CachedRetriever(self.hybrid_retriever, self.cache_manager)
 
             # 向量层缓存：替换 retriever 内部的 embedder 为 cached_embedder
+            # 注意这是"改别人的对象"：直接把传进来的 retriever 实例的 embedder 换掉了。
+            # 属于副作用式接线 —— 外部若还持有同一个 retriever，也会一起被换掉。
             if self.embedder and self.retriever:
                 self.cached_embedder = CachedEmbedder(self.embedder, self.cache_manager)
                 self.retriever.embedder = self.cached_embedder
@@ -230,6 +293,9 @@ class KnowledgeAgent:
             logger.info("✓ 缓存管理器初始化完成")
 
             # 3.5 语义缓存（业务层第二道防线）
+            # semantic cache（语义缓存）= 问法不同但意思一样也能命中；
+            # 靠 cosine similarity（余弦相似度）比向量，阈值 0.95 卡得很严，
+            # 就是怕把"意思相近但答案不同"的问题误判成同一个。
             if self.embedder:
                 from core.semantic_cache import SemanticCache
                 self.semantic_cache = SemanticCache(
@@ -244,6 +310,8 @@ class KnowledgeAgent:
                 self.semantic_cache = None
 
             # 4. 上下文压缩
+            # context compression（上下文压缩）= 把检索到的长文档压短，省 token
+            # （词元：LLM 处理文本的最小单位，也是计费和长度单位）；不压会撑爆上下文窗口。
             from rag_core.context_compressor import ContextCompressor
             self.compressor = ContextCompressor(
                 llm=self.llm,
@@ -252,6 +320,8 @@ class KnowledgeAgent:
             logger.info("✓ 上下文压缩器初始化完成")
 
             # 5. 答案生成优化
+            # Self-Consistency（自洽性）= 同一问题让模型生成多次，取多数一致的那个答案。
+            # num_samples=3 就是生成 3 次做投票：换稳定性，代价是成本也翻三倍。
             from rag_core.answer_generator import AnswerGenerator
             self.answer_generator = AnswerGenerator(
                 llm=self.llm,
@@ -261,6 +331,8 @@ class KnowledgeAgent:
             logger.info("✓ 答案生成器初始化完成")
 
             # 6. 错误处理
+            # retry（重试）= 失败就回头再跑；fallback（降级兜底）= 主路径不行就退到备用方案。
+            # ⚠️ fallback_strategy 在这里被创建，但全文件再无任何调用方 —— "定义了没接线"。
             from core.error_handler import RetryStrategy, FallbackStrategy, GracefulErrorHandler
             self.retry_strategy = RetryStrategy(max_retries=self.max_retries)  # 使用参数
             self.fallback_strategy = FallbackStrategy()
@@ -268,12 +340,16 @@ class KnowledgeAgent:
             logger.info("✓ 错误处理器初始化完成")
 
             # 7. 评估体系
+            # ⚠️ 别和编排层的 evaluator（评估器：给最终答案做质量把关、不过关就打回重试）搞混：
+            #    这里的 RAGEvaluator 只统计延迟等运行指标（evaluate_latency），不打质量分。
             from rag_core.evaluator import RAGEvaluator, OnlineMetrics
             self.evaluator = RAGEvaluator()
             self.online_metrics = OnlineMetrics()
             logger.info("✓ 评估器初始化完成")
 
             # 8. 监控告警
+            # 这三个是模块级单例：metrics_collector 在 ReAct 主路径里被大量调用（真接线）；
+            # alert_manager 只在降级路径 _handle_with_optimizations 末尾 check_alerts 一次。
             from rag_core.monitoring import structured_logger, metrics_collector, alert_manager
             self.structured_logger = structured_logger
             self.metrics_collector = metrics_collector
@@ -281,6 +357,7 @@ class KnowledgeAgent:
             logger.info("✓ 监控系统初始化完成")
 
             # 9. 跨文档概念提取器
+            # 只在 LLM 主动调用 extract_concepts 工具时才走到，不参与 handle 的主流程。
             from rag_core.concept_extractor import ConceptExtractor
             self.concept_extractor = ConceptExtractor(
                 llm=self.llm,
@@ -296,12 +373,22 @@ class KnowledgeAgent:
             logger.info("=" * 50)
 
         except Exception as e:
+            # 任一优化模块导入/初始化失败 → 整体关掉开关，降级为基础模式。
+            # 注意：关掉后不少属性（cache_manager / metrics_collector / semantic_cache …）
+            # 干脆不会被赋值；之所以没炸，是因为调用点都先判断了 enable_optimizations。
             logger.error(f"优化模块初始化失败: {e}", exc_info=True)
             logger.warning("降级为基础模式运行")
             self.enable_optimizations = False
 
     def _register_tools(self):
-        """注册工具（基于 StructuredTool + Pydantic 自动参数校验）"""
+        """
+        注册工具（基于 StructuredTool + Pydantic 自动参数校验）
+
+        StructuredTool（LangChain 工具类）= 用 args_schema（参数结构）声明入参，
+        调用前自动做参数校验和默认值填充 —— 所以方法签名上的默认值不一定生效，
+        真正生效的是 args_schema 里的 default（两者不一致时以 Schema 为准）。
+        registry 里注册的名字，就是 LLM 在 tool_calls 中要写的函数名，必须与之一致。
+        """
         # 向量检索
         self.tool_registry.register_structured_tool(
             name="vector_search",
@@ -335,6 +422,8 @@ class KnowledgeAgent:
         )
 
         # ========== 扩展工具（优先级1：基于LLM） ==========
+        # 下面这些工具多数要额外调一次 LLM（展开/分解/提取），是"花钱换命中率"的手段。
+        # 工具描述（description）会原样进提示词，是 LLM 挑工具的主要依据。
 
         # 查询扩展
         self.tool_registry.register_structured_tool(
@@ -421,6 +510,11 @@ class KnowledgeAgent:
     def _collect_sources(self, results: List[Dict]):
         """
         收集检索结果中的源文档信息（按文件去重，保留最高分）
+
+        metadata（元数据）= 附在文档/向量上的结构化信息，这里靠它过滤和分层；
+        score（分数）= 相关性得分；doc_id（文档 ID）= 每篇文档的唯一标识。
+        同一 source（来源文件）常被切成多个 chunk（文本块），命中时会有好几条，
+        所以按 source 去重、只留最高分。
 
         同时提取 metadata 中的检索统计信息：
         - _vector_score / _bm25_score: 原始检索分数
@@ -517,6 +611,10 @@ class KnowledgeAgent:
 
         Returns:
             附加了引用信息和检索统计的回答
+
+        隐式契约：返回值末尾用 `<!-- SOURCES:{json}:SOURCES -->` 包一段 JSON，
+        由前端反向解析出 citation（引用溯源：标出"这句来自哪篇文档"）。
+        后端与前端就靠这个字符串标记耦合 —— 改格式等于改接口，所以在此单独说明。
         """
         sources = getattr(self, '_retrieved_sources', [])
         if not sources:
@@ -557,7 +655,12 @@ class KnowledgeAgent:
 
     @staticmethod
     def _truncate_tool_result(result_str: str, max_len: int = 4000) -> str:
-        """截断过长的工具结果，保留头尾"""
+        """
+        截断过长的工具结果，保留头尾
+
+        为什么留头尾而不是只留头：检索结果的"开头是正文摘要、结尾是来源/统计"，
+        砍掉任一头都会丢信息，所以从中间挖掉一段。
+        """
         if len(result_str) <= max_len:
             return result_str
         keep = max_len // 2
@@ -567,7 +670,10 @@ class KnowledgeAgent:
 
     def _handle_tool_not_found(self, tool_name: str, tool_call_id: str) -> Dict:
         """
-        处理工具不存在的情况
+        处理工具不存在的情况（含拼写纠错）
+
+        用 difflib 做模糊匹配给出候选名 —— LLM 偶尔会凭记忆把工具名拼错，
+        直接回"不存在"它下轮多半照错，给候选名更容易自我纠正。
 
         Args:
             tool_name: 不存在的工具名称
@@ -601,6 +707,11 @@ class KnowledgeAgent:
                             seen_tool_calls: set = None) -> List[Dict]:
         """
         执行工具调用（支持去重 + 并行 + JSON容错）
+
+        三件事为什么凑在一起 —— 都在 ReAct 循环里，省一次往返就省一次 LLM 调用：
+        - 去重：LLM 常在同一轮里重复请求同一个调用，重复执行纯属浪费
+        - 并行：同一轮多个互不依赖的工具丢线程池一起跑
+        - JSON 容错：arguments 是 LLM 现生成的字符串，格式不合法时用宽松解析兜底
 
         Args:
             tool_calls: 工具调用列表
@@ -702,6 +813,12 @@ class KnowledgeAgent:
         """
         处理查询（ReAct模式 + 生产级优化 + 对话记忆 + 情感分析）
 
+        说明：标题里的"情感分析"在本类里没有实现（旧描述未同步，情感分析在
+        customer_service_agent 那边）。本方法实际只做三件事：查缓存 → 跑 ReAct → 回写缓存。
+
+        两道缓存都摆在最前面：命中就直接 return，连 ReAct 循环都不进 ——
+        所以调优时"为什么没看到工具调用"的常见答案就是缓存命中了。
+
         Args:
             query: 用户查询
             context: 上下文信息
@@ -763,6 +880,11 @@ class KnowledgeAgent:
     def _build_system_prompt(self, context: Dict) -> str:
         """
         构建系统提示词（知识检索专用）
+
+        prompt（提示词）= 喂给 LLM 的指令文本。这份提示词就是本 Agent 的"行为策略书"：
+        强制先检索后回答、规定每个工具的适用场景、约定检索空结果时必须转 web_search。
+        它是一套通用的知识检索策略，不含任何售后业务规则 —— 业务口径不在这里。
+        整段提示词是本文件最长的字符串字面量，改它等于改 Agent 行为，要当代码对待。
 
         Args:
             context: 上下文信息
@@ -845,8 +967,13 @@ class KnowledgeAgent:
 
     def _handle_react(self, query: str, context: Dict, start_time: float, user_id: str) -> str:
         """
-        ReAct模式处理查询
+        ReAct模式处理查询（推理-行动循环：想一步 → 调工具 → 看结果 → 再想）
         Agent自主决策调用哪些工具、调用顺序、何时停止
+
+        循环上限 max_iterations（最大迭代次数）= 5，写死在函数体内（不是构造参数），
+        防止 LLM 反复调工具停不下来；到顶就注入"别再调工具、直接回答"来强制收敛。
+        消息格式遵循 function calling 约定（role=assistant 带 tool_calls、
+        role=tool 带 tool_call_id），这是与 LLM 接口之间的隐式契约，顺序不能乱。
 
         Args:
             query: 用户查询
@@ -887,7 +1014,7 @@ class KnowledgeAgent:
             {"role": "user", "content": query}
         ]
 
-        max_iterations = 5  # 最多5轮ReAct循环
+        max_iterations = 5  # 最多5轮ReAct循环；局部常量，写了5，提示词里也写了"最多5轮"，改要两边一起改
         retrieval_count = 0  # 检索次数统计
         seen_tool_calls = set()  # 重复调用检测
         logger.info(f"[ReAct配置] 最大迭代次数: {max_iterations}")
@@ -1060,7 +1187,17 @@ class KnowledgeAgent:
             return "抱歉，我无法完成您的请求。请尝试重新表述您的问题。"
 
     def _handle_with_optimizations(self, query: str, context: Dict, start_time: float, user_id: str) -> str:
-        """使用优化模块处理查询"""
+        """
+        使用优化模块处理查询 —— 注意：**这是降级路径，不是主路径**
+
+        只有两种情况会进来：ReAct 发现无可用工具，或 ReAct 首轮就抛异常。
+        所以这里列的"查询优化 / HybridRetriever / 上下文压缩 / 答案生成 / 重试 /
+        评估 / 告警"虽然在 _init_optimization_modules 里都初始化了，
+        日常请求并不会走到它们 —— 读初始化代码时别以为它们在主链路上。
+
+        另：本方法没有判断 enable_optimizations，开关关闭时这里会因属性为 None 而抛异常，
+        再被自己的 except 兜住转去 _handle_basic（结果见那个方法的说明）。
+        """
         try:
             # 1. 查询优化
             logger.info("[优化] 步骤1: 查询优化")
@@ -1156,7 +1293,14 @@ class KnowledgeAgent:
             return self._handle_basic(query, context)
 
     def _handle_basic(self, query: str, context: Dict) -> str:
-        """基础处理流程（无优化）"""
+        """
+        基础处理流程（无优化）
+
+        ⚠️ 事实性说明（只记录，未改逻辑）：本方法内调用 self.function_calling.execute_function，
+        但 self.function_calling 在本类里从未被赋值 —— 所以这段代码只要执行到那一步
+        就必然抛 AttributeError，被自己的 except 吞掉后返回"处理失败: ..."。
+        换言之它是一条实际跑不通的死路径，只剩下日志痕迹。
+        """
         try:
             # 获取工具schema
             tools = self.tool_registry.get_tools_schema()
@@ -1234,14 +1378,20 @@ class KnowledgeAgent:
             return f"处理失败: {str(e)}"
 
     def vector_search(self, query: str, top_k: int = 3, audience: Optional[str] = None) -> List[Dict]:
-        """向量检索"""
+        """
+        向量检索（语义相似度路线）
+
+        与 keyword_search 的差别：这条只走向量库，靠 embedding 的语义接近来找，
+        问题换个说法也能命中，但精确术语（型号、编号）容易漏。
+        """
         if not self.retriever:
             return []
 
         try:
             logger.info(f"[RAG步骤5.1] 向量检索 - 查询: '{query}', top_k: {top_k}")
 
-            # 推断用户角色
+            # 推断用户角色：document_filter 会按 audience 卡可见范围，
+            # 所以先猜"用户是谁"再过滤 —— 猜错就会多滤或漏滤，是这套过滤的固有风险
             if not audience and self.document_filter:
                 from core.document_filter import infer_audience_from_query
                 audience = infer_audience_from_query(query)
@@ -1249,6 +1399,8 @@ class KnowledgeAgent:
 
             # 检索
             logger.info(f"[RAG步骤5.2] 在向量数据库中检索相关文档")
+            # top_k（取前 k 条）= 只保留得分最高的 k 个。这里先取 2k 条是留过滤余量：
+            # 按 audience 过滤后常剩不够 k 条（recall 召回 = 先把可能相关的都捞出来）
             results = self.retriever.retrieve(query, top_k=top_k * 2)  # 多检索一些，过滤后可能不够
             logger.info(f"[RAG步骤5.3] 检索到 {len(results)} 个候选文档")
 
@@ -1290,7 +1442,7 @@ class KnowledgeAgent:
             return []
 
     def keyword_search(self, query: str, top_k: int = 3, audience: Optional[str] = None) -> List[Dict]:
-        """关键词检索"""
+        """关键词检索（BM25 精确匹配路线）—— 不走向量，纯靠词面命中"""
         if not self.bm25_retriever:
             return []
 
@@ -1345,6 +1497,13 @@ class KnowledgeAgent:
         """
         混合检索（RRF融合）
 
+        RRF（倒数排名融合）= 不看原始分数、只看"排第几"，把多路结果按 1/(k+排名) 相加
+        融合成一个列表 —— 好处是向量分与 BM25 分量纲不同也不怕。
+        hybrid retrieval（混合检索）= 向量检索 + 关键词检索一起用，这里两路各取 2k 条。
+
+        与 self.hybrid_retriever 的区别（易混点）：那个昂贵的 HybridRetriever 只用在
+        降级路径；本方法是自己内联实现的 RRF，不经过 self.hybrid_retriever，也不带 reranker。
+
         Args:
             query: 查询文本
             top_k: 返回结果数量
@@ -1354,6 +1513,8 @@ class KnowledgeAgent:
             融合后的结果
         """
         # 抑制子调用的 _collect_sources，避免不同尺度分数混入同一列表
+        # 用实例属性当"开关"是隐式契约：_collect_sources 开头会 getattr 它。
+        # 副作用：多查询并行时多个线程共用这一个属性，可能互相把开关改回 False（竞态）
         self._suppress_source_collection = True
         try:
             vector_results = self.vector_search(query, top_k=top_k * 2)
@@ -1372,7 +1533,7 @@ class KnowledgeAgent:
             bm25_score_map[did] = doc.get("metadata", {}).get("_bm25_score") or round(doc.get("score", 0.0), 4)
 
         # RRF融合
-        k = 60  # RRF参数
+        k = 60  # RRF参数：平滑常数，取 60 是原论文推荐值，作用是压低头部排名的差距
         scores = {}
         doc_map = {}  # doc_id -> 原始文档
 
@@ -1394,6 +1555,8 @@ class KnowledgeAgent:
         sorted_docs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
         # ========== 按源文件去重：同一文件只保留最高分 chunk ==========
+        # chunk（文本块）= 文档切分后的片段，检索的最小单位。同一份文档被切成很多块，
+        # 命中时会有多条同源结果 —— 不去重的话 top_k 会被同一篇文档占满。
         seen_files = {}
         deduped_docs = []
         for doc_id, rrf_score in sorted_docs:
@@ -1413,6 +1576,8 @@ class KnowledgeAgent:
             return []
 
         # 将 RRF 分数归一化到 0-1 范围（min-max）
+        # 为什么要归一化：下游 _append_sources 按 0.3 绝对阈值和"最高分 25%"过滤，
+        # 不归一化的话 RRF 的原始分（几十到几百量级）会让这些过滤条件全部失效
         min_rrf = deduped_docs[-1][1] if len(deduped_docs) > 1 else 0.0
         rrf_range = max_rrf - min_rrf
 
@@ -1509,7 +1674,10 @@ class KnowledgeAgent:
 
     def query_expansion(self, query: str, num_variants: int = 3) -> List[str]:
         """
-        查询扩展：生成查询的多个变体
+        查询扩展：生成查询的多个变体（多花一次 LLM 调用，换更多命中）
+
+        本方法只产出变体文本、自己不做检索；要和 multi_query_search 配合
+        才形成"多路召回"。返回列表里第一个元素始终是原始查询，保证兜底。
 
         Args:
             query: 原始查询
@@ -1691,6 +1859,9 @@ class KnowledgeAgent:
         """
         跨文档概念提取：从多个文档中提取语义概念和关系
 
+        接线说明：底层 concept_extractor 只在优化模块初始化成功时才存在，
+        所以下面要用 hasattr 探一下；本方法不在主流程里，靠 LLM 主动调工具触发。
+
         Args:
             query: 用户查询
             documents: 文档列表（JSON字符串）
@@ -1776,6 +1947,10 @@ class KnowledgeAgent:
         """
         多查询检索：并行检索多个查询并融合结果
 
+        融合只是"按分数排序 + 按内容前缀去重"，不是 RRF —— 分数来自各次 hybrid_search
+        的归一化分，量纲一致所以能直接比。并行跑线程池，注意 hybrid_search 那个抑制开关
+        是实例级共享的（见该函数注释里的竞态说明）。
+
         Args:
             queries: 查询列表
             top_k: 每个查询返回的结果数
@@ -1853,7 +2028,8 @@ class KnowledgeAgent:
             if not filters:
                 return results[:top_k]
 
-            # 应用过滤
+            # 应用过滤：只检查 metadata 里**存在**的键 —— filters 给了某字段、
+            # 而文档没有该字段时算通过（放行）。这与"必须匹配所有条件"的直觉相反，如实记录
             filtered_results = []
             for doc in results:
                 metadata = doc.get("metadata", {})
@@ -1887,6 +2063,12 @@ class KnowledgeAgent:
     ) -> List[Dict]:
         """
         结果重排序：对检索结果重新排序
+
+        两条打分路线：method="llm" 逐个调 API 打分（慢、花钱、灵活）；
+        auto/api/cross_encoder/rule 走专用重排序器。cross-encoder（交叉编码器）=
+        把"问题+文档"拼在一起送进模型打分，比向量比对更准但更慢。
+        ⚠️ 默认值不一致：args_schema（RerankResultsArgs）里写的是 "llm"，
+        方法签名里写的是 "auto" —— 经 registry 调用时以 Schema 里的为准。
 
         Args:
             results: 检索结果（JSON字符串）
@@ -1929,7 +2111,12 @@ class KnowledgeAgent:
             return []
 
     def _rerank_with_reranker(self, results: List[Dict], query: str, method: str = "auto") -> List[Dict]:
-        """使用专用重排序器（API/本地模型/规则）"""
+        """
+        使用专用重排序器（API/本地模型/规则）
+
+        每次调用都新建一个 reranker 实例（若加载本地模型，这一步很贵）——
+        本 Agent 主路径不经过这里，但被 LLM 反复当工具调用时会有重复加载开销。
+        """
         try:
             from rag_core.reranker import RerankerFactory
 
@@ -2141,6 +2328,10 @@ class KnowledgeAgent:
         """
         Tavily 网络搜索：从互联网检索最新信息
 
+        需要环境变量 TAVILY_API_KEY；缺 key 或缺包都返回一条"不可用"的假结果
+        （而不是抛异常）—— 这样 ReAct 循环能继续跑，不会因外部依赖缺失整体中断。
+        返回结构与检索工具一致（content/title/url/score），下游处理可以直接复用。
+
         Args:
             query: 搜索查询文本
             max_results: 返回结果数量
@@ -2183,8 +2374,11 @@ class KnowledgeAgent:
 
     def _fallback_to_llm_knowledge(self, query: str, user_id: str) -> str:
         """
-        降级到LLM通用知识回答
+        降级到LLM通用知识回答（fallback = 主路径失败时退到备用方案）
         当向量数据库未检索到结果时，使用LLM的通用知识回答
+
+        ⚠️ 定位提醒：ReAct 主路径不走这里 —— 主路径的"知识库没有就转 web_search"
+        写死在系统提示词里。本方法只服务于降级路径 _handle_with_optimizations。
 
         Args:
             query: 用户查询

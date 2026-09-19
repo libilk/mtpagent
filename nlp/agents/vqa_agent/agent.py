@@ -9,10 +9,19 @@
 - 多图表对比分析
 - 图片内容描述
 - OCR文字识别
+
+VQA = 视觉问答（Visual Question Answering）。
+多模态模型 = 能同时读文本和图像的模型，这里走的是 OpenAI 兼容的 chat 接口，
+把图片编码成字符串塞进消息的 content 列表里，和文字一起发过去。
+
+形态上和别的 Agent 有本质区别 —— 别的 Agent 是"工具式"的（注册若干工具、
+走 ReAct 循环去调），本 Agent 不注册任何工具（全文件没有 register_tool），
+只发一次 API 请求拿回一段文本。所以它没有 ReAct 循环、没有多轮工具调用，
+LLM 在这里只是"兼容占位"（见 __init__ 的 llm 参数）。
 """
 
 import os
-import base64
+import base64  # base64（二进制转文本编码）：把图片字节编成能塞进 JSON 的字符串
 import logging
 from typing import Dict, Any, List, Optional
 
@@ -27,6 +36,9 @@ except ImportError:
 
 
 # ========== 图表分析专用Prompt ==========
+# 下面三个 prompt 常量按分析模式分工，正文一字未改。
+# 它们都是"角色扮演 + 输出维度清单"的写法：与其让模型自由发挥，不如把要看的
+# 维度（基本信息/概览/趋势/发现/结论）列死，输出才会结构一致、可横向比较。
 
 CHART_ANALYSIS_SYSTEM_PROMPT = """你是一个专业的图表数据分析师。请仔细观察图表，从以下维度进行全面分析：
 
@@ -78,8 +90,12 @@ class VQAAgent:
             model_name: 多模态模型名称（qwen-vl-max / qwen-vl-plus）
             api_key: API密钥（默认读取DASHSCOPE_API_KEY环境变量）
             base_url: API地址
-            max_tokens: 最大生成token数
+            max_tokens: 最大生成token数（token = 词元：模型处理文本的最小单位，
+                        也是单次回答的长度上限）
             llm: 现有LLM实例（用于指代消解等文本任务，保持架构兼容）
+                 指代消解 = 把"这张图里它怎么样"里的"它"还原成具体对象；
+                 本文件其实只把 llm 存进 self.llm 就再没读过 —— 图片理解完全
+                 交给多模态模型，文本任务并不经过这个 llm。
         """
         self.model_name = model_name
         self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY")
@@ -102,7 +118,12 @@ class VQAAgent:
 
     def handle(self, query: str, context: Dict[str, Any] = None) -> str:
         """
-        Agent统一入口（兼容 make_agent_node 调用约定，符合 AgentProtocol）
+        handle（处理入口）：Agent 对外统一的方法签名，兼容 make_agent_node 调用约定。
+        图节点只认 handle 这个名字，所以签名必须和别的 Agent 一致 —— 这正是
+        AgentProtocol（Agent 接口契约：规定 Agent 必须实现哪些方法）在起作用。
+
+        图片不走 query、走 context：query 只是那句问题，图片在 context 的
+        图片字段里（下面 _collect_images 会按优先级合并成一个列表）。
 
         Args:
             query: 用户问题
@@ -140,6 +161,10 @@ class VQAAgent:
     def _detect_mode(self, query: str, images: List[str]) -> str:
         """
         根据问题内容和图片数量自动检测分析模式
+
+        注意：这是纯关键词匹配 + 图片张数判断，不调任何模型。
+        好处是零成本零延迟、结果可预测；代价是措辞换一种说法就可能落错模式。
+        所以别把 mode 当成"模型理解出的意图"，它只是规则分支。
 
         Returns:
             "multi_chart_compare" / "chart_analysis" / "general"
@@ -242,6 +267,10 @@ class VQAAgent:
         """
         调用千问VL视觉模型API
 
+        整个 Agent 只有这一处真正花钱花时间的地方，且只调一次、没有重试。
+        失败时把错误文本当正常答案返回（不抛异常），所以调用方看到的
+        "图像分析失败: ..." 本质上是一段质量极低的答案，会照常进入后续评估。
+
         Args:
             messages: OpenAI格式的消息列表
 
@@ -270,6 +299,10 @@ class VQAAgent:
     def _collect_images(self, context: Dict[str, Any]) -> List[str]:
         """
         从context中收集所有图片，统一转换为API可用的URL或data URI
+
+        data URI = 形如 data:image/png;base64,xxxx 的自包含字符串，把"文件类型
+        + 图片内容"直接编码进一个字符串。本地图片必须转成这种形式才能跟文字一起
+        塞进 JSON 消息体；公网 URL 则可以原样传。
 
         支持的context字段（优先级从高到低）：
         - image_urls: List[str]     公网URL列表
@@ -317,7 +350,11 @@ class VQAAgent:
         return images
 
     def _local_path_to_data_uri(self, path: str) -> Optional[str]:
-        """将本地图片文件转换为base64 data URI"""
+        """将本地图片文件转换为base64 data URI
+
+        MIME type（文件类型标识，如 image/png）靠扩展名猜，写进 data URI 的前缀里，
+        接口据此判断这是不是一张合法图片；认不出的扩展名一律按 image/png 兜底。
+        """
         if not os.path.exists(path):
             logger.error("[VQAAgent] 图片文件不存在: %s", path)
             return None
@@ -337,6 +374,8 @@ class VQAAgent:
             with open(path, "rb") as f:
                 encoded = base64.b64encode(f.read()).decode("utf-8")
 
+            # base64 会把字节数放大到约 4/3，所以乘 0.75 反推原始文件大小；
+            # 这行纯粹是给日志看的，不参与任何判断。
             size_kb = len(encoded) * 0.75 / 1024
             logger.info("[VQAAgent] 本地图片已转base64: %s (%.1f KB)", path, size_kb)
             return f"data:{mime};base64,{encoded}"
