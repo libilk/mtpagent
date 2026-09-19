@@ -16,8 +16,16 @@
 - 种下**条件词表**（封闭枚举，LLM 之后只能从里面选）
 - 商品名 → 类别的**锚点映射**
 
-「类别 → 政策」的适用/排除关系由 `extract_graph_relations.py` 从政策文档抽取，
-再经人工核对后才生效（`status='verified'`）。
+## 破坏性 + 它在流水线里的位置（重跑前必读）
+
+**每次运行都会 `DROP` 掉 1 个视图 + 4 张表重建，库里的东西全部清空** —— 包括已经人工核对通过的
+`status='verified'` 关系。也就是说：**重跑本脚本等于前面抽取和核对全白做**，必须按顺序重跑三步。
+
+    ① init_knowledge_graph.py     建库 + 种子（本脚本）→ database/knowledge_graph.db
+    ② extract_graph_relations.py  LLM 抽取，写入 status='proposed' 的候选关系（写进同一个 db）
+    ③ review_graph_relations.py   人工逐条核对，approve 后 status 变 'verified'，才真正生效
+
+「类别 → 政策」的适用/排除关系由 ② 从政策文档抽取，再经 ③ 人工核对后才生效（`status='verified'`）。
 
 ## 三个关键设计（改代码前先读）
 
@@ -62,6 +70,11 @@ if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
 # ============================================================
 # 建表
 # ============================================================
+# 知识图谱（KG）用"实体（节点）+ 关系（边）"存知识，而不是每次靠模型读文档现推。
+# 实体只分两类：category（类别）/ policy（政策）；边由 predicate（谓词，即"是什么关系"）
+# 描述，只允许 IS_A / APPLIES_TO / EXCLUDES 三种取值。
+# 末尾的 v_rel 是个 view（视图）：把"只取 verified"这个过滤条件固化在库侧，
+# 应用层直接查它，就不可能漏写 WHERE。
 
 SCHEMA_SQL = """
 -- 节点：类别 或 政策
@@ -125,6 +138,8 @@ CREATE VIEW v_rel AS
 # ============================================================
 # 种子数据
 # ============================================================
+# 种子（seed）= 建库时直接写死的最小数据集，让库一建好就能用。
+# 它同时是"哪些节点合法"的真相源 —— 抽取阶段只能引用这里出现过的名字。
 
 # 条件词表（封闭枚举）。patterns 要覆盖用户真实会说的说法。
 CONDITION_ATOMS = [
@@ -239,7 +254,7 @@ def get_or_create_entity(conn, cache: dict, name: str, etype: str,
 
 def build(conn: sqlite3.Connection) -> dict:
     """建表 + 灌种子。返回统计。"""
-    # 先 DROP 再建，保证脚本可反复跑（幂等）
+    # 先 DROP 再建，保证脚本可反复跑（幂等）；代价是已有的关系一并清空 —— 见文件头警告
     conn.executescript("""
         DROP VIEW  IF EXISTS v_rel;
         DROP TABLE IF EXISTS product_categories;
@@ -265,7 +280,8 @@ def build(conn: sqlite3.Connection) -> dict:
     for name, doc_id, family in POLICIES:
         get_or_create_entity(conn, cache, name, "policy", None, doc_id, family)
 
-    # ---- IS_A 层级（唯一的真相源，不额外存 parent_id，否则两份真相会漂移）----
+    # ---- IS_A 层级（IS_A = "是一种"：无线耳机 → 3C数码产品 这种类别从属）。
+    # 它是唯一的真相源，不额外存 parent_id，否则两份真相会漂移 ----
     is_a_count = 0
     for name, parent, _ in CATEGORIES:
         if parent is None:

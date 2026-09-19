@@ -4,12 +4,20 @@
 ======================
 
 **这是什么：** 改造完成后的**验收基线**。每次改动跑一遍，确认核心链路没被改坏。
+（回归测试 / regression = 改完之后重跑，确认没把原来好的弄坏 —— 本文件就是干这个的。）
 
 **怎么跑：**
     cd nlp
     .venv/Scripts/python.exe tests/test_after_sales.py
 
 退出码 0 = 全部通过，1 = 有失败（方便接 CI）。
+
+**两段是怎么分的：** 不是命令行开关 —— `run_all()` 里两个写死的用例列表
+（`fast` / `slow`）顺序执行，一段跑完再进下一段；想只跑第一段得手动注释掉 slow 循环。
+
+**为什么这么分：** 第一段只碰 SQLite 和纯函数，秒级出结果，改完数据层或政策逻辑可立刻自查；
+第二段每个用例都要真调 LLM（大语言模型），整段约 3 分钟。把"便宜且确定"与"贵且随机"
+分开，才能不必为每次小改动付真模型的成本。
 
 用例分两段，按运行成本排：
 
@@ -22,7 +30,7 @@
         test_06  知识图谱政策推导（三值逻辑 + 同族覆盖 + 确定性）
         test_06b 知识库白名单
 
-    第二段（调 LLM，较慢，每个用例数秒到数十秒）—— 端到端
+    第二段（调 LLM，较慢，每个用例数秒到数十秒）—— 端到端（E2E：从入口到出口完整跑一遍）
         test_07  系统初始化
         test_08  Agent 注册集合正确
         test_09  路由：5 类问题分派正确
@@ -32,9 +40,13 @@
         test_13  多轮指代消解
         test_14  写操作登记链路（分段：机制确定性 + 行为不变量）
 
-**已知的不稳定因素：** 第二段依赖 LLM，`temperature` 不为 0，同样的输入偶尔会有不同路径。
+**已知的不稳定因素：** 第二段依赖 LLM，`temperature`（采样温度：>0 时选词带随机性，
+0 才是每次同解）不为 0，同样的输入偶尔会有不同路径。
 所以 test_14 刻意绕过路由直接调 Agent —— 只验证"写操作会被闸门拦住"这件事，
 把路由的不确定性排除在外。**回归测试要尽量只测一件事。**
+
+**用例怎么读：** 带 ★ 的（02/04/05/06/14）是**正向证明** —— 证明某个机制真的拦住了
+一个真实踩过的问题，而不是"功能正常"。03 是 02 的反面：证明约束没有做过头。
 """
 
 import os
@@ -101,7 +113,10 @@ class AfterSalesTester:
 
     @property
     def system(self):
-        """懒加载系统实例：第一段的纯逻辑用例不该为它付出启动成本"""
+        """懒加载系统实例：第一段的纯逻辑用例不该为它付出启动成本
+
+        重模块的 import 也一起推迟在这里 —— 第一段因此连依赖加载都不会发生。
+        """
         if self._system is None:
             from langgraph_orchestrator.enhanced_entry import EnhancedLangGraphRAGSystem
             self._system = EnhancedLangGraphRAGSystem(
@@ -113,7 +128,11 @@ class AfterSalesTester:
         return self._system
 
     def run_test(self, name: str, func) -> None:
-        """跑一个用例并记录结果；异常一律记成失败，不让一个用例炸掉整轮"""
+        """跑一个用例并记录结果；异常一律记成失败，不让一个用例炸掉整轮
+
+        assert（断言）不成立归 FAIL（被测逻辑错），其他异常归 ERROR（环境/接口错）——
+        分开是为了看汇总时能一眼判断该去查业务代码还是查环境。
+        """
         start = time.time()
         try:
             detail = func()
@@ -133,7 +152,11 @@ class AfterSalesTester:
     # ==================================================================
 
     def test_01_db_ready(self):
-        """数据库就位，且六张表都有数据"""
+        """数据库就位，且六张表都有数据
+
+        防的是"没跑初始化脚本就来排查业务问题"：它失败说明库是空的，
+        那么后面用例的失败可能全是这一个根因引起的 —— 先修它再往下看。
+        """
         assert os.path.exists(DB_PATH), f"数据库不存在: {DB_PATH}，请先跑 tools/scripts/init_ecommerce_db.py"
 
         conn = sqlite3.connect(DB_PATH)
@@ -173,7 +196,11 @@ class AfterSalesTester:
         return "臆造 user_id / order_id 均被拒绝"
 
     def test_03_anonymous_ticket_allowed(self):
-        """匿名工单（user_id = NULL）应当允许 —— 外键只约束"给了值就必须存在" """
+        """匿名工单（user_id = NULL）应当允许 —— 外键只约束"给了值就必须存在"
+
+        防的是修 test_02 时把校验做过头：堵死臆造 ID 的同时，连匿名咨询也拒了。
+        这两条是同一特性的正/反两面，改一处必须回来看另一处。
+        """
         from core.ecommerce_crm import EcommerceCRM
         crm = EcommerceCRM()
 
@@ -185,8 +212,10 @@ class AfterSalesTester:
 
     def test_04_return_request_validation(self):
         """
-        退货申请的三重校验：订单存在 / 归属正确 / 状态允许售后。
+        ★ 退货申请的三重校验：订单存在 / 归属正确 / 状态允许售后。
         这是唯一会动钱的操作，校验必须可靠。
+
+        防的是三条校验被删减或合并 —— 漏掉任何一条，不该退的单都会退成功。
         """
         from core.ecommerce_crm import EcommerceCRM
         crm = EcommerceCRM()
@@ -211,7 +240,10 @@ class AfterSalesTester:
 
     def test_05_anti_hallucination_guard(self):
         """
-        防幻觉兜底：声称办过事，就必须真调用过写工具。
+        ★ 防幻觉兜底：声称办过事，就必须真调用过写工具。
+
+        兜底（fallback）= 主路径不可信时退到的确定性规则。这里"主路径"是 LLM 的自由
+        措辞，"兜底"是拿正则去核它有没有对应的工具调用记录 —— 是核验行为，不是核验文字。
 
         这是阶段 3 挖出来的最危险的一个问题 —— 模型会在**没调用工具**的情况下
         写出"已为您提交申请，单号 RFxxx"。
@@ -225,7 +257,9 @@ class AfterSalesTester:
         """
         from agents.customer_service_agent.agent import CustomerServiceAgent as A
 
-        # 借壳调用静态逻辑（不需要实例化整个 Agent）
+        # 借壳调用，跳过 Agent 的构造（那会加载模型、建索引，很贵）。
+        # 注意 _verify_write_claim 其实是**实例方法**，这里靠鸭子类型让 _Probe 冒充 self ——
+        # _Probe 因此必须带上 _WRITE_TOOLS / _CLAIM_PATTERNS 这两个同名类属性。
         class _Probe:
             _WRITE_TOOLS = A._WRITE_TOOLS
             _CLAIM_PATTERNS = A._CLAIM_PATTERNS
@@ -265,12 +299,16 @@ class AfterSalesTester:
 
     def test_06_knowledge_graph(self):
         """
-        知识图谱：政策适用性推导。
+        ★ 知识图谱：政策适用性推导。
 
         **这是不调 LLM 的确定性用例** —— 图谱的价值就在于"算出来的"而不是"猜出来的"，
         所以这里全部是确定断言，而且要求三次结果完全一致（可复现）。
 
-        覆盖三值逻辑的三种情况，以及一个结构性问题（同族覆盖）。
+        覆盖三值逻辑（适用 / 排除 / 待确认）的三种情况，以及一个结构性问题（同族覆盖：
+        越具体的类别覆盖越泛的，否则家电会同时拿到"15日"和"7日"两条互相打架的时限）。
+
+        最要紧的是"待确认"那一档：条件未知时**不能默认成适用** —— 判错方向恰好是把
+        不该退的说成能退，这是唯一危险的错法。
         """
         from core.knowledge_graph import query_policy_applicability
 
@@ -311,6 +349,8 @@ class AfterSalesTester:
             f"同族覆盖失效，通用的15日没被家电的7日盖掉: {policies4}"
 
         # ---- ⑤ 未登记锚点的商品必须显式报错，不能静默兜底 ----
+        # 锚点 = 商品营销名到类别的显式映射（「云听 Pro 主动降噪无线耳机」→「无线耳机」），
+        # 营销名和文档里的类别词对不上，所以必须人工登记。静默兜底 = 让漏配悄悄过去。
         r5 = query_policy_applicability("某个没登记过的商品")
         assert r5.get("error"), "未登记锚点的商品被静默处理了（会掩盖漏配）"
 
@@ -323,7 +363,12 @@ class AfterSalesTester:
         return "排除/适用/待确认三值 + 同族覆盖 + 确定性 全部正确"
 
     def test_06b_knowledge_whitelist(self):
-        """知识库只剩售后政策文档，旧的 RAG 技术文档已清空"""
+        """知识库只剩售后政策文档，旧的 RAG 技术文档已清空
+
+        RAG（检索增强生成）= 先检索资料、再让 LLM 基于资料作答；RAG 技术文档留在库里
+        会污染政策问答的检索结果。防的是旧场景文档被重新灌回来 —— 篇数用等值断言而非
+        "至少"，多一篇也会被抓出来。
+        """
         from pathlib import Path
         knowledge_dir = Path(PROJECT_ROOT) / 'data' / 'knowledge'
         assert knowledge_dir.exists(), f"知识库目录不存在: {knowledge_dir}"
@@ -343,14 +388,22 @@ class AfterSalesTester:
     # ==================================================================
 
     def test_07_system_init(self):
-        """系统能初始化，图和注册表都就绪"""
+        """系统能初始化，图和注册表都就绪
+
+        registry（注册中心）= Agent 名册，按名字取实例。图和它后面所有 E2E 用例的地基 ——
+        这两个挂了，后面的失败都是同一个根因。
+        """
         assert self.system is not None, "系统实例为 None"
         assert self.system.graph is not None, "图实例为 None"
         assert self.system.registry is not None, "注册表为 None"
         return "图 + 注册表就绪"
 
     def test_08_agents_registered(self):
-        """Agent 注册集合正确：5 个，且 document_agent 已摘除"""
+        """Agent 注册集合正确：5 个，且 document_agent 已摘除
+
+        防的是注册集合被悄悄改动 —— 用精确相等而非"至少包含"，误加一个 Agent 也会失败
+        （能动手的 Agent 多一个，能力边界就变了）。
+        """
         agent_ids = [a["id"] for a in self.system.registry.get_all_agents()]
 
         expected = {"knowledge_agent", "database_agent", "customer_service_agent",
@@ -362,7 +415,12 @@ class AfterSalesTester:
         return f"{len(agent_ids)} 个 Agent"
 
     def test_09_routing(self):
-        """路由：5 类售后问题分派到正确的 Agent"""
+        """路由：5 类售后问题分派到正确的 Agent
+
+        （列表里其实有 6 条：5 类业务问题 + 1 条「你好」的闲聊兜底。）
+        入参是 {"description": query} 而非 query —— router.route 只读 description 字段，
+        字段名对不上会静默走偏。防的是改提示词或 Agent 描述后分派整体漂移。
+        """
         agents = self.system.registry.get_all_agents()
 
         cases = [
@@ -390,6 +448,8 @@ class AfterSalesTester:
         主场景的商品是「已激活的无线耳机」—— 属于七天无理由的**例外**
         （已激活 3C 数码），只能走质量问题通道。如果答成"7天无理由、运费自付"
         就说明提示词里的例外说明没起作用。
+
+        只断言关键词（"质量"）而不比对整句：LLM 每次措辞都不同，锁语义锚点才不脆。
         """
         result = self.system.handle_query(
             "我在你们这买的无线耳机，已经拆开用过了，现在想退货，还能退吗？运费谁出？",
@@ -406,7 +466,10 @@ class AfterSalesTester:
         return f"质量分 {result.get('quality_score', 0):.2f}"
 
     def test_11_order_query(self):
-        """订单查询：答案必须来自真实数据，不是编的"""
+        """订单查询：答案必须来自真实数据，不是编的
+
+        防的是退化成"模型凭记忆答" —— 断言的是库里真实存在的状态值，不是回答格式。
+        """
         result = self.system.handle_query(
             "订单 SO20260909001 现在什么状态？",
             thread_id="regression_order",
@@ -423,7 +486,11 @@ class AfterSalesTester:
         return "状态正确，来自 SQL 查询"
 
     def test_12_logistics_query(self):
-        """物流查询：必须 JOIN orders 和 logistics 两张表才能答对"""
+        """物流查询：必须 JOIN orders 和 logistics 两张表才能答对
+
+        JOIN（联表查询）= 按关联条件把多张表拼起来查。承运商/运单号不在 orders 表里，
+        所以答对就等于证明了真去查了库，而不是照提示词编。
+        """
         result = self.system.handle_query(
             "SO20260909001 这个订单的快递到哪了？",
             thread_id="regression_logistics",
@@ -437,7 +504,11 @@ class AfterSalesTester:
         return "承运商 + 运单号均正确"
 
     def test_13_anaphora_resolution(self):
-        """多轮对话：指代消解 —— 第二句里的「它」要能解析成上文的订单"""
+        """多轮对话：指代消解（anaphora resolution）—— 第二句里的「它」要能解析成上文的订单
+
+        防的是会话记忆串了 thread_id 或历史没带上：两轮用同一个 thread_id，
+        第二轮问句里没有任何订单号，答对只能靠记忆。
+        """
         tid = "regression_anaphora"
 
         r1 = self.system.handle_query("订单 SO20260909001 现在什么状态？", thread_id=tid)
@@ -474,6 +545,9 @@ class AfterSalesTester:
         B. **"Agent 会不会主动去调工具"是概率性的** —— 所以这一段不强制它必须写，
            只验证**不变量**：只要答复声称"已提交"，就必须真的写过。
            （这正是防幻觉要守的那条线。）
+
+        不变量（invariant）= 无论随机路径怎么走都必须成立的性质。用"声称即必须真做"
+        代替"必须发生某事"，测试才不会因为模型换了个合理走法就抖。
         """
         import re
         from core.write_ops import consume_write_ops
@@ -481,7 +555,7 @@ class AfterSalesTester:
         agent = self.system.registry.get_agent("customer_service_agent")["instance"]
 
         # ---------- A. 机制：走分发层调用写工具 → 必须登记 ----------
-        consume_write_ops()
+        consume_write_ops()   # 读走并清空：不清的话读到的是上一次请求的残留记录
         import json as _json
         agent._execute_tool_calls(
             [{
@@ -541,7 +615,11 @@ class AfterSalesTester:
         return f"登记链路 OK（{refund_id}）；Agent {acted}"
 
     def test_15_boundary_inputs(self):
-        """边界输入不应让系统崩掉"""
+        """边界输入不应让系统崩掉
+
+        防的是异常穿透到最外层（尤其那条 <script>：不该被当成可执行内容处理）。
+        只断言返回结构存在、不规定回答内容 —— 这里测的是稳定性，不是答案质量。
+        """
         # 极短输入（会走闲聊兜底）
         r = self.system.handle_query("?", thread_id="regression_edge_1")
         assert r.get("success") is not None, "极短输入返回结构异常"
@@ -565,6 +643,8 @@ class AfterSalesTester:
         print("  电商售后助手 · 回归测试")
         print("=" * 70)
 
+        # 分段就在这里：两个列表，fast 段全跑完才开始 slow。
+        # fast 里的用例都不碰 self.system，所以连重模块的 import 都不会发生。
         fast = [
             ("01 数据库就位",                 self.test_01_db_ready),
             ("02 外键约束生效",               self.test_02_foreign_key_enforced),

@@ -32,6 +32,17 @@
 `add` 里如果 object 是个还不存在的实体名，脚本会**自动创建**，
 但会打印提醒 —— 记得把新节点同步回 `init_knowledge_graph.py` 的种子，
 否则重新建库时它会消失。
+
+## 幂等性 / 破坏性
+
+- `--list` **只读**，随便跑，看的是 `status='proposed'` 的那批。
+- `--apply` 会**永久改库且没有 undo**：approve 置 `verified`、reject 置 `rejected`、edit 改 condition。
+  状态一改，`--list` 就再也看不到它了（没有二次确认）。唯一的回退是重跑
+  `init_knowledge_graph.py` 全量重建 —— 但那会把**别的核对结果也一起清掉**。
+  所以规矩是：**决策文件先落盘，再 --apply**。
+- `add` 还可能自动新建实体，这类节点不在种子里，重建即丢（见上）。
+
+它是图谱流水线的第 ③ 步：① 建库种子 → ② 抽取（写 proposed）→ ③ 本脚本核对（改 verified）。
 """
 
 import os
@@ -115,6 +126,7 @@ def cmd_apply(conn: sqlite3.Connection, decisions: Dict) -> None:
         approved += 1
 
     for item in decisions.get("reject", []):
+        # COALESCE(note,'') 把 NULL 当空串 —— 否则 note 本来就是 NULL 时，整段拼接结果也会变 NULL，驳回理由就丢了
         conn.execute(
             "UPDATE relations SET status='rejected', reviewed_by=?, reviewed_at=?, "
             "note = COALESCE(note,'') || ' | 驳回: ' || ? WHERE id=?",
@@ -162,7 +174,7 @@ def main() -> None:
         sys.exit(1)
 
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn.row_factory = sqlite3.Row   # 让结果能按列名取值（r["subj"]），比按下标可读
     try:
         if args.apply:
             with open(args.apply, encoding='utf-8') as f:

@@ -3,6 +3,11 @@
 向量数据库初始化脚本
 ==================
 
+**幂等性 / 破坏性：整库重建。** 每次运行都先 `delete_collection` 删掉 `knowledge_base`
+这个集合（collection）再重建 —— 库里原有的向量**全部丢弃**（同目录下别的集合不受影响）。
+先删后建，重复跑结果一致；但**它做不了增量更新** —— 增量另有 incremental_update.py，
+而那个脚本不套白名单，所以**换知识库时必须用本脚本全量重建**。
+
 支持多种文档格式：
 - Markdown (.md)
 - PDF (.pdf) - 支持OCR和表格提取
@@ -78,8 +83,12 @@ from core.file_parser import (
 
 
 # ========== 文档白名单 ==========
-# 仅索引与核心问题相关的文档（doc_id = 文件名不含扩展名）
+# 仅索引与核心问题相关的文档（doc_id（文档 ID）= 文件名不含扩展名）
 # 不在此列表中的文档将被跳过，不会写入向量数据库
+#
+# **为什么必须有白名单：** 只靠"删掉旧文件"挡不住历史遗留文档 —— 仓库里随时可能躺着
+# 旧场景/试验用的 .md，一旦进了 data/knowledge 就会被索引，把检索结果稀释掉。
+# 白名单是"文件留在仓库、但不进库"的开关：哪天想恢复，改一行重新建库即可，比删文件可逆。
 #
 # 当前场景：电商售后助手（云集优选）
 # 售后助手要能回答的问题：
@@ -220,6 +229,8 @@ def read_documents(docs_dir: str = "data/knowledge"):
                     else:
                         title = first_line.strip('#').strip()[:100]
 
+                # metadata（元数据）= 附在文档上的结构化信息（来源/标题/doc_id/类型），
+                # 后续靠它过滤和分层；向量化时每个 chunk 都会复制带上一份。
                 documents.append({
                     "content": content,
                     "metadata": {
@@ -239,12 +250,12 @@ def read_documents(docs_dir: str = "data/knowledge"):
 
 def chunk_document(content: str, chunk_size: int = 800, overlap: int = 100):
     """
-    文档分块（使用 RecursiveCharacterTextSplitter）
+    文档分块（chunk（文本块）= 检索的最小单位；使用 RecursiveCharacterTextSplitter）
 
     Args:
         content: 文档内容
         chunk_size: 最大块大小（字符数）
-        overlap: 重叠大小（字符数）
+        overlap: 相邻块的重叠字符数 —— 不留重叠，一句话可能正好被切在两块中间，两边各拿半句、谁都检索不中
 
     Returns:
         文档块列表
@@ -261,12 +272,12 @@ def chunk_document(content: str, chunk_size: int = 800, overlap: int = 100):
 
 
 def init_vector_db():
-    """初始化向量数据库"""
+    """初始化向量数据库（ChromaDB / Chroma 是向量数据库：存向量并做相似度搜索的库）"""
     print("\n" + "=" * 60)
     print("  向量数据库初始化")
     print("=" * 60)
 
-    # 1. 初始化Embedder
+    # 1. 初始化 Embedder（向量化模型：调云端 API 把文本转成向量）
     api_key = os.getenv('DASHSCOPE_API_KEY')
     if not api_key:
         print("[ERROR] 未找到 DASHSCOPE_API_KEY 环境变量")
@@ -278,7 +289,7 @@ def init_vector_db():
         model='text-embedding-v2'
     )
 
-    # 2. 初始化ChromaDB（清空旧集合）
+    # 2. 初始化ChromaDB（清空旧集合）—— 文件头说的"破坏性整库重建"，发生的就是这一步
     import chromadb
     from chromadb.config import Settings
     client = chromadb.PersistentClient(
@@ -331,7 +342,8 @@ def init_vector_db():
             chunk_metadata["chunk_id"] = i
             all_metadatas.append(chunk_metadata)
 
-    # 5. 批量向量化
+    # 5. 批量向量化（embedding（向量化）：把文本变成一串数字，语义相近的文本向量也相近）。
+    # 拆成小批次送，是为了避开单次请求的条数上限。
     total_batches = (len(all_chunks) - 1) // 10 + 1
     print(f"[3/4] 向量化 {len(all_chunks)} 个块（{total_batches} 批）...")
     batch_size = 10
@@ -353,7 +365,7 @@ def init_vector_db():
     query_embedding = embedder.encode_query(test_query)
     results = chroma_store.search(
         query_vector=query_embedding.tolist() if hasattr(query_embedding, 'tolist') else query_embedding,
-        top_k=3
+        top_k=3   # top_k（取前 k 条）：只保留相似度最高的 3 条
     )
 
     # ===== 输出统计报表 =====
@@ -392,7 +404,7 @@ def init_vector_db():
             fname = fname[:35] + "..."
         print(f"  {idx:>4}  {fname:<40} {fs['doc_type']:<5} {fs['char_count']:>8,} {fs['chunk_count']:>6}")
 
-    # 测试检索结果
+    # 测试检索结果。score（分数）= 相关性得分，这里按余弦相似度（比较向量方向有多接近）算，越近 1 越相关
     print(f"\n  检索验证 (query=\"{test_query}\"):")
     for i, item in enumerate(results):
         chunk = item[0]

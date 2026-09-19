@@ -1,9 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-自动生成并应用元数据
+自动生成并应用元数据（metadata = 附在文档上的结构化信息：标题/领域/受众）
 ==================
 
 完全自动化：扫描 -> 推断 -> 生成 -> 应用
+
+**幂等性：** 不碰数据库，每次跑都用推断结果**整体覆盖**输出文件 —— 不会越跑越多，但也无法撤销。
+
+**注意：这是未随主线改造的遗留脚本。** 它扫的是相对路径 `documents/`（当前项目里已不存在），
+输出到 `data/document_metadata.json`；而运行时实际读取的是 `data/metadata/document_metadata.json`。
+**所以现在跑它没有效果。** 读它的价值在于看"靠文件名关键词猜领域"这类启发式推断长什么样。
 """
 
 import os
@@ -22,7 +28,7 @@ if sys.platform == 'win32':
 
 def infer_domain_from_filename(filename: str) -> str:
     """
-    从文件名推断领域
+    从文件名推断领域（纯关键词匹配的启发式规则，不调模型：快、可预测，但猜错没法申诉）
 
     Args:
         filename: 文件名
@@ -142,7 +148,7 @@ def auto_generate_metadata(docs_dir: str = "documents"):
         if 'samples' in file_path.parts:
             continue
 
-        # 生成doc_id（使用文件名，不含扩展名）
+        # 生成 doc_id（文档 ID）：用文件名去扩展名，全项目统一这个口径
         doc_id = file_path.stem
 
         # 推断领域
@@ -184,7 +190,8 @@ def auto_apply_metadata():
         print("❌ 没有找到文档")
         return
 
-    # 2. 保存为正式文件
+    # 2. 保存为正式文件（注意：这个路径和运行时读取的 data/metadata/document_metadata.json 不一致，
+    #    所以产物不会被用到 —— 这就是文件头说的"遗留"的具体表现）
     output_file = "data/document_metadata.json"
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
 

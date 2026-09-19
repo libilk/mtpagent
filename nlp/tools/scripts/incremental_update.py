@@ -4,6 +4,25 @@
 ====================
 
 支持增量添加新文档，无需重新初始化整个数据库
+（由 `python main.py --update-db` 调用；enhanced_entry 在 auto_update_index=True
+时也会走这里。）
+
+⚠️ 换知识库时**不要**用它 —— 这是本仓库最容易误用的脚本。
+   原因：全项目的文档白名单 ALLOWED_DOC_IDS 只写在 tools/scripts/init_vector_db.py 里、
+   只在那一个脚本生效。本脚本自己遍历 data/knowledge 下所有受支持后缀的文件，
+   **从不去读那个白名单**。于是在"换知识库"这种场景下用它，被白名单排除的文档
+   照样会被索引进向量库，污染检索结果。换知识库必须全量重建：
+   `python main.py --init-db`。
+
+另外两个和"增量"这个自述对不上的地方，用之前必须知道：
+
+  1. **改文件 = 追加，不是替换。** 本脚本检测到某文档内容变了，只会把新切出来的 chunk
+     再写一遍，**不会先删掉该 doc_id 的旧 chunk**。结果同一篇文档在库里有新旧两份内容，
+     检索可能召回过时的那份。想干净替换只能全量重建。
+  2. **"已索引"记录不可移植。** 判断哪些文件是新增/修改，靠 vector_db/indexed_files.json
+     里存的「文件路径 + MD5」。这个文件已 gitignore，且键是绝对路径 ——
+     首次 clone、换机器、挪目录之后它都不存在或对不上，此时**所有文档都会被当成新文件
+     重新索引一遍**（重复写入）。本仓库当前正没有这个文件。
 """
 
 import os
@@ -22,6 +41,8 @@ if sys.platform == 'win32':
         sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 # 加载.env文件
+# 手写的极简 .env 解析（项目别处用的是 python-dotenv）。够用即可：
+# 逐行找第一个 '=' 切开塞进 os.environ，不支持多行值、变量展开这类语法。
 def load_env():
     """加载.env文件中的环境变量"""
     env_path = '.env'
@@ -46,6 +67,9 @@ from rag_core.api_embedder import APIEmbedder
 from rag_core.chroma_store import ChromaStore
 
 # 导入文档处理函数
+# 按文件路径动态加载，而不是 `import init_vector_db`：tools/scripts/ 不是 Python 包
+# （没有 __init__.py），直接 import 找不到。这样做的用意是**复用** init_vector_db
+# 里的读取/分块逻辑，避免两份实现漂移 —— 但只复用了函数，没用它的白名单。
 import importlib.util
 spec = importlib.util.spec_from_file_location(
     "init_vector_db",
@@ -62,7 +86,11 @@ load_csv_as_natural_language = init_module.load_csv_as_natural_language
 
 
 class IncrementalIndexer:
-    """增量索引器"""
+    """增量索引器
+
+    职责只有一件：拿"文件当前哈希"和 indexed_files.json 里记的旧哈希比对，
+    把文件分成 新增 / 已修改 / 没变 三类。它不负责写入向量库。
+    """
 
     def __init__(self, docs_dir="data/knowledge", index_file="vector_db/indexed_files.json"):
         self.docs_dir = docs_dir
@@ -83,7 +111,11 @@ class IncrementalIndexer:
             json.dump(self.indexed_files, f, ensure_ascii=False, indent=2)
 
     def _get_file_hash(self, file_path):
-        """计算文件哈希值（用于检测文件变化）"""
+        """计算文件哈希值（用于检测文件变化）
+
+        这里用 MD5 只看"内容有没有变"，不承担任何安全用途 ——
+        所以选它只是因为快，不是因为抗碰撞。
+        """
         hasher = hashlib.md5()
         with open(file_path, 'rb') as f:
             for chunk in iter(lambda: f.read(4096), b""):
@@ -127,7 +159,13 @@ class IncrementalIndexer:
         return new_files, modified_files
 
     def mark_as_indexed(self, file_path, file_hash):
-        """标记文件为已索引"""
+        """标记文件为已索引
+
+        注意调用时机：调用方是在**读完文件、拼出文档对象之后**就立刻标记，
+        而真正写进向量库是后面 step 5 的事。所以中途失败（比如向量化 API 报错）
+        这些文件也已经记成"已索引"，下次跑会被当成"没变"而跳过 ——
+        库里没内容，但脚本认为已经处理过了。
+        """
         self.indexed_files[str(file_path)] = file_hash
         self._save_indexed_files()
 
@@ -148,7 +186,8 @@ def add_documents_to_index(documents, embedder, chroma_store):
         content = doc["content"]
         metadata = doc["metadata"]
 
-        # 分块
+        # 分块：chunk（文本块）= 文档切分后的片段，是检索的最小单位。
+        # 800 是字符数上限，切法复用 init_vector_db.py，两处必须一致否则检索口径会漂。
         chunks = chunk_document(content, chunk_size=800)
         logger.info(f"  {metadata['title'][:50]}: {len(chunks)} 个块")
 
@@ -161,7 +200,9 @@ def add_documents_to_index(documents, embedder, chroma_store):
 
     logger.info(f"总共 {len(all_chunks)} 个文档块")
 
-    # 批量向量化
+    # 批量向量化（embedding：把文本变成一串数字，语义相近的文本向量也相近）。
+    # 分批不是为了省内存，而是向量化走的是远程 API：一次请求塞多点能少几次往返，
+    # 但批次太大又会撞单次请求的文本数上限，10 是个保守的安全档。
     logger.info("批量向量化文档...")
     batch_size = 10
     total_added = 0
@@ -188,7 +229,12 @@ def add_documents_to_index(documents, embedder, chroma_store):
 
 
 def incremental_update():
-    """增量更新向量数据库"""
+    """增量更新向量数据库
+
+    入口有两个：命令行 `python main.py --update-db`，以及 enhanced_entry 在
+    auto_update_index=True 时自动调用。两条路径行为一致 —— 都不走白名单，
+    所以上面文件头那个警告对两者同样成立。
+    """
     logger.info("="*60)
     logger.info("开始增量更新向量数据库")
     logger.info("="*60)
@@ -282,7 +328,8 @@ def incremental_update():
                     }
                 })
 
-                # 标记为已索引
+                # 标记为已索引 —— 此刻还没写向量库（写在第 5 步），
+                # 所以这里是"先记账后发货"，后续步骤失败会导致记账与库内容不一致。
                 indexer.mark_as_indexed(file_path, file_hash)
                 logger.info(f"  ✓ 成功处理 ({len(content)} 字符)")
 

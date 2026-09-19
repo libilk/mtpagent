@@ -21,7 +21,8 @@
 
 设计说明
 --------
-- **可重复执行**：每次跑都会先 DROP 再重建，保证结果一致，不用担心跑第二遍数据翻倍。
+- **破坏性 + 幂等（重跑结果一致）**：每次跑都先 `DROP TABLE` 清空这 6 张表再重建，
+  **库里原有数据会全部丢失**；也正因为先删后建，跑第二遍的结果和第一遍完全相同，不会数据翻倍。
 - **日期固定**：不用 `datetime.now()`，否则每次跑数据都变，没法复现和写测试。
   基准日定在 2026-09-16。
 - **优先级枚举**：tickets.priority 用的是 low/normal/high/urgent，
@@ -54,6 +55,14 @@ if sys.platform == 'win32' and hasattr(sys.stdout, 'buffer'):
 # ============================================================
 # 一、建表语句
 # ============================================================
+# DDL（建表语句）= 定义表结构的 SQL。
+# 表用 primary key（主键，唯一标识一行）定位记录，用 foreign key（外键，指向另一张表的主键）
+# 保证"引用的东西真实存在"；order_items.item_id 用 AUTOINCREMENT 自增整数，
+# 因为这类明细行没有天然的唯一业务编号。
+#
+# ⚠ 一个真实踩过的坑：SQLite 会把建表语句的**原文（含 `--` 注释）**存进 sqlite_master。
+# 读取端 core/sqlite_mcp_service.py 若按逗号裸切列名，切出的第一个词就是 `--`，
+# list_tables 输出的列名会是错的。所以那支解析器必须先剥注释再解析。
 
 SCHEMA_SQL = """
 -- 会员表：售后权益按会员等级区分（银卡以上有免费退货运费补贴）
@@ -277,6 +286,8 @@ TICKETS = [
 def create_tables(conn: sqlite3.Connection) -> None:
     """建表。先 DROP 再 CREATE，保证脚本可以反复跑。"""
     # 注意 DROP 顺序：有外键引用的表要先删
+    # 本连接没开 PRAGMA foreign_keys（SQLite 配置指令，默认关），所以构建期外键并不校验；
+    # 约束是运行时由 core/ecommerce_crm.py 的连接显式 `PRAGMA foreign_keys = ON` 后才生效。
     drop_order = ["tickets", "refunds", "logistics", "order_items", "orders", "customers"]
     for table in drop_order:
         conn.execute(f"DROP TABLE IF EXISTS {table}")
@@ -337,6 +348,7 @@ def print_summary(conn: sqlite3.Connection) -> None:
         print(f"{table:<14}{count:>6}")
 
     # 顺手把主场景订单打出来，方便肉眼核对
+    # JOIN（联表查询）：按外键把订单/会员/商品三表拼成一行 —— orders 里只有 user_id，看不出"谁买了什么"
     row = conn.execute(
         "SELECT o.order_id, c.name, c.member_level, o.status, i.product_name "
         "FROM orders o "

@@ -1,6 +1,32 @@
 # -*- coding: utf-8 -*-
 """
 DatabaseAgent 快速诊断脚本（跳过 MCP 连接，直接测 sqlite3 + ReAct）
+================================================================
+
+这个脚本要回答的问题是"数据库问答坏了，坏在哪一段"。它把整条链拆成 5 段，逐段验证：
+
+  1. sqlite3 直连查询      —— 绕开项目所有封装，确认数据库文件和 SQL 本身没问题
+  2. SQLiteMCPService 查询 —— 确认项目自己的数据库服务层能返回结构化结果
+  3. DatabaseAgent 工具    —— 确认工具确实注册上了、且能直接调通
+  4. LLM Function Calling  —— 确认模型真的会输出"工具调用"（函数调用）而不是自由文本
+  5. 完整 ReAct            —— 跑目标问题，确认"想一步→调工具→看结果→再想"整条转得起来
+
+输出怎么读：
+  - 每段失败只打印 [FAIL] 然后继续，不会中断 —— 目的是让 5 段结果一次看全，
+    最后 SUMMARY 逐条列出 [PASS]/[FAIL]。
+  - 关键信息是**第一个 FAIL 出现在第几段**：它前面的都过了、它开始不过，问题就在那一段。
+    如果第 3 段就 FAIL，后面第 4/5 段的失败是连带的，不必单独查。
+
+运行前提（两个都很容易踩）：
+  - 本文件是模块级顺序执行的，没有函数包裹，**import 它就会开跑**；
+    它也不是 pytest 用例（没有 test_ 函数），得直接 python 跑。
+  - 第 4、5 段会真的发起 LLM API 调用（要 DASHSCOPE_API_KEY、会计费），
+    不是纯本地自检。只想验证数据库那条链的话，把这两段跳过更划算。
+
+（事实性说明，只记录不改逻辑）第 1 段查的是 database/chinook.db 的 Customer/Invoice 表，
+但本仓库 database/ 下只有 ecommerce.db —— chinook.db 早已不存在。
+sqlite3.connect 遇到不存在的路径会**顺手建一个空文件**，随后查询以 "no such table" 失败。
+所以第 1 段在当前仓库必然 FAIL，那是脚本过期，不代表环境坏了。
 """
 
 import os
@@ -26,6 +52,8 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(stream=sys.stderr)]
 )
 
+# 用字符串常量而不是抛异常来标记结果：每段自己 try/except 兜住，
+# 一段挂掉不能影响后面的段，否则就成了"只看得到第一个错误"的调试。
 PASS = "[PASS]"
 FAIL = "[FAIL]"
 results = []
@@ -77,6 +105,9 @@ except Exception as e:
 section("Test 2: SQLiteMCPService query")
 try:
     from core.sqlite_mcp_service import SQLiteMCPService
+    # 不传参数 → skip_mcp 取默认值 True，即"根本不去连 MCP"，直接用 sqlite3 降级。
+    # 所以本段测的其实是项目服务层的降级路径（也是当前线上实际走的那条），
+    # MCP 那条分支没被覆盖到，别看它打印了 MCP 字样就以为 MCP 在生效。
     svc = SQLiteMCPService()
     print(f"  MCP connected: {svc.connected}")
 
@@ -91,6 +122,8 @@ except Exception as e:
     results.append(("SQLiteMCPService", FAIL))
 
 # ========== Test 3: DatabaseAgent tools ==========
+# 注意跨段依赖：本段定义的 agent / tools 两个变量会被第 4、5 段直接用。
+# 所以本段若 FAIL，第 4/5 段会因变量未定义而 NameError —— 那是连带失败，不是新问题。
 section("Test 3: DatabaseAgent tool registration & direct call")
 try:
     from llm.llm_client import LLM
@@ -148,6 +181,7 @@ try:
 
     query = "查询销售额最高的前5位客户及其购买的曲目数量"
     print(f"  Query: {query}")
+    # handle（处理入口）= Agent 对外统一的方法签名，调它等于走完整条 ReAct 循环
     result = agent.handle(query, context={})
 
     print(f"\n  {'='*50}")
@@ -157,6 +191,8 @@ try:
     print(f"  {'='*50}")
 
     # Check quality
+    # 这里要抓的典型故障是：模型懒得执行，直接把 SQL 当答案吐出来了 ——
+    # 所以判据是"有没有 SQL 字样、但没有任何数据/表头痕迹"，而不是 SQL 写得对不对。
     has_data = any(kw in result for kw in ["CustomerId", "客户", "销售额", "曲目", "Total", "Track"])
     has_sql_only = "SELECT" in result.upper() and "GROUP BY" in result.upper() and not has_data
 

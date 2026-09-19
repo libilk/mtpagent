@@ -15,6 +15,16 @@
 
 只有走完这一步，`status` 才会变成 `verified`，才会被 `v_rel` 视图选中参与查询。
 
+它是图谱流水线的第 ② 步（① 建库种子 → ② 本脚本抽 proposed → ③ 人工核对改 verified），
+中间产物就写在同一个库 `database/knowledge_graph.db` 的 `relations` 表里。
+
+## 幂等性：追加式，**重跑会留重复**
+
+本脚本只 `INSERT`、从不删除，每次跑都新写一批 `status='proposed'` 的行（用 `batch_id` 标批次）。
+所以**对同一篇文档重复跑就会产生重复候选**，人工核对时得一条条驳回。
+要干净重来，先重跑 `init_knowledge_graph.py`（会清空），再重抽；
+只验一篇时用 `--doc <doc_id>` 比重跑整批便宜得多。
+
 ## 规则校验查什么（全部是代码，不再经过模型）
 
 1. `quote` 必须是原文的**精确子串**，且 `source_offset` 与之一致 —— 定位不到就丢弃
@@ -71,6 +81,8 @@ if os.path.exists(_env):
 # LLM 抽取
 # ============================================================
 
+# prompt（提示词）= 喂给 LLM（大语言模型）的指令文本。
+# 这里把三张"合法词表"直接拼进 prompt，等于提前给模型划死可选范围 —— 比事后纠错便宜得多。
 EXTRACT_PROMPT = """你是知识图谱抽取器。从下面这篇电商售后政策文档中，抽取
 「商品类别 → 政策」的**适用**或**排除**关系。
 
@@ -156,7 +168,10 @@ VALID_PREDICATES = {"APPLIES_TO", "EXCLUDES"}
 def rule_check(cand: Dict, doc: str, categories: set, policies: set,
                conditions: set) -> Tuple[bool, str]:
     """
-    对单条候选关系做规则校验。
+    对单条候选关系做规则校验（纯代码、不过模型 —— 模型不能既当运动员又当裁判）。
+
+    核心是防幻觉（hallucination：模型一本正经编出原文里根本没有的内容）：
+    `quote` 必须能在原文里逐字找到，编造的引文对不上就直接丢。
 
     Returns:
         (是否通过, 不通过的原因或备注)
@@ -194,7 +209,8 @@ def rule_check(cand: Dict, doc: str, categories: set, policies: set,
 
 
 def is_cycle(conn: sqlite3.Connection, subj_id: int, obj_id: int) -> bool:
-    """加一条 subj IS_A obj 之前，检查会不会成环。"""
+    """加一条 subj IS_A obj 之前，检查会不会成环（成环会让"向上找父类别"无限递归）。
+    做法是顺着已有 IS_A 边往上爬，看能不能绕回 obj。"""
     if subj_id == obj_id:
         return True
     rows = conn.execute("""
@@ -305,6 +321,7 @@ def extract_one(conn: sqlite3.Connection, doc_id: str, stats: Dict) -> None:
 
 
 def main() -> None:
+    # argparse = 标准库的命令行参数解析：让同一个脚本既能整批跑，也能用 --doc 只跑一篇
     ap = argparse.ArgumentParser()
     ap.add_argument("--doc", help="只抽某一篇（doc_id）")
     args = ap.parse_args()

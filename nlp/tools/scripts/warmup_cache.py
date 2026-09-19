@@ -3,9 +3,18 @@
 面试演示缓存预热脚本
 ====================
 
-在面试前运行此脚本，将常用 demo 查询预跑一遍，
-自然填充所有缓存层（查询缓存、语义缓存、检索缓存、向量缓存、LLM缓存）。
-后续相同或语义相似的查询可秒回。
+要解决的问题：一次查询要串起「向量化 → 检索 → LLM 生成」好几步远程调用，
+冷启动时**第一个真实用户要独自承担全部耗时**（还有对应的 token 成本）。
+预热的思路是"自己先当一次那个用户"：把 demo 查询预跑一遍，
+让各层缓存（查询缓存 cache、语义缓存 semantic cache、检索缓存、向量缓存、LLM缓存）
+里提前有货，轮到真人提问时直接命中。
+
+⚠️ 但这个办法生效有个前提：**缓存得能跨进程活下来。**
+   这几层缓存只有在 Redis 可用时才会落盘、才对"下一个进程"可见。
+   本机 .env 里 REDIS_URL 是注释掉的、本地也没有 Redis 在跑 ——
+   此时缓存是纯内存的：本脚本自己看着很快（预热和验证跑在同一个进程里，缓存自然还在），
+   但你随后另起的那个服务进程拿到的是空缓存，预热等于白做。
+   到底连没连上 Redis，看 `--check` 输出末行的「Redis: ...」。
 
 用法:
     python tools/scripts/warmup_cache.py          # 预热所有 demo 查询
@@ -38,6 +47,8 @@ logger.setLevel(logging.INFO)
 
 # ========== 面试演示查询 ==========
 # 按类型分组，方便选择性预热
+# （"type" 里的 simple/complex 只是给人看的标签，不会强制走哪条路径 ——
+#   实际走简单还是复杂由复杂度分类器现场判断，这里别当成路由开关。）
 
 DEMO_QUERIES: List[Dict] = [
     # --- 简单路由：知识检索 ---
@@ -74,6 +85,10 @@ def warmup(queries: List[Dict] = None):
     - knowledge_agent: query_cache + semantic_cache + retrieval_cache + embedding_cache
     - database_agent: 内部 LLM 缓存
     - 编排层: LLM 缓存（复杂度分类、任务规划）
+
+    注意这里"填充"是被动发生的 —— 没有一行代码去写缓存，
+    是各层原有的"查不到就算一次、把结果顺手存下"逻辑在跑真实查询时自己填的。
+    所以只要某条链路这次没被走到（例如问题没触发数据库 Agent），那层就是空的。
     """
     from langgraph_orchestrator.enhanced_entry import EnhancedLangGraphRAGSystem
 
@@ -87,6 +102,10 @@ def warmup(queries: List[Dict] = None):
     # 初始化系统
     print("⏳ 正在初始化 RAG 系统...")
     init_start = time.time()
+    # auto_update_index=False：预热只读不写知识库。若开着，初始化时会去碰
+    #   incremental_update（见该脚本文件头的坑），可能顺手把不该索引的文档写进向量库。
+    # enable_checkpointer=True：保持和真实服务一致，否则跑出来的耗时不代表线上。
+    # enable_critic=False：critic 是死代码（类在、但从未注册进图），开着也不会有节点。
     system = EnhancedLangGraphRAGSystem(
         auto_update_index=False,
         enable_checkpointer=True,
@@ -111,6 +130,9 @@ def warmup(queries: List[Dict] = None):
         start = time.time()
         try:
             # 使用非流式方式执行（更简洁）
+            # thread_id（会话 ID）每个查询给一个独立的：避免多个 demo 共享同一份
+            # 对话记忆互相污染。反过来说，缓存的命中**不依赖** thread ——
+            # 各缓存层是跨会话共享的，这正是预热能对别的会话生效的原因。
             result = system.handle_query(
                 query=query,
                 thread_id=f"warmup_{i}",  # 独立 thread 避免干扰
@@ -156,6 +178,9 @@ def warmup(queries: List[Dict] = None):
     print("=" * 60)
 
     # 验证缓存命中
+    # 读法：下面这个"加速比"量的是**同一个进程内**第二遍比第一遍快多少。
+    # 它偏乐观 —— 这里换了 thread_id，但缓存跨会话共享所以仍会命中；
+    # 真正决定"另起一个服务进程还有没有缓存"的是 Redis，不是这个数字。
     print("\n🔄 验证缓存命中效果...\n")
     verify_start = time.time()
 
@@ -167,6 +192,8 @@ def warmup(queries: List[Dict] = None):
                 thread_id=f"warmup_verify_{i}",
             )
             elapsed = time.time() - start
+            # 这只是"耗时 < 2s"的近似判断，不是真的缓存命中计数 ——
+            # 网络偶然变快、答案变短都可能低于 2s。想看真实命中率/命中次数用 --check。
             cached = elapsed < 2.0  # 缓存命中通常 < 2s
             icon = "⚡" if cached else "🐢"
             print(f"  {icon} [{elapsed:.2f}s] {demo['label']}")
@@ -181,7 +208,14 @@ def warmup(queries: List[Dict] = None):
 
 
 def check_cache_stats():
-    """检查当前缓存状态"""
+    """检查当前缓存状态
+
+    输出按"谁的缓存"分组：每个 Agent 一段（逐层列 size/hits/misses/rate），
+    再单独列 LLM 缓存和 Redis 连接状态。
+    读法：hits>0 才说明这层真被命中过；size 大但 hits=0 只说明"填过、没用上"。
+    因为统计归属进程，这个命令本身会新建一个进程 —— 拿它看"上一个进程填的缓存"
+    只有在 Redis 可用时才有意义。
+    """
     from langgraph_orchestrator.enhanced_entry import EnhancedLangGraphRAGSystem
 
     print("\n⏳ 正在初始化系统以读取缓存状态...\n")
@@ -241,7 +275,13 @@ def check_cache_stats():
 
 
 def clear_cache():
-    """清空所有缓存"""
+    """清空所有缓存
+
+    注意"清空"的范围就是**本进程刚 new 出来的这堆实例**。
+    Redis 可用时这些 clear 会连带清掉 Redis 里的键，影响后续所有进程；
+    Redis 不可用（本机默认情况）时就只是清了份内存副本、进程一退全没，
+    不会影响任何别的东西 —— 所以"清完再看还是空的"是正常的，不是没清掉。
+    """
     from langgraph_orchestrator.enhanced_entry import EnhancedLangGraphRAGSystem
 
     print("\n⏳ 正在初始化系统...\n")

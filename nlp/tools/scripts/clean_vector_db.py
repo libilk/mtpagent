@@ -1,5 +1,30 @@
 # -*- coding: utf-8 -*-
 """
+⚠️ 破坏性运维脚本 —— 会不可逆地删东西。跑之前先把下面这段读完。
+
+它一共删三类东西，全程没有确认提示、没有 dry-run、也没有备份：
+
+  1. 向量库条目：从 ChromaDB（向量数据库）的 knowledge_base 集合里，按 doc_id
+     删掉 DOCS_TO_DELETE 列出的文档（连带它们的全部 chunk 文本块）。
+  2. 物理文件：删掉 FILES_TO_DELETE 列出的 data/knowledge/ 下的原始文件
+     （.md / .pdf / .xlsx）。这一步删的是源头文件，只能靠 git 恢复。
+  3. 元数据条目：清理 data/metadata/document_metadata.json。
+     **这一步的删除范围比 DOCS_TO_DELETE 大** —— 除了清单里的 doc_id，
+     它还会顺手删掉所有"在 knowledge 目录里找不到同名文件"的条目（代码里的 orphans）。
+     换句话说：任何"文件挪走了但元数据没跟着清"的历史残留都会被一并扫掉。
+
+跑之前该确认什么：
+  - 这些文档是不是真的不要了。向量库删掉后要靠 `python main.py --init-db` 全量重建，
+    重建走的白名单在 tools/scripts/init_vector_db.py，不在本文件。
+  - 是否在项目根目录下跑：脚本会 os.chdir 到项目根，所有删除路径都相对它计算。
+
+（事实性说明，只记录不改逻辑）本文件下方 DOCS_TO_DELETE 里包含
+hybrid_search_deep_dive / retrieval_methods_comparison / chinook_database_schema，
+而本段把它们列在"保留的文档"里 —— 这两处清单已经对不上了，以代码为准。
+另外这套清单写的还是 RAG 技术文档时代的知识库，当前 data/knowledge/ 下是电商售后的
+10 篇政策文档，两个清单都命中不到 —— 以当前仓库状态跑，三条删除路径实际都不会删掉东西。
+但脚本本身没有防呆，一旦把旧文件放回去就会真删，所以别因为"这次没删到"就当成安全。
+
 一次性脚本：从 ChromaDB 向量数据库中删除与核心问题不相关的文档。
 
 保留的文档（与4个核心问题相关）：
@@ -38,7 +63,8 @@ os.chdir(PROJECT_ROOT)
 import chromadb
 from chromadb.config import Settings
 
-# 要删除的 doc_id 列表
+# 要删除的 doc_id（文档 ID）列表 —— doc_id 的口径是全项目统一的"文件名去掉扩展名"，
+# 与 init_vector_db.py 的 ALLOWED_DOC_IDS 用的是同一套命名，改名单要两边一起改。
 DOCS_TO_DELETE = [
     "multi_agent_orchestration",
     "system_architecture",
@@ -74,6 +100,8 @@ def main():
         print(f"[ERROR] 数据库目录不存在: {db_path}")
         return
 
+    # allow_reset=True 是给 client.reset()（整库清空）开权限；本脚本没调它，
+    # 但权限开着意味着任何后续改动都能一句 reset 清掉整个向量库。
     client = chromadb.PersistentClient(
         path=db_path,
         settings=Settings(anonymized_telemetry=False, allow_reset=True)
@@ -95,6 +123,8 @@ def main():
     total_deleted = 0
     for doc_id in DOCS_TO_DELETE:
         try:
+            # include=[] 表示只要 id、不取文档正文和向量 —— 删除只需要 id，
+            # 取全量正文在大库上会白白拉一堆数据进内存
             results = collection.get(
                 where={"doc_id": doc_id},
                 include=[]
@@ -149,7 +179,10 @@ def main():
             if doc_id in metadata:
                 del metadata[doc_id]
                 removed_keys.append(doc_id)
-        # 同时清理已无物理文件的旧条目
+        # 同时清理已无物理文件的旧条目。
+        # 注意这一步的判据是"knowledge 目录里有没有同名文件"，与 DOCS_TO_DELETE 无关，
+        # 所以它会删掉清单外的条目（凡是文件已不在的都算孤儿）——
+        # 这也是本脚本删除范围最容易被低估的一处。
         existing_files = set()
         if os.path.isdir(knowledge_dir):
             for fn in os.listdir(knowledge_dir):
