@@ -629,8 +629,30 @@ Agent 答复里出现了可解释的依据：「该商品属于「3C数码产品
    **忠实反而会把身份信息带进记忆域**。提示词里已写"不要记录个人信息"，
    但**提示词是软约束、模型可以不听**（本项目反复踩过的坑），所以代码再拦一道。
 
-**Phase 2 · 检索与注入**（未开始）· **Phase 3 · 治理（相似合并 / 遗忘）**（未开始）
-—— 方案见计划文件；Phase 2 会在 `recall_by_category` 之上叠加向量检索 + RRF 融合。
+**Phase 2 · 检索与注入　✅ 已完成（2026-09-21）**
+
+| 新增 / 扩展 | 作用 |
+|---|---|
+| [tools/scripts/index_memory_events.py](tools/scripts/index_memory_events.py) | 把 `verified` 记忆向量化，写**独立 Chroma collection `memory_events`**（不碰 `knowledge_base`） |
+| [core/memory_recall.py](core/memory_recall.py) 扩展 | 两阶段检索：`recall_by_category`（域收窄）→ `recall_similar`（向量 + BM25 → RRF 融合）；`format_narrative` 三段式；`mark_accessed` |
+| [agents/customer_service_agent/agent.py](agents/customer_service_agent/agent.py) | 第 13 个工具 `recall_similar_cases` + 提示词【工具清单】 |
+
+**三个关键点：**
+
+1. **`retrieval_questions`（生成可检索问题）是真实起作用的一环** ——
+   用户的问法与记忆的叙述写法天然不同（「耳机拆开了还能退吗」vs「已拆封3C数码不支持无理由…」），
+   把它一起索引，等于**替用户把话先问了一遍**，显著拉近两种说法的语义距离。
+
+2. **★ RRF 没有"相关性下限"，必须自己补** —— 实测症状：「生鲜坏了怎么办」
+   在只有耳机记忆的库里**也返回了耳机那两条**。因为 RRF 只看排名、不看分数，
+   排名第 0 那条照样拿到 `1/(k+1)`。修法是融合前**每一路各自过阈值**
+   （沿用项目已有的 0.45 / 0.5 两个口径）。**这是端到端跑才暴露出来的。**
+
+3. **叙事第三段（"这是历史经验、不是政策依据"）不能省** ——
+   没有它，模型容易把"历史上这么处理的"当成"政策这么规定的"，
+   等于让历史案例替代政策判断，而记忆**不参与任何决策**是 §7.1.1 的红线。
+
+**Phase 3 · 治理（相似合并 / 遗忘）**（未开始）—— 方案见计划文件。
 
 ### 7.2 已知局限：申请原因不受政策校验
 

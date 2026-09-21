@@ -571,6 +571,75 @@ class AfterSalesTester:
 
         return "7 条规则 + JSON 容错 + 类别隔离 + 血缘不外泄 全部正确"
 
+    def test_06e_memory_narrative(self):
+        """★ 长期记忆：叙事化注入的边界，以及检索的两道守卫。
+
+        叙事化成三段（情境 / 类似案例 / 参考），本用例锁住的是**第三段不能省** ——
+        没有它，模型很容易把"历史上这么处理的"当成"政策这么规定的"，
+        那就把记忆从"参考"变成了"依据"，等于让历史案例替代政策判断。
+
+        另外锁两道守卫：空查询、商品名解析不到类别时都必须返回空，
+        **不能兜底成"全部类别"**（那等于关掉多域隔离）。
+        """
+        from core.memory_recall import format_narrative, format_memories, build_index_text
+        from core.memory_recall import recall_similar
+
+        rows = [{
+            "id": 1, "category_name": "无线耳机", "product_name": "云听 Pro 主动降噪无线耳机",
+            "issue_type": "QUALITY_ISSUE",
+            "conclusion": "已拆封不支持无理由，可走质量问题通道",
+            "summary": "用户耳机故障申请退货，引导走质量问题通道，运费平台承担。",
+            "importance": 0.8, "access_count": 0,
+        }, {
+            "id": 2, "category_name": "无线耳机", "product_name": None,
+            "issue_type": "QUALITY_ISSUE",
+            "conclusion": "质量问题不因拆封受限",
+            "summary": "已签收耳机损坏，仍可申请退换。",
+            "importance": 0.5, "access_count": 0,
+        }]
+
+        # ---- 空结果不炸，也不产出空壳 ----
+        assert format_narrative([]) == "", "空记忆列表应返回空串"
+        assert format_memories([]) == "", "空列表应返回空串"
+
+        # ---- 三段齐：情境 / 类似案例 / 参考 ----
+        text = format_narrative(rows, issue_labels={"QUALITY_ISSUE": "质量问题退换"})
+        for seg in ("【情境】", "【类似案例】", "【参考】"):
+            assert seg in text, f"叙事缺了 {seg} 段: {text[:80]}"
+        # 问题类型给模型看的是人话标签，不是 QUALITY_ISSUE 这种码
+        assert "质量问题退换" in text, "问题类型没转成人话标签"
+        assert "QUALITY_ISSUE" not in text, "把内部 code 泄漏进给模型看的文本"
+        # 两条结论都在
+        assert rows[0]["conclusion"] in text and rows[1]["conclusion"] in text, "案例没列全"
+
+        # ---- ★ 第三段必须明确"不是政策依据" ----
+        assert "不是政策依据" in text, "缺了边界声明（案例会被当成政策来引用）"
+        assert "为准" in text, "缺了'以政策与订单事实为准'的指引"
+
+        # ---- 长 summary 要截断，别把上下文塞满 ----
+        long_row = dict(rows[0], summary="长" * 500)
+        t2 = format_narrative([long_row])
+        assert "长" * 200 not in t2, "超长 summary 没截断"
+
+        # ---- 索引文本：建索引与查询共用同一份实现 ----
+        with_q = dict(rows[0], questions=["耳机拆开了还能退吗", "激活过的能退吗"])
+        it = build_index_text(with_q)
+        assert "耳机拆开了还能退吗" in it, "反生成的问题没进索引文本"
+        assert rows[0]["conclusion"] or rows[0]["summary"] in it
+        assert build_index_text(dict(rows[0], questions=[])) != "", "没问题时也该有叙述"
+        assert build_index_text(dict(rows[0], questions="[]")) != "", "questions 是字符串也要能处理"
+
+        # ---- 守卫一：空查询 ----
+        assert recall_similar("") == [], "空查询应返回空"
+        assert recall_similar("   ") == [], "纯空白查询应返回空"
+
+        # ---- 守卫二：商品名解析不到类别 → 返回空，不兜底成"全部类别" ----
+        # 兜底成全部类别 = 关掉多域隔离，会把别的品类的经验串过来
+        assert recall_similar("耳机坏了", product_name="某个绝对没登记过的商品") == [], \
+            "商品名解析不到类别时兜底了（域隔离失效）"
+
+        return "三段式叙事 + 边界声明 + 索引文本 + 两道守卫 全部正确"
+
     # ==================================================================
     # 第二段：端到端（调 LLM）
     # ==================================================================
@@ -843,6 +912,7 @@ class AfterSalesTester:
             ("06b 知识库白名单",              self.test_06b_knowledge_whitelist),
             ("06c 上游结果交接",              self.test_06c_upstream_handoff),
             ("06d 长期记忆规则与隔离",         self.test_06d_memory_rules),
+            ("06e 长期记忆叙事化注入",         self.test_06e_memory_narrative),
         ]
         slow = [
             ("07 系统初始化",                 self.test_07_system_init),

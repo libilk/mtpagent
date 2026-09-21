@@ -140,6 +140,11 @@ EXTRACT_PROMPT = """从下面这一轮电商售后问答里，总结出一条**�
 - `issue_type`：**必须从下面的问题类型清单里原样选 code**，不许自己造。
 - `conclusion`：一句话结论（"这类问题最终怎么处理"）。≤ 60 字。
 - `summary`：两三句话总结这件事和结论。≤ 200 字。
+- `retrieval_questions`：3~5 条**用户可能问出来的话**，要能让这条记忆被检索到。
+  **用用户的口吻写**（口语、简短），不要用书面总结的口气。
+  例：一条"已拆封耳机走质量问题通道"的记忆，问题应该是
+  「耳机拆开了还能退吗」「用了几天坏了怎么退」「激活过的能退货吗」。
+  每条 ≤ 30 字。
 - `source_quote`：**从上面「用户问」或「助手答」里原样复制的一段**（≤ 300 字），
   必须能支撑你的 conclusion。**不许改写、不许拼接** —— 会被逐字校验，对不上就整条作废。
 
@@ -196,6 +201,22 @@ def parse_memory(raw: str) -> dict:
         return data if isinstance(data, dict) else {}
     except json.JSONDecodeError:
         return {}
+
+
+def normalize_questions(raw) -> list:
+    """把模型给的 retrieval_questions 规整成字符串列表。
+
+    **宽松处理，不拦**：这只是"额外的召回线索"，缺了记忆仍然可用（靠 summary 检索）。
+    为它单独丢一条总结质量很好的记忆，不划算。
+    """
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for q in raw:
+        s = str(q).strip()
+        if s:
+            out.append(s[:60])
+    return out[:5]
 
 
 # ============================================================
@@ -314,20 +335,24 @@ def extract_one(conn, qa_row, issue_types, issue_codes, kg_categories, products,
     if product is not None:
         product = str(product).strip() or None
 
+    questions = normalize_questions(item.get("retrieval_questions"))
+
     conn.execute(
         """
         INSERT INTO memory_events
             (category_name, product_name, issue_type, conclusion, summary,
-             status, source_qa_log_id, source_quote, batch_id, note)
-        VALUES (?,?,?,?,?, 'proposed', ?,?,?,?)
+             retrieval_questions, status, source_qa_log_id, source_quote, batch_id, note)
+        VALUES (?,?,?,?,?,?, 'proposed', ?,?,?,?)
         """,
         (category, product, issue, conclusion, item["summary"].strip(),
+         json.dumps(questions, ensure_ascii=False) if questions else None,
          qa_id, item["source_quote"].strip(), batch_id, note),
     )
     conn.commit()
 
     flag = "⚠ 重复" if note else "✓"
-    return f"[qa#{qa_id}] {flag} {category} / {issue} —— {conclusion[:30]}"
+    qflag = f" +{len(questions)}问" if questions else " (无检索问题)"
+    return f"[qa#{qa_id}] {flag} {category} / {issue}{qflag} —— {conclusion[:30]}"
 
 
 # ============================================================

@@ -197,11 +197,12 @@ class CustomerServiceAgent:
             self.hybrid_retriever = None
 
     def _register_tools(self):
-        """注册工具（12 个）
+        """注册工具（13 个）
 
         怎么数的：`grep -c 'name="' agents/customer_service_agent/agent.py`
         （原文写的是 11 个 = 3 检索 + 4 客服 + 4 售后办理，漏算了阶段 8 新增的
         query_policy_applicability —— 知识图谱那个。已按源码改成 12。）
+        （2026-09-21：长期记忆 Phase 2 新增 recall_similar_cases，12 → 13。）
         """
 
         # ★ 关于 register_tool 的项目级教训（建议先读）★
@@ -516,6 +517,34 @@ class CustomerServiceAgent:
             function=self.query_policy_applicability
         )
 
+        # 13. 检索历史类似案例（长期记忆）
+        self.tool_registry.register_tool(
+            name="recall_similar_cases",
+            description="查历史类似案例：过去遇到过同类商品、同类问题是怎么处理的。"
+                        "库里是**人工核对过**的案例总结（商品/问题类型 + 处理结论）。"
+                        "适合在「这个问题有点绕、想看看以前怎么处理的」时调一次做参考。"
+                        "**注意它只是经验参考，不是政策依据** —— 政策结论仍要用 "
+                        "query_policy_applicability 和 hybrid_search。"
+                        "查不到是正常的（不是所有问题都有历史案例），直接继续回答即可。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "用用户的话来描述这个类似案例检索，"
+                                       "如「耳机拆开了还能退吗」"
+                    },
+                    "product_name": {
+                        "type": "string",
+                        "description": "商品名（可选）。给了就只在**同类别**的历史案例里找，"
+                                       "避免把别的品类的经验串过来"
+                    }
+                },
+                "required": ["query"]
+            },
+            function=self.recall_similar_cases
+        )
+
     @staticmethod
     def _truncate_tool_result(result_str: str, max_len: int = 4000) -> str:
         """截断过长的工具结果。
@@ -717,6 +746,7 @@ class CustomerServiceAgent:
 【工具清单】
 知识图谱：query_policy_applicability（★判断能否退的首选，给确定结论 + 规则依据）
 知识检索：hybrid_search / vector_search / keyword_search（补充条款细节）
+历史案例：recall_similar_cases（查过去同类问题怎么处理的，**仅供参考、不是政策依据**）
 订单售后：query_order（查订单）/ query_logistics（查物流）/
           submit_return_request（提交退换货）/ query_refund_status（查退款进度）
 客服办理：analyze_sentiment / create_ticket / query_ticket / query_user_info
@@ -1346,6 +1376,44 @@ class CustomerServiceAgent:
         except Exception as e:
             logger.error(f"图谱查询失败: {e}")
             return f"图谱查询失败: {str(e)}（可改用 hybrid_search 检索政策文档）"
+
+    def recall_similar_cases(self, query: str, product_name: str = None) -> str:
+        """查历史类似案例（长期记忆的检索侧）。
+
+        记忆库里是**人工核对过**的案例总结（商品/类别 + 问题类型 + 处理结论），
+        检索方式是"向量 + 关键词两路召回、按排名倒数融合"，并按商品类别做域隔离。
+
+        **返回的是叙事化文本，不是结构化数据** —— 三段式（情境 / 类似案例 / 参考边界），
+        最后一段明确告诉模型"这是历史经验、不是政策依据"，防止它把案例当成政策来引用。
+
+        查不到时返回一句说明而不是空串 —— 让模型知道"查过了，没有"，而不是以为工具坏了。
+        """
+        try:
+            from core.memory_recall import recall_similar, format_narrative, load_issue_types
+
+            rows = recall_similar(query, product_name=product_name)
+            if not rows:
+                logger.info(f"[记忆检索] 无相似案例: {query[:30]}（product={product_name}）")
+                return "没有检索到类似的历史案例。这不代表有问题 —— 按政策和当前订单事实正常回答即可。"
+
+            # 问题类型 code → 人话标签（叙事里给模型看的是标签，不是 QUALITY_ISSUE 这种码）
+            labels = {t["code"]: t["label"] for t in load_issue_types()}
+            text = format_narrative(rows, issue_labels=labels)
+
+            # 记一次访问：Phase 3 的遗忘治理靠"从没被命中过 + 重要度低 + 长期未访问"三条件，
+            # access_count 是其中一条判据。写入是显式的，不在检索函数里顺手做。
+            try:
+                from core.memory_recall import mark_accessed
+                mark_accessed([r["id"] for r in rows if r.get("id")])
+            except Exception as e:
+                logger.warning(f"[记忆检索] 记访问计数失败（不影响本次回答）: {e}")
+
+            logger.info(f"[记忆检索] 命中 {len(rows)} 条相似案例: {query[:30]}")
+            return text
+
+        except Exception as e:
+            logger.error(f"记忆检索失败: {e}")
+            return f"记忆检索失败: {str(e)}（不影响回答，继续按政策处理即可）"
 
     # ==================== 售后办理工具实现（阶段 3 新增）====================
 

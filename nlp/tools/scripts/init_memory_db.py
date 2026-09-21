@@ -93,6 +93,13 @@ CREATE TABLE memory_events (
     conclusion    TEXT NOT NULL,         -- 处理结论（一句话）
     summary       TEXT NOT NULL,         -- 事件总结（两三句）
 
+    -- ---- 检索用：「生成可检索问题」----
+    -- 存 JSON 数组。为什么需要它：用户的问法和记忆的叙述写法天然不一样
+    -- （用户说"耳机坏了想退"，记忆写的是"已拆封3C数码不支持无理由、走质量问题通道"），
+    -- 直接拿叙述去做向量检索召回率低。反生成一批"这条记忆该被什么问题召回"，
+    -- 一起索引进去，能把两种说法之间的语义距离拉近。
+    retrieval_questions TEXT,
+
     -- ---- 治理用（Phase 3 的相似合并 / 遗忘判据）----
     importance       REAL NOT NULL DEFAULT 0.5,   -- 重要度 0~1，初值由规则算，不调 LLM
     access_count     INTEGER NOT NULL DEFAULT 0,  -- 被检索命中过几次
