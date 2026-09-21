@@ -842,7 +842,7 @@ Agent 答复里出现了可解释的依据：「该商品属于「3C数码产品
 > 改造全程踩过的坑，按**类型**归类（不是按时间）—— 这样能看出"该防哪几类"。
 > 详细分析在 [idea.md](idea.md) 对应章节，这里保证**读 study.md 一份就能看全**。
 
-**合计 36 项。** 最值得注意的分布：**LLM 行为类 10 项**（占三分之一），
+**合计 37 项。** 最值得注意的分布：**LLM 行为类 10 项**（占三分之一），
 而且这一类**没有一个能靠"写好提示词"解决**。
 
 ### 9.1 🤖 LLM 行为类（10 项）
@@ -899,7 +899,7 @@ Agent 答复里出现了可解释的依据：「该商品属于「3C数码产品
 > #19/#20 是同一类：**"没看到" ≠ "没发生"**。
 > #21 是另一类：**测试代码也需要被怀疑** —— 它红了不代表被测对象坏了。
 
-### 9.4 📐 设计缺陷类（9 项）
+### 9.4 📐 设计缺陷类（10 项）
 
 | # | 阶段 | 问题 | 说明 |
 |---|---|---|---|
@@ -910,8 +910,9 @@ Agent 答复里出现了可解释的依据：「该商品属于「3C数码产品
 | 26 | 8 | `route_simple` / `_create_simple_plan` 里的**过期 agent id** | 前者是死代码该删，后者在回退路径上该修 —— **同样是过期 id，处理方式不同** |
 | 32 | 阅读 | **指代消解被放在了"最不需要它的那一步"** | 它写在 `make_agent_node` 的 `node_fn` 里（每个 Agent 一份）。但 `complexity_classifier` / `router` / `planner` **全在它之前、全用未消解的 query** —— 而这三步恰恰最需要消解。DAG 路径下更糟：跑 N 次、消解的是 planner 写的**任务描述**（本就自包含）、结果**不写回 state**、还把任务描述当"用户消息"塞进记忆。**simple 路径下它是正确且必需的**（test_13 靠它过），所以测试全绿也看不出来 |
 | 33 | 阅读 | **`context` 这个隐式契约里 4 个键对不上** | 只有写没有读：`dependencies`、`original_query`（后者还在契约 docstring 里专门解释过）。只有读没有写：`user_id`（5 个 Agent 在读，节点从未设置 → 恒为 `"anonymous"`）。键名不匹配：`chat_agent` 读 `conversation_history`，节点注入的是 `history` → **恒拿空历史**。见下方 §9.4.1 |
-| 34 | 阅读 → ✅**已修** | ★★ **`dependencies` / `parameter_mapping` 声明了"上游结果传给下游"，但没有任何环节真正传递** | 节点构造了 `context["dependencies"]`，但**全项目 0 个 Agent 读它**；三个 Agent 的提示词构造函数**收了 `context` 却不用**（`database_agent` 连参数都没有）；派发时 `Send` 的 `query` 只是 planner **事先**写好的描述，不含上游结果。唯一读取方是 `critic.py`，而 **critic 从未进图**（`enable_critic=False`）。结果：`depends_on` 只实现了"执行顺序"，`parameter_mapping` 声明的那套数据交接**从未接线**。**详见 §9.4.2**<br>**修法（2026-09-21）：** 派发任务时把上游结果拼进 `query`（下游 Agent 唯一必然读到的入口），并给 `agent_results` 补 `task_id` 以便按任务取结果（agent 名在同一 Agent 跑两次时分不清）。`fan_out` 那处是 no-op（root 任务无依赖），但两处共用同一个拼装函数。<br>**仍未解决的：** `parameter_mapping` 的**字段级**取值 —— 上游 `result` 是自由文本，没有"字段"可提；要真做得先让 Agent 返回结构化数据 |
+| 34 | 阅读 → ✅**已修** | ★★ **`dependencies` / `parameter_mapping` 声明了"上游结果传给下游"，但没有任何环节真正传递** | 节点构造了 `context["dependencies"]`，但**全项目 0 个 Agent 读它**；三个 Agent 的提示词构造函数**收了 `context` 却不用**（`database_agent` 连参数都没有）；派发时 `Send` 的 `query` 只是 planner **事先**写好的描述，不含上游结果。唯一读取方是 `critic.py`，而 **critic 从未进图**（`enable_critic=False`）。结果：`depends_on` 只实现了"执行顺序"，`parameter_mapping` 声明的那套数据交接**从未接线**。**详见 §9.4.2**<br>**修法（2026-09-21）：** 派发任务时把上游结果拼进 `query`（下游 Agent 唯一必然读到的入口），并给 `agent_results` 补 `task_id` 以便按任务取结果（agent 名在同一 Agent 跑两次时分不清）。`fan_out` 那处是 no-op（root 任务无依赖），但两处共用同一个拼装函数。<br>**仍未解决的：** `parameter_mapping` 的**字段级**取值 —— 见 **#37**：那条路不是"没接线"，而是**整段被守卫挡死、从不执行** |
 | 36 | 阅读 | **架构不支持"带着中间结果回到同一个 Agent"** | 「共享状态 + 单向无环 DAG」的固有代价：`wave_scheduler` 只发 `depends_on ⊆ completed` 的任务，而已完成集合只增不减 → **没有单任务回退能力**（参数级有 `upstream_retry`、全局级有质量重试环，**中间这一层缺**）；Agent 之间不互调（契约只有 `handle`），所以"A 检索 → 需要 B 的数据 → 回到 A 回答"这种形态**拆得出来、跑得起来，但语义是错的**（A 的第二次执行看不到 B 的产出）。这是**设计边界**而非缺陷 —— 换来的是"必然终止、不会静默卡死"。同类见 §7.2 |
+| 37 | 阅读 | ★ **参数校验 + 上游重试这一整条链路，在当前实现下从不执行** | `parameter_validator_node` 有一道守卫：**「Agent 返回纯文本（非 dict）→ 跳过字段校验」**（[clarification.py:154](langgraph_orchestrator/clarification.py#L154)）。而契约规定 `handle() -> str`，**AST 实测 5 个 Agent 的 `handle` 没有任何一个 return dict**（全是字符串/调用/拼接）→ **守卫永远触发** → `_validate_with_aligner` 与降级用的 `_validate_simple` **都到不了**，`upstream_retry` / `should_retry_validation` / `parameter_retry_count` 全是死机器。<br>**连带影响 #31**：`validation_target` 那个无人写入的字段，正因为**根本没走到那条路**才一直没人发现。两条是一条因果链 |
 
 #### 9.4.1 为什么这类问题专挑 `context` 出现（#33 的根因）
 
@@ -956,8 +957,9 @@ grep -rn '"键名"' --include=*.py agents/ core/ langgraph_orchestrator/
 > 新增回归用例 `test_06c`（第一段纯逻辑，不调 LLM）：root 任务原样返回 / 上游结果注入 /
 > 取最新轮次 / 按声明顺序 / 截断 / 依赖缺失容错。
 >
-> **仍未解决：** `parameter_mapping` 的**字段级**取值 —— 上游 `result` 是自由文本字符串，
-> 没有"字段"可提取。本次交接的是**上游结果原文**（带 1500 字截断）。
+> **仍未解决：** `parameter_mapping` 的**字段级**语义 —— 本次交接的是**上游结果原文**
+> （带 1500 字截断），不是"命名字段"。追这条时又发现了 **#37**：那条字段级校验链路
+> **整段被守卫挡死、从不执行**，所以它不是"差一步"，而是"压根没走过"。
 
 
 **它是最齐全的那种"看起来在工作"—— 所有该有的痕迹都有：**
