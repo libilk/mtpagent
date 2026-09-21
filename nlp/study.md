@@ -606,8 +606,31 @@ Agent 答复里出现了可解释的依据：「该商品属于「3C数码产品
 | 情绪历史、投诉原文 | 同 §7.1，与记忆对象无关 |
 | 用记忆做**对用户不利的自动决策** | 同 §7.1 |
 
-> **状态：决定已记，尚未实施。** 与已有知识图谱**同域**（都是商品/政策），所以抽取链、
-> 类别层级、混合检索都能直接复用 —— 新增代码量比看起来小很多。
+> **状态：Phase 1 已完成（2026-09-21）。** 与已有知识图谱**同域**（都是商品/政策），
+> 所以抽取链、类别层级、混合检索都能直接复用 —— 新增代码量比看起来小很多。
+
+#### 实施进度（分三阶段，每阶段独立可验证）
+
+**Phase 1 · 记忆库 + 离线沉淀管线　✅ 已完成（2026-09-21）**
+
+| 新增 | 作用 |
+|---|---|
+| [tools/scripts/init_memory_db.py](tools/scripts/init_memory_db.py) | 建 `database/memory.db`：`memory_events` / `issue_types` / `memory_links` + 视图 `v_memory`；灌 11 个问题类型 |
+| [tools/scripts/extract_memory_events.py](tools/scripts/extract_memory_events.py) | 读 `qa_logs` → LLM 总结 → **7 条纯代码规则** → 写 `status='proposed'` |
+| [tools/scripts/review_memory_events.py](tools/scripts/review_memory_events.py) | `--list`（**连同原始问答一起显示**，供对照）/ `--apply <决策.json>` |
+| [core/memory_recall.py](core/memory_recall.py) | 查询层：只读 `v_memory`，按类别过滤（= 多域隔离） |
+
+**两个关键取舍：**
+
+1. **原料用现成的 `qa_logs` 表，不在 `enhanced_entry.py` 加实时钩子** ——
+   LLM 总结的开销**不落在用户等待里**（请求路径一行不改）。代价是记忆有延迟，这是刻意的。
+2. **加了第 6 条规则：引文不得含身份标识** —— 这是实测逼出来的。
+   `qa_logs` 里真的存在「我是张伟 U10001，订单…」这种原话，而规则 3 要求引文忠实于原文，
+   **忠实反而会把身份信息带进记忆域**。提示词里已写"不要记录个人信息"，
+   但**提示词是软约束、模型可以不听**（本项目反复踩过的坑），所以代码再拦一道。
+
+**Phase 2 · 检索与注入**（未开始）· **Phase 3 · 治理（相似合并 / 遗忘）**（未开始）
+—— 方案见计划文件；Phase 2 会在 `recall_by_category` 之上叠加向量检索 + RRF 融合。
 
 ### 7.2 已知局限：申请原因不受政策校验
 

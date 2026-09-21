@@ -98,3 +98,7 @@ database/ecommerce.db
 # + review_graph_relations.py 三步重建（注意：抽取是 LLM 做的，
 # 重建后需要重新人工核对，graph_review_decisions.json 不能直接复用）
 database/knowledge_graph.db
+# 长期记忆库：跑 init_memory_db.py + extract_memory_events.py
+# + review_memory_events.py 三步重建（同样地，抽取是 LLM 做的，
+# 重建后需要重新人工核对，核对决策文件不能直接复用）
+database/memory.db

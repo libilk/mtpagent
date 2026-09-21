@@ -445,6 +445,132 @@ class AfterSalesTester:
 
         return "上游结果注入 + 取最新轮次 + 截断 + 容错 全部正确"
 
+    def test_06d_memory_rules(self):
+        """★ 长期记忆：候选记忆的规则校验 + 查询层的多域隔离。
+
+        守的是 study.md §7.1.1 那套设计 —— 记忆的对象是**商品/政策**，不是用户。
+        规则校验全部是纯代码（模型不能当自己的裁判），本用例逐条断言每道规则
+        **真的拦得住**，尤其是两条最关键的：
+
+        - **引文必须是原文精确子串**：模型编造原文的唯一防线（知识图谱那套的同款）
+        - **引文不得含身份标识**：§7.1 红线（不长期留存投诉原文）的硬约束版本 ——
+          提示词里写了"不要记录个人信息"，但提示词是软约束，所以再用代码拦一道
+
+        查询层用**临时库**测，不碰真库（多域隔离 = 按类别过滤）。
+        """
+        import importlib.util
+        import os
+        import sqlite3
+        import tempfile
+
+        # tools/scripts 不是 Python 包，按文件路径加载（与 incremental_update.py 同一手法）
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        spec = importlib.util.spec_from_file_location(
+            "eme", os.path.join(base, "tools", "scripts", "extract_memory_events.py"))
+        eme = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(eme)
+
+        codes = {"QUALITY_ISSUE", "SHIPPING_FEE"}
+        cats = {"无线耳机", "3C数码产品", "全部商品"}
+        qa_row = {
+            "query": "我是张伟 U10001，订单 SO20260909001 的耳机坏了，我想退货",
+            "answer": "耳机属于质量问题通道，签收 15 日内可退，运费平台承担。",
+        }
+        good = {
+            "category_name": "无线耳机",
+            "issue_type": "QUALITY_ISSUE",
+            "conclusion": "质量问题可退，运费平台承担",
+            "summary": "用户耳机故障申请退货。",
+            "source_quote": "耳机属于质量问题通道，签收 15 日内可退，运费平台承担。",
+        }
+
+        # ---- 规则 1：必填字段齐 ----
+        for f in ("category_name", "issue_type", "conclusion", "summary", "source_quote"):
+            ok, why = eme.rule_check(dict(good, **{f: ""}), qa_row, codes, cats)
+            assert not ok and "必填字段" in why, f"规则1 漏了字段 {f}: {ok} {why}"
+
+        # ---- 规则 2：问题类型必须来自封闭词表 ----
+        ok, why = eme.rule_check(dict(good, issue_type="INVENTED_TYPE"), qa_row, codes, cats)
+        assert not ok and "问题类型" in why, f"规则2 没拦住自造类型: {ok} {why}"
+
+        # ---- 规则 3：引文必须是原文精确子串（防编造原文）----
+        ok, why = eme.rule_check(
+            dict(good, source_quote="这句话原文里根本没有"), qa_row, codes, cats)
+        assert not ok and "精确子串" in why, f"规则3 没拦住编造引文: {ok} {why}"
+
+        # ---- 规则 4：类别必须是知识图谱里真实存在的 ----
+        ok, why = eme.rule_check(dict(good, category_name="不存在的类别"), qa_row, codes, cats)
+        assert not ok and "知识图谱" in why, f"规则4 没拦住幻觉类别: {ok} {why}"
+
+        # ---- 规则 5：引文长度上限（不长期留存投诉原文）----
+        long_quote = qa_row["answer"][:0] + "退" * (eme.SOURCE_QUOTE_MAX + 1)
+        long_row = {"query": qa_row["query"], "answer": long_quote}
+        ok, why = eme.rule_check(dict(good, source_quote=long_quote), long_row, codes, cats)
+        assert not ok and "超长" in why, f"规则5 没拦住超长引文: {ok} {why}"
+
+        # ---- 规则 6：引文不得带身份标识（提示词的硬约束版本）----
+        # 这一条是实测逼出来的：qa_logs 里真的存在「我是张伟 U10001，订单…」这种原话，
+        # 而规则 3 要求引文忠实于原文 —— 忠实反而会把身份信息带进记忆域
+        ok, why = eme.rule_check(
+            dict(good, source_quote="我是张伟 U10001"), qa_row, codes, cats)
+        assert not ok and "用户ID" in why, f"规则6 没拦住引文里的用户ID: {ok} {why}"
+
+        pii_row = {"query": "联系电话 13812345678 打不通", "answer": "已记录"}
+        ok, why = eme.rule_check(
+            dict(good, source_quote="联系电话 13812345678"), pii_row, codes, cats)
+        assert not ok and "手机号" in why, f"规则6 没拦住引文里的手机号: {ok} {why}"
+
+        # 订单号是业务数据、不是身份标识 —— 必须放行，否则记忆就废了
+        ok, why = eme.rule_check(good, qa_row, codes, cats)
+        assert ok, f"正常样本被误杀: {why}"
+
+        # ---- 模型输出的 JSON 容错（带围栏 / 带杂字 / 垃圾）----
+        assert eme.parse_memory('```json\n{"a": 1}\n```') == {"a": 1}, "没剥掉代码块围栏"
+        assert eme.parse_memory('好的 {"a": 2} 以上') == {"a": 2}, "没抠出夹杂的 JSON"
+        assert eme.parse_memory('模型什么都没说') == {}, "垃圾输入没返回空"
+
+        # ---- 查询层：多域隔离（按类别过滤），用临时库，不碰真库 ----
+        from core.memory_recall import recall_by_category, format_memories
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_db = os.path.join(tmp, "memory.db")
+            conn = sqlite3.connect(tmp_db)
+            # 直接用 init_memory_db 的建表语句，保证测的就是真结构
+            ispec = importlib.util.spec_from_file_location(
+                "imd", os.path.join(base, "tools", "scripts", "init_memory_db.py"))
+            imd = importlib.util.module_from_spec(ispec)
+            ispec.loader.exec_module(imd)
+            conn.executescript(imd.SCHEMA_SQL)
+            conn.execute("INSERT INTO issue_types (code,label,patterns) VALUES ('QUALITY_ISSUE','质量问题','[]')")
+            conn.execute(
+                "INSERT INTO memory_events (category_name, issue_type, conclusion, summary, "
+                "status, importance, source_qa_log_id, source_quote) "
+                "VALUES ('无线耳机','QUALITY_ISSUE','质量问题可退','总结','verified',0.8,1,'引文')")
+            conn.execute(
+                "INSERT INTO memory_events (category_name, issue_type, conclusion, summary, "
+                "status, importance, source_qa_log_id, source_quote) "
+                "VALUES ('生鲜类商品','QUALITY_ISSUE','生鲜凭照片直退','总结','verified',0.9,2,'引文')")
+            # 未核对的候选不能被检索到 —— v_memory 视图把状态过滤固化了
+            conn.execute(
+                "INSERT INTO memory_events (category_name, issue_type, conclusion, summary, "
+                "status, importance, source_qa_log_id, source_quote) "
+                "VALUES ('无线耳机','QUALITY_ISSUE','不该被检索到','候选','proposed',1.0,3,'引文')")
+            conn.commit()
+            conn.close()
+
+            got = recall_by_category("无线耳机", db_path=tmp_db)
+            assert len(got) == 1, f"类别过滤失效（应只命中 1 条 verified）: {len(got)}"
+            assert got[0]["conclusion"] == "质量问题可退", f"取错了记忆: {got[0]}"
+            assert "生鲜" not in format_memories(got), "跨域串了：问耳机捞到了生鲜的记忆"
+            # 血缘字段不该进给模型看的上下文
+            assert "source_quote" not in got[0] and "source_qa_log_id" not in got[0], \
+                "血缘字段泄漏进检索结果（不该反复把用户原话带进 prompt）"
+
+            assert recall_by_category("没有记忆的类别", db_path=tmp_db) == [], "空类别没返回空"
+            assert recall_by_category("", db_path=tmp_db) == [], "空类别名没拒绝"
+
+        return "7 条规则 + JSON 容错 + 类别隔离 + 血缘不外泄 全部正确"
+
     # ==================================================================
     # 第二段：端到端（调 LLM）
     # ==================================================================
@@ -716,6 +842,7 @@ class AfterSalesTester:
             ("06 知识图谱（政策推导）",        self.test_06_knowledge_graph),
             ("06b 知识库白名单",              self.test_06b_knowledge_whitelist),
             ("06c 上游结果交接",              self.test_06c_upstream_handoff),
+            ("06d 长期记忆规则与隔离",         self.test_06d_memory_rules),
         ]
         slow = [
             ("07 系统初始化",                 self.test_07_system_init),
