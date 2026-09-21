@@ -640,6 +640,85 @@ class AfterSalesTester:
 
         return "三段式叙事 + 边界声明 + 索引文本 + 两道守卫 全部正确"
 
+    def test_06f_memory_governance(self):
+        """★ 长期记忆：治理的两条纯规则 —— 重要度计算 + 遗忘判定。
+
+        遗忘的判据是**三个条件缺一不可**（重要度低 **且** 从未被检索 **且** 未访问超 N 天）。
+        本用例逐个把条件拆开、少一个就断言"不该忘" —— 因为**每一条都能单独造成误杀**：
+
+        - 只看重要度 → 暂时没被问到的高价值记忆会被丢
+        - 只看访问次数 → 刚入库还没被检索过的正常记忆会被误杀
+        - 只看时间 → 被反复用过的重要记忆，不该因为"最近没人问"就丢
+        """
+        import importlib.util
+        import os
+        from datetime import datetime, timedelta
+
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        spec = importlib.util.spec_from_file_location(
+            "gov", os.path.join(base, "tools", "scripts", "govern_memory.py"))
+        gov = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gov)
+
+        now = datetime(2026, 9, 21, 12, 0, 0)
+        old = (now - timedelta(days=100)).strftime("%Y-%m-%d %H:%M:%S")
+        recent = (now - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+
+        # ---------- 重要度：纯规则，不调 LLM ----------
+        # 真办了事 + 答得好 + 有具体类别 → 顶格
+        top = gov.compute_importance(
+            {"quality_score": 1.0, "answer": "已为您创建工单 TK20260921001"},
+            {"category_name": "无线耳机"})
+        assert top == 1.0, f"顶格算错: {top}"
+
+        # 没有来源（人工补充）+ 根类别 → 只有 base
+        base_only = gov.compute_importance(None, {"category_name": "全部商品"})
+        assert base_only == gov.IMP_BASE, f"base 算错: {base_only}"
+
+        # 有单据号比没单据号高（"真办了事"是复用价值最高的信号）
+        with_doc = gov.compute_importance({"quality_score": 0.6, "answer": "工单 RF20260921001"},
+                                          {"category_name": "全部商品"})
+        without_doc = gov.compute_importance({"quality_score": 0.6, "answer": "建议您联系客服"},
+                                             {"category_name": "全部商品"})
+        assert with_doc > without_doc, "单据号没有加分"
+
+        # 质量分越界要被夹住（不能算出 >1 或 <0）
+        assert gov.compute_importance({"quality_score": 99, "answer": ""},
+                                      {"category_name": "全部商品"}) <= 1.0, "质量分没夹上限"
+        assert gov.compute_importance({"quality_score": -5, "answer": ""},
+                                      {"category_name": "全部商品"}) >= gov.IMP_BASE, "质量分没夹下限"
+
+        # ---------- 遗忘：三个条件缺一不可 ----------
+        # ① 三条全满足 → 该忘
+        ok, why = gov.should_forget(0.2, 0, old, now)
+        assert ok, f"三条件全满足却没判该忘: {why}"
+
+        # ② 少"重要度低"：重要度高 → 不忘
+        ok, why = gov.should_forget(0.9, 0, old, now)
+        assert not ok and "重要度" in why, f"高重要度被误忘: {why}"
+
+        # ③ 少"从未被检索"：被命中过 → 不忘
+        ok, why = gov.should_forget(0.2, 3, old, now)
+        assert not ok and "命中" in why, f"被用过的被误忘: {why}"
+
+        # ④ 少"未访问超期"：最近访问过 → 不忘
+        ok, why = gov.should_forget(0.2, 0, recent, now)
+        assert not ok and "遗忘窗口" in why, f"还在窗口内的被误忘: {why}"
+
+        # ⑤ 从未访问过（NULL）+ 重要度低 → 该忘，且理由要说清是"从未命中"
+        ok, why = gov.should_forget(0.2, 0, None, now)
+        assert ok and "从未" in why, f"从未访问的低价值记忆没被清: {why}"
+
+        # ⑥ 时间格式坏了 → 宁可留着（不确定时不做不可逆操作）
+        ok, why = gov.should_forget(0.2, 0, "不是时间", now)
+        assert not ok and "宁可留着" in why, f"时间解析失败时不该丢: {why}"
+
+        # ⑦ 边界：刚好等于阈值算"有价值"（用 >= 的口径，边界上倾向留）
+        ok, why = gov.should_forget(gov.FORGET_IMPORTANCE_MAX, 0, old, now)
+        assert not ok, f"重要度刚好等于阈值就该留: {why}"
+
+        return "重要度纯规则 + 遗忘三条件边界（含时间/未访问/阈值）全部正确"
+
     # ==================================================================
     # 第二段：端到端（调 LLM）
     # ==================================================================
@@ -913,6 +992,7 @@ class AfterSalesTester:
             ("06c 上游结果交接",              self.test_06c_upstream_handoff),
             ("06d 长期记忆规则与隔离",         self.test_06d_memory_rules),
             ("06e 长期记忆叙事化注入",         self.test_06e_memory_narrative),
+            ("06f 长期记忆治理规则",           self.test_06f_memory_governance),
         ]
         slow = [
             ("07 系统初始化",                 self.test_07_system_init),
