@@ -29,6 +29,7 @@
         test_05  防幻觉兜底逻辑
         test_06  知识图谱政策推导（三值逻辑 + 同族覆盖 + 确定性）
         test_06b 知识库白名单
+        test_06c 上游任务结果交接（依赖真的把数据送到下游了）
 
     第二段（调 LLM，较慢，每个用例数秒到数十秒）—— 端到端（E2E：从入口到出口完整跑一遍）
         test_07  系统初始化
@@ -383,6 +384,67 @@ class AfterSalesTester:
 
         return f"{len(files)} 篇售后政策"
 
+    def test_06c_upstream_handoff(self):
+        """★ 上游任务的结果真的被送进下游任务的 query。
+
+        守的是台账 #34：planner 声明了 depends_on / parameter_mapping，但**数据交接
+        从未接线** —— 节点构造的 context["dependencies"] 全项目没有 Agent 读它，
+        派发时的 query 也只是 planner 事先写好的描述。结果 depends_on 只实现了
+        "执行顺序"，下游拿不到上游的产出（"A 检索 → 需要 B 的数据 → 回到 A 回答"
+        这种形态拆得出来、跑得起来、语义是错的）。
+
+        修法是在派发任务时把上游结果拼进 query（下游 Agent 唯一必然读到的入口）。
+        本用例全部是确定性断言，不调 LLM。
+        """
+        from langgraph_orchestrator.router import _augment_query_with_upstream as aug
+
+        # ---- ① 无依赖的 root 任务：query 必须原样返回 ----
+        # fan_out 发出的都是 root 任务，这条保证"改动不影响原有行为"
+        root = {"task_id": "task_1", "description": "查询订单详情", "depends_on": []}
+        assert aug(root, {}) == "查询订单详情", "root 任务的 query 被改动了"
+
+        # 构造一份模拟 state：task_1 有两轮结果，应取 iteration 最大的那条
+        state = {
+            "agent_results": [
+                {"agent": "database_agent", "task_id": "task_1",
+                 "result": "【作废】上一轮的旧数据", "iteration": 0},
+                {"agent": "knowledge_agent", "task_id": "task_2",
+                 "result": "质量问题退货 15 日内，运费平台承担", "iteration": 0},
+                {"agent": "database_agent", "task_id": "task_1",
+                 "result": "订单 SO20260909001 已签收", "iteration": 1},
+            ]
+        }
+        downstream = {"task_id": "task_3", "description": "办理退货",
+                      "depends_on": ["task_1", "task_2"]}
+
+        # ---- ② 核心：上游结果出现在下游 query 里 ----
+        q = aug(downstream, state)
+        assert "办理退货" in q, "原任务描述丢了"
+        assert "订单 SO20260909001 已签收" in q, f"上游 task_1 的结果没送进去: {q}"
+        assert "质量问题退货 15 日内" in q, f"上游 task_2 的结果没送进去: {q}"
+
+        # ---- ③ 取最新轮次：作废的旧结果绝不能注给下游 ----
+        # agent_results 是累加字段（挂了 operator.add），重试会产生同一 task_id 的多轮结果
+        assert "【作废】上一轮的旧数据" not in q, \
+            "注入了旧轮次的结果（下游会基于已作废的产出作答）"
+
+        # ---- ④ 顺序按 depends_on 声明，且可复现 ----
+        assert q.index("task_1") < q.index("task_2"), "没按 depends_on 声明顺序输出"
+        assert aug(downstream, state) == q, "同样的输入产出了不同的文本（不可复现）"
+
+        # ---- ⑤ 截断：单个上游结果不能无限长，避免把 query 撑爆 ----
+        huge = {"agent_results": [{"agent": "a", "task_id": "t1",
+                                   "result": "x" * 5000, "iteration": 0}]}
+        q_big = aug({"task_id": "t2", "description": "d", "depends_on": ["t1"]}, huge)
+        assert "x" * 1500 in q_big, "截断过狠，1500 字以内的结果被砍了"
+        assert "x" * 1501 not in q_big, "没有截断，超长上游结果会撑爆 query"
+
+        # ---- ⑥ 容错：依赖指向不存在的 task_id → 不炸，退回原描述 ----
+        missing = {"task_id": "t9", "description": "办理退货", "depends_on": ["task_999"]}
+        assert aug(missing, state) == "办理退货", "依赖缺失时没有安全退回"
+
+        return "上游结果注入 + 取最新轮次 + 截断 + 容错 全部正确"
+
     # ==================================================================
     # 第二段：端到端（调 LLM）
     # ==================================================================
@@ -653,6 +715,7 @@ class AfterSalesTester:
             ("05 防幻觉兜底",                 self.test_05_anti_hallucination_guard),
             ("06 知识图谱（政策推导）",        self.test_06_knowledge_graph),
             ("06b 知识库白名单",              self.test_06b_knowledge_whitelist),
+            ("06c 上游结果交接",              self.test_06c_upstream_handoff),
         ]
         slow = [
             ("07 系统初始化",                 self.test_07_system_init),

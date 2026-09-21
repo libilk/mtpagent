@@ -224,6 +224,13 @@ def make_agent_node(agent_instance: Any, agent_name: str, shared_memory=None, me
             "agent_results": [
                 {
                     "agent": agent_name,
+                    # task_id：这条结果属于 planner 拆出的哪个任务。
+                    # 为什么必须有它：depends_on 用的是 task_id，而 agent 名在
+                    # "同一个 Agent 出现两次"（如 knowledge → database → knowledge）时分不清
+                    # 是哪个任务 —— 下游想按依赖取结果就没有可靠的键。
+                    # 拿不到 current_task_id（非 DAG 路径）时退化成 agent 名，与
+                    # completed_task_ids 的兜底保持一致。
+                    "task_id": state.get("current_task_id") or agent_name,
                     "result": result,
                     "iteration": iteration,
                 }

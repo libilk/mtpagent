@@ -29,7 +29,7 @@ LangGraph 路由逻辑
 from __future__ import annotations
 
 import logging
-from typing import List, Union
+from typing import Any, Dict, List, Union
 
 from langgraph.types import Send  # 扇出并行分支用；它是什么见上面模块 docstring 第 2 点
 
@@ -72,6 +72,74 @@ def route_to_agent(state: GraphState) -> str:
     # 回退到 knowledge_agent；它必须出现在 agent_ids 里，否则映射表查不到这个键
     logger.warning("[LangGraph] 未选择 Agent，默认 knowledge_agent")
     return "knowledge_agent"
+
+
+# 单个上游结果注入 query 时的截断上限。
+# query 只是"这个任务要干什么"的说明，不该被上游产出挤满 ——
+# 上限取 1500（比 Agent 内部工具结果的 4000 更小），留给 prompt 和检索结果足够空间。
+_MAX_UPSTREAM_CHARS = 1500
+
+
+def _augment_query_with_upstream(task: Dict[str, Any], state: GraphState) -> str:
+    """把 task.depends_on 指向的上游任务结果，拼进这个任务的 query。
+
+    为什么必须做：planner 声明了 depends_on / parameter_mapping，但下游 Agent 只能从
+    query 读到"要干什么" —— 上游产出此前从未送达（见 study.md 台账 #34）。
+    结果就是 depends_on 只实现了"执行顺序"，下游拿不到上游的数据。
+
+    为什么拼进 query 而不是塞进 context 的 dependencies：query 是每个 Agent 必然读到的
+    唯一入口（messages 里的 user 消息），改这一处即可，所有 Agent 都受益；而
+    context["dependencies"] 目前全项目没有 Agent 读它。这也与 clarification.py 的
+    upstream_retry 保持同一种"改写 query"的做法。
+
+    格式沿用 clarification.py 里构建增强描述时的约定：
+    原始描述 + 空行 + 【标题】+ 全角冒号。
+
+    Returns:
+        拼好的 query。没有上游依赖（或一个都没取到）时原样返回 description。
+    """
+    description = task.get("description", "")
+    depends_on = task.get("depends_on", [])
+
+    # 无依赖 = root 任务，原样返回（fan_out 发的都是这种，行为零变化）
+    if not depends_on:
+        return description
+
+    agent_results = state.get("agent_results", [])
+
+    # agent_results 是累加字段（挂了 operator.add）：重试会产生"同一 task_id 的多轮结果"，
+    # 取旧的会把已作废的产出注给下游。所以每个 task_id 只保留 iteration 最大的那条 ——
+    # 与 aggregator_node 取最新一轮的口径一致。
+    latest: Dict[str, Dict[str, Any]] = {}
+    for r in agent_results:
+        tid = r.get("task_id")
+        if not tid or tid not in depends_on:
+            continue
+        if tid not in latest or r.get("iteration", 0) >= latest[tid].get("iteration", 0):
+            latest[tid] = r
+
+    if not latest:
+        # 上游结果还没到（或 task_id 对不上）—— 不炸，退回原描述
+        logger.warning(
+            "[LangGraph] 任务 %s 声明依赖 %s，但没找到对应的上游结果，query 不做增强",
+            task.get("task_id"), depends_on,
+        )
+        return description
+
+    parts = [
+        description,
+        "",
+        "【上游任务的结果（由前置任务产出，请直接使用，不要重复查询）】",
+    ]
+    # 按 depends_on 的声明顺序输出，保证同样输入产出同样文本（可复现）
+    for tid in depends_on:
+        r = latest.get(tid)
+        if not r:
+            continue
+        text = str(r.get("result", ""))[:_MAX_UPSTREAM_CHARS]
+        parts.append(f"- {tid}（{r.get('agent', '?')}）：{text}")
+
+    return "\n".join(parts)
 
 
 def make_fan_out_dag_tasks(agent_ids: List[str]):
@@ -120,10 +188,17 @@ def make_fan_out_dag_tasks(agent_ids: List[str]):
 
             # 每个 Send 拿一份 state 副本，并把 query 换成该任务的描述、记下 current_task_id：
             # Agent 节点完成后靠 current_task_id 才知道"完成的是哪个 task"（波次调度据此算依赖）
+            # （这里发的是 root 任务，depends_on 必为空，所以 query 不会被上游结果增强）
             sends.append(
                 Send(
                     agent_id,
-                    {**state, "query": task["description"], "current_task_id": task_id},
+                    {
+                        **state,
+                        # query 里带上上游任务的产出：下游 Agent 读的就是 query，
+                        # 这是"依赖"能真把数据送到的通道（见 _augment_query_with_upstream）
+                        "query": _augment_query_with_upstream(task, state),
+                        "current_task_id": task_id,
+                    },
                 )
             )
 
@@ -196,11 +271,20 @@ def make_wave_scheduler(agent_ids: List[str]):
                 )
                 continue
 
+            # ★ 这里是"依赖能传数据"真正生效的地方：这一波发出去的都是依赖已满足的任务，
+            # 所以把上游结果拼进 query，下游 Agent 才拿得到（fan_out 那处有依赖的任务全被跳过，
+            # 但两处共用同一个拼装函数，避免以后只改一处）
             # 与 fan_out 同样：查不到就跳过；若一个都没剩，下面会返回 "done" 而不是空列表
             sends.append(
                 Send(
                     agent_id,
-                    {**state, "query": task["description"], "current_task_id": task_id},
+                    {
+                        **state,
+                        # query 里带上上游任务的产出：下游 Agent 读的就是 query，
+                        # 这是"依赖"能真把数据送到的通道（见 _augment_query_with_upstream）
+                        "query": _augment_query_with_upstream(task, state),
+                        "current_task_id": task_id,
+                    },
                 )
             )
 

@@ -910,7 +910,7 @@ Agent 答复里出现了可解释的依据：「该商品属于「3C数码产品
 | 26 | 8 | `route_simple` / `_create_simple_plan` 里的**过期 agent id** | 前者是死代码该删，后者在回退路径上该修 —— **同样是过期 id，处理方式不同** |
 | 32 | 阅读 | **指代消解被放在了"最不需要它的那一步"** | 它写在 `make_agent_node` 的 `node_fn` 里（每个 Agent 一份）。但 `complexity_classifier` / `router` / `planner` **全在它之前、全用未消解的 query** —— 而这三步恰恰最需要消解。DAG 路径下更糟：跑 N 次、消解的是 planner 写的**任务描述**（本就自包含）、结果**不写回 state**、还把任务描述当"用户消息"塞进记忆。**simple 路径下它是正确且必需的**（test_13 靠它过），所以测试全绿也看不出来 |
 | 33 | 阅读 | **`context` 这个隐式契约里 4 个键对不上** | 只有写没有读：`dependencies`、`original_query`（后者还在契约 docstring 里专门解释过）。只有读没有写：`user_id`（5 个 Agent 在读，节点从未设置 → 恒为 `"anonymous"`）。键名不匹配：`chat_agent` 读 `conversation_history`，节点注入的是 `history` → **恒拿空历史**。见下方 §9.4.1 |
-| 34 | 阅读 | ★★ **`dependencies` / `parameter_mapping` 声明了"上游结果传给下游"，但没有任何环节真正传递** | 节点构造了 `context["dependencies"]`，但**全项目 0 个 Agent 读它**；三个 Agent 的提示词构造函数**收了 `context` 却不用**（`database_agent` 连参数都没有）；派发时 `Send` 的 `query` 只是 planner **事先**写好的描述，不含上游结果。唯一读取方是 `critic.py`，而 **critic 从未进图**（`enable_critic=False`）。结果：`depends_on` 只实现了"执行顺序"，`parameter_mapping` 声明的那套数据交接**从未接线**。**详见 §9.4.2** |
+| 34 | 阅读 → ✅**已修** | ★★ **`dependencies` / `parameter_mapping` 声明了"上游结果传给下游"，但没有任何环节真正传递** | 节点构造了 `context["dependencies"]`，但**全项目 0 个 Agent 读它**；三个 Agent 的提示词构造函数**收了 `context` 却不用**（`database_agent` 连参数都没有）；派发时 `Send` 的 `query` 只是 planner **事先**写好的描述，不含上游结果。唯一读取方是 `critic.py`，而 **critic 从未进图**（`enable_critic=False`）。结果：`depends_on` 只实现了"执行顺序"，`parameter_mapping` 声明的那套数据交接**从未接线**。**详见 §9.4.2**<br>**修法（2026-09-21）：** 派发任务时把上游结果拼进 `query`（下游 Agent 唯一必然读到的入口），并给 `agent_results` 补 `task_id` 以便按任务取结果（agent 名在同一 Agent 跑两次时分不清）。`fan_out` 那处是 no-op（root 任务无依赖），但两处共用同一个拼装函数。<br>**仍未解决的：** `parameter_mapping` 的**字段级**取值 —— 上游 `result` 是自由文本，没有"字段"可提；要真做得先让 Agent 返回结构化数据 |
 | 36 | 阅读 | **架构不支持"带着中间结果回到同一个 Agent"** | 「共享状态 + 单向无环 DAG」的固有代价：`wave_scheduler` 只发 `depends_on ⊆ completed` 的任务，而已完成集合只增不减 → **没有单任务回退能力**（参数级有 `upstream_retry`、全局级有质量重试环，**中间这一层缺**）；Agent 之间不互调（契约只有 `handle`），所以"A 检索 → 需要 B 的数据 → 回到 A 回答"这种形态**拆得出来、跑得起来，但语义是错的**（A 的第二次执行看不到 B 的产出）。这是**设计边界**而非缺陷 —— 换来的是"必然终止、不会静默卡死"。同类见 §7.2 |
 
 #### 9.4.1 为什么这类问题专挑 `context` 出现（#33 的根因）
@@ -943,6 +943,22 @@ grep -rn '"键名"' --include=*.py agents/ core/ langgraph_orchestrator/
 > 能拦住它的只有人去核对 —— 没有工具、没有类型系统会提醒你。
 
 #### 9.4.2 #34 为什么是这本台账里最严重的一条
+
+> **✅ 已修（2026-09-21）。** 修法：在**派发任务时**把上游结果拼进下游任务的 `query`。
+> 为什么选 query 而不是补 `context["dependencies"]` 的读取方 —— **query 是每个 Agent 必然
+> 读到的唯一入口**（`messages` 里的 user 消息），改一处所有 Agent 都受益，**零 Agent 改动**；
+> 而让 `dependencies` 生效得改 3 个 Agent 的提示词构造函数。这也与 `clarification.py` 的
+> `upstream_retry` 保持同一种"改写 query"的做法。
+>
+> 配套改动：`agent_results` 每条补 `task_id`（`depends_on` 用 task_id，而 agent 名在
+> "同一 Agent 跑两次"时分不清是哪个任务 —— 那段场景恰恰需要它）。
+>
+> 新增回归用例 `test_06c`（第一段纯逻辑，不调 LLM）：root 任务原样返回 / 上游结果注入 /
+> 取最新轮次 / 按声明顺序 / 截断 / 依赖缺失容错。
+>
+> **仍未解决：** `parameter_mapping` 的**字段级**取值 —— 上游 `result` 是自由文本字符串，
+> 没有"字段"可提取。本次交接的是**上游结果原文**（带 1500 字截断）。
+
 
 **它是最齐全的那种"看起来在工作"—— 所有该有的痕迹都有：**
 

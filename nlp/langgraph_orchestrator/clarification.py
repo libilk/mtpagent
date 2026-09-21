@@ -194,16 +194,18 @@ def _validate_with_aligner(
     aligner = ParameterAligner()
 
     # 构建已完成结果的 mock 字典（task_id → MockMsg）
-    # agent_results 是按 agent_id 存的，需要映射回 task_id
-    # 为什么非得转一道：state 只记"哪个 Agent 跑过"，而 ParameterAligner 是按
-    # task_id 查依赖结果的（一个 Agent 可能出现在多个任务里）。
+    # ParameterAligner 是按 task_id 查依赖结果的（一个 Agent 可能出现在多个任务里）。
     plan_tasks = state.get("plan", {}).get("tasks", [])
     agent_to_task = {t["agent_id"]: t["task_id"] for t in plan_tasks}
 
     dependency_results = {}
     for r in agent_results:
         agent_id = r.get("agent")
-        task_id = agent_to_task.get(agent_id)
+        # 优先用结果自带的 task_id（node_fn 写入，见 nodes.py）：
+        # 按 agent 名反查会有塌陷 —— 同一个 Agent 出现在多个任务里时，
+        # agent_to_task 只能保留其中一个 task_id，多条结果会挤到同一个键上互相覆盖。
+        # 保留 agent_to_task 兜底，是为了兼容早期产生、没有 task_id 的结果。
+        task_id = r.get("task_id") or agent_to_task.get(agent_id)
         if task_id:
             dependency_results[task_id] = _build_mock_agent_message(
                 r.get("result", {}), task_id, agent_id

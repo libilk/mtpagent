@@ -37,7 +37,7 @@ class EnhancedGraphState(TypedDict):
     plan: Optional[Dict[str, Any]]  # 规划器产出的任务列表（tasks/依赖/schema）；简单路径不跑规划器，此处为 None。读：参数验证器、critic、波次调度
     is_complex: bool  # 复杂度判断结果（由 complexity_classifier 设置）读：route_by_complexity 决定走 router 还是 planner
     selected_agent: Optional[str]  # 写：router（简单路径）、upstream_retry（重试路径）；读：Agent 节点、人工介入判断
-    agent_results: Annotated[List[Dict[str, Any]], operator.add]  # 每个 Agent 跑完追加一条 {agent, result}；读：aggregator 与下游三个校验节点（都只取 [-1] 最近一条）
+    agent_results: Annotated[List[Dict[str, Any]], operator.add]  # 每个 Agent 跑完追加一条 {agent, task_id, result, iteration}；读：aggregator 与下游三个校验节点（都只取 [-1] 最近一条）、波次调度（按 task_id 取上游产出拼进下游 query）
     final_answer: str  # 最终答案；写：aggregator（多 Agent 汇总）、evaluator（重试后覆盖）；读：入口输出、人工介入展示
     quality_score: float  # evaluator（评估器：最终质量把关）打的分，0~1；读：check_quality 决定 pass/retry、人工介入通道 4a
     iteration: int  # 迭代轮次：evaluator 每判一次不合格 +1；读：check_quality（重试上限）、人工介入
