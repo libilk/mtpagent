@@ -3617,3 +3617,102 @@ grep -rn 'context\.get("\|context\["' --include="*.py" agents/
 - 为什么这三处都不改逻辑？改成"能用"分别要付什么代价？
 - `critic_passed` 那处为什么选择保留分支而不是删掉？
 - 怎么向别人证明"我这次只改了注释、没改行为"？
+
+---
+
+## 复核 · 三处「契约与实现对不上」（2026-09-23）
+
+> 承接 §9.4.3（`context`）、§9.4.4（`state`）。同一套方法换三个对象：
+> `agent_results` 的字典结构 · `intervention_data` 的前端契约 · 工具 schema vs 函数签名。
+
+### 1. 思路：三个对象，三种"对不上"的形态
+
+| 对象 | 核对什么 | 对不上的形态 |
+|---|---|---|
+| `agent_results` | 4 个子键谁写谁读 | **类型**对不上（写 str，有人按 dict 防御） |
+| `intervention_data` | 后端写的 vs 前端读的 | **注释撒了谎**（说 options 给前端渲染，实际前端写死） |
+| 工具 schema | 声明的参数 vs 方法签名 | **参数**对不上（声明 1 个，实收 3 个） |
+
+### 2. ① 最有价值的一条：「两种写法并存」本身就是信号
+
+`agent_results["result"]` 的读方分成两派：
+
+```python
+# 派别 A：强转
+result_text = str(r.get('result', ''))
+
+# 派别 B：防御（nodes.py:450）
+answer = latest[0].get("result", "")
+if isinstance(answer, dict):          # ← 永不进入
+    answer = answer.get("result", str(answer))
+
+# 派别 C：默认值写 {}
+result_content = latest_result.get("result", {})   # ← 永不生效
+```
+
+**写方永远写 `str`**（`handle() -> str`），所以 B 和 C 都是死代码。
+
+**但真正值得记的不是"死代码"，是"为什么会有人这么写"：**
+[protocol.py:52](core/protocol.py#L52) 的 harness **只核对 `handle` 属性在不在，不核对签名和返回类型**。
+所以写读方的人**从类型上无法确定**拿到的是什么 —— 于是有人强转、有人防御。
+
+> **通用结论：同一个字段在不同地方被"不同方式对待"，说明这个字段的类型契约是模糊的。**
+> 这比"某处写错了"更值得警惕 —— 它是**系统性的不确定**，会持续产生这种分叉。
+
+### 3. ② 注释不只是"过期"，是"撒谎"
+
+`intervention_data["options"]` 的 docstring 说它"是给前端渲染按钮的"。
+真相是前端三个按钮**写死在 HTML 里**，`options` 从没被读过。
+
+**这和 §9.4.4 那两处不一样：**
+- `messages` 的注释是**过期**（曾经对，现在错）
+- `critic_passed` 的注释是**没错但失效**（读法对，值不动）
+- 这一处是**从头就没对过** —— 后端按"前端会渲染"来设计，前端压根没实现
+
+**后果是"半张契约"**：后端支持 5 个反馈值、前端只能产生 3 个。
+`override`（忽略冲突强制通过）**没有任何 UI 入口**。
+
+### 4. ③ 死链追踪法：顺着一个参数走到它断在哪
+
+`audience` 这个参数，从签名往下追四步就断了：
+
+```
+签名里的 audience
+ → 没有任何 schema 声明它（LLM 传不进来）
+ → 只能靠 infer_audience_from_query(query) 推断
+ → 推断被 `if not audience and self.document_filter:` 挡住
+ → document_filter 恒为 None
+```
+
+> **方法本身可复用**：拿一个可疑的参数/字段，问"它的值从哪来"，一步步往下，
+> 直到某个环节恒为常数（None / True / 0）—— 那就是断点。
+
+### 5. 人类怎么学这部分
+
+**该盯哪里：**
+- [nodes.py:449-453](langgraph_orchestrator/nodes.py#L449-L453) —— `result` 的两派写法在**同一个函数里**并存（449 行防御 dict，465 行强转 str）
+- [index.html:1277-1281](frontend/index.html#L1277-L1281) —— 三个写死的按钮，对照 [enhanced_nodes.py:157](langgraph_orchestrator/enhanced_nodes.py#L157) 的 docstring 看
+- [knowledge_agent/agent.py:41-48](agents/knowledge_agent/agent.py#L41-L48) —— `QueryOnlyArgs` vs `HybridSearchArgs`，看暴露面的取舍
+- [enhanced_nodes.py:284-296](langgraph_orchestrator/enhanced_nodes.py#L284-L296) —— 5 个反馈值 → 3 种决定的收敛
+
+**★ 三个可以直接拿走的问题模板：**
+
+| 问法 | 本次钓出什么 |
+|---|---|
+| **"同一个字段，各处是怎么对待它的？写法一致吗？"** | `result` 两派写法 → 类型契约模糊 |
+| **"这条注释描述的是谁的行为？那个人真的这么做了吗？"** | `options` 的注释从头就没对过 |
+| **"这个参数的值从哪来？追到哪一步变成常数？"** | `audience` 四步断在 `document_filter=None` |
+
+**背后的通用概念：**
+
+| 概念 | 一句话 | 为什么重要 |
+|---|---|---|
+| **契约的三种失效** | 过期 / 失效 / 从未成立 | 三种的排查姿势不同，别一律当"文档旧了" |
+| **鸭子类型 + 只查方法名** | 接口校验不查签名 = 类型契约空缺 | 空缺会被"防御性代码"填上，而防御多半是死的 |
+| **UI 与后端的隐式契约** | 后端给的值域 ⊋ 前端能产生的值域 | 差集里的选项永远是死路 |
+| **死链追踪** | 顺一个值往下追，直到它变成常数 | 比通读逻辑快，且结论确定 |
+
+**看完应该能回答：**
+- 为什么 `result` 会被两种方式对待？这个分叉会就此停止吗？
+- `options` 和 `messages` 的注释问题，是同一种吗？
+- 用"死链追踪"看 `audience`，断点在哪一步？为什么说它是"恒为常数"？
