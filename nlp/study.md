@@ -1082,8 +1082,8 @@ LangSmith 管**"每一步花了多久、输入输出是什么"**。**两者并�
 | 36 | 阅读 | **架构不支持"带着中间结果回到同一个 Agent"** | 「共享状态 + 单向无环 DAG」的固有代价：`wave_scheduler` 只发 `depends_on ⊆ completed` 的任务，而已完成集合只增不减 → **没有单任务回退能力**（参数级有 `upstream_retry`、全局级有质量重试环，**中间这一层缺**）；Agent 之间不互调（契约只有 `handle`），所以"A 检索 → 需要 B 的数据 → 回到 A 回答"这种形态**拆得出来、跑得起来，但语义是错的**（A 的第二次执行看不到 B 的产出）。这是**设计边界**而非缺陷 —— 换来的是"必然终止、不会静默卡死"。同类见 §7.2 |
 | 37 | 阅读 | ★ **参数校验 + 上游重试这一整条链路，在当前实现下从不执行** | `parameter_validator_node` 有一道守卫：**「Agent 返回纯文本（非 dict）→ 跳过字段校验」**（[clarification.py:154](langgraph_orchestrator/clarification.py#L154)）。而契约规定 `handle() -> str`，**AST 实测 5 个 Agent 的 `handle` 没有任何一个 return dict**（全是字符串/调用/拼接）→ **守卫永远触发** → `_validate_with_aligner` 与降级用的 `_validate_simple` **都到不了**，`upstream_retry` / `should_retry_validation` / `parameter_retry_count` 全是死机器。<br>**连带影响 #31**：`validation_target` 那个无人写入的字段，正因为**根本没走到那条路**才一直没人发现。两条是一条因果链 |
 | 38 | 阅读（2026-09-23） | ★ **「复杂任务规划需人工审核」这条通道从不触发 —— 条件依赖一个全项目从没被写过的 key** | [enhanced_nodes.py:163](langgraph_orchestrator/enhanced_nodes.py#L163) 判的是 `plan.get("complexity") == "complex"`，但**没有任何地方往 plan 里写过 `complexity`** —— 复杂度的真实存放处是 **state 顶层的 `is_complex`**（[enhanced_state.py:38](langgraph_orchestrator/enhanced_state.py#L38)）。而 plan 的实际结构只有 `tasks` + `reasoning`（[planner.py:337-347](orchestrator/planner.py#L337-L347)），`planner_node` 也只 `return {"plan": plan}`（[nodes.py:372](langgraph_orchestrator/nodes.py#L372)）→ **条件恒为假**。<br>**"看起来在工作"的四件套全齐**：触发文案（"任务规划完成，等待人工审核"）、前端选项按钮（`{"approved": "确认规划，继续执行"}`）、答复翻译逻辑（[enhanced_entry.py:423](langgraph_orchestrator/enhanced_entry.py#L423) `if "任务规划" in reason: plan_approved = True`）、进度事件 —— **唯独缺那个让条件成立的写入**。比 #34 更隐蔽：条件不成立会**静默跳过，连日志都不打**。<br>**第二层问题（修好 key 也不对）：** `human_intervention_check` 的**唯一入边来自 `evaluator`**（[enhanced_graph.py:252](langgraph_orchestrator/enhanced_graph.py#L252)）—— 即所有 Agent 跑完、答案已生成**之后**才检查。所以它是"事后告知"而非"事前审核"，选项文案"继续执行"与事实不符。要真做计划审核，得插在 `planner → fan_out` 之间，属结构性改动。**未修，先记** |
-| 39 | 阅读（2026-09-23） | ★ **`state` 里 `messages` 是一条完整接好、却没人消费的「第二历史通道」** | 入口初始化（[enhanced_entry.py:129](langgraph_orchestrator/enhanced_entry.py#L129)）→ 每个 Agent 节点追加一条 `AIMessage`（[nodes.py:240-242](langgraph_orchestrator/nodes.py#L240-L242)，单条截断 8000 字）→ 节点把它转发进 `context["messages"]`（[nodes.py:158](langgraph_orchestrator/nodes.py#L158)）→ **然后 0 个 Agent 读它**。而 [enhanced_state.py:34](langgraph_orchestrator/enhanced_state.py#L34) 的注释写着「读：Agent 节点取历史对话」，**这句是错的** —— Agent 真正读的是 `context["history"]`（来自 `session_memory`，[nodes.py:193](langgraph_orchestrator/nodes.py#L193)，5 处）。**两条历史通道只接上了第二条**，第一条一直在累积、占内存，却从未被消费。<br>**连带发现（同一次复核）**：`human_intervention_check` 的 **5 条通道实际只有 2 条能触发** —— 通道 1 死于 #38，**通道 4b 死于 `critic_passed` 恒为初始 `True`**（唯一写入方是 critic 节点，而 critic 从未进图）。<br>详见 **§9.4.4** |
-| 40 | 阅读（2026-09-23） | ★ **三处「契约与实现对不上」—— 同一套方法换三个对象扫出来的** | ① `agent_results["result"]`：写方**永远写 `str`**（`handle() -> str`），但读方分两派 —— 3 处强转 `str`、3 处**防御 `dict`**（[nodes.py:450-451](langgraph_orchestrator/nodes.py#L450-L451) 在活路径上，另两处在 #37 死链路上），后者**从不执行**。根因是 [protocol.py:52](core/protocol.py#L52) 的 harness **只核对 `handle` 存不存在、不核对签名**。<br>② `intervention_data["options"]`：docstring 写"是给前端渲染按钮的"，**这句是假的** —— 前端三个按钮**写死在 HTML**（[index.html:1278-1280](frontend/index.html#L1278-L1280)），`options` 从没被读过。后果：后端支持 5 个反馈值，前端只能产生 3 个，`override` / `accept` **用户无法表达**（通道 4b 的 `override` 因此多了一层死法）。<br>③ `audience`：**一条从参数到实现的完整死链** —— `knowledge_agent` 的 `vector_search` / `keyword_search` 声明只收 `query`（`QueryOnlyArgs`），方法却收 `query` + `top_k` + `audience`；而 `audience` 只能靠推断，推断又被恒为 `None` 的 `document_filter` 挡住 → **整个机制从未执行**。<br>详见 **§9.4.5** |
+| 39 | 阅读（2026-09-23） | ★ **`state` 里 `messages` 是一条完整接好、却没人消费的「第二历史通道」** | 入口初始化（[enhanced_entry.py:129](langgraph_orchestrator/enhanced_entry.py#L129)）→ 每个 Agent 节点追加一条 `AIMessage`（[nodes.py:240-242](langgraph_orchestrator/nodes.py#L240-L242)，单条截断 8000 字）→ 节点把它转发进 `context["messages"]`（[nodes.py:158](langgraph_orchestrator/nodes.py#L158)）→ **然后 0 个 Agent 读它**。而 [enhanced_state.py:34](langgraph_orchestrator/enhanced_state.py#L34) 的注释写着「读：Agent 节点取历史对话」，**这句是错的** —— Agent 真正读的是 `context["history"]`（来自 `session_memory`，[nodes.py:193](langgraph_orchestrator/nodes.py#L193)，5 处）。**两条历史通道只接上了第二条**，第一条一直在累积、占内存，却从未被消费。<br>**连带发现（同一次复核）**：`human_intervention_check` 的 **5 条通道实际只有 2 条能触发** —— 通道 1 死于 #38，**通道 4b 死于 `critic_passed` 恒为初始 `True`**（唯一写入方是 critic 节点，而 critic 从未进图）。<br>详见 **§9.4.4**<br>**修复（2026-09-23）：** `context["messages"]` 那条**死转发已删**；`messages` 字段本身**保留**（LangGraph 惯用键，删了可能牵动框架行为）。通道 4b **未动**（要注册 critic，与 #37 功能重复） |
+| 40 | 阅读（2026-09-23） | ★ **三处「契约与实现对不上」—— 同一套方法换三个对象扫出来的** | ① `agent_results["result"]`：写方**永远写 `str`**（`handle() -> str`），但读方分两派 —— 3 处强转 `str`、3 处**防御 `dict`**（[nodes.py:450-451](langgraph_orchestrator/nodes.py#L450-L451) 在活路径上，另两处在 #37 死链路上），后者**从不执行**。根因是 [protocol.py:52](core/protocol.py#L52) 的 harness **只核对 `handle` 存不存在、不核对签名**。<br>② `intervention_data["options"]`：docstring 写"是给前端渲染按钮的"，**这句是假的** —— 前端三个按钮**写死在 HTML**（[index.html:1278-1280](frontend/index.html#L1278-L1280)），`options` 从没被读过。后果：后端支持 5 个反馈值，前端只能产生 3 个，`override` / `accept` **用户无法表达**（通道 4b 的 `override` 因此多了一层死法）。<br>③ `audience`：**一条从参数到实现的完整死链** —— `knowledge_agent` 的 `vector_search` / `keyword_search` 声明只收 `query`（`QueryOnlyArgs`），方法却收 `query` + `top_k` + `audience`；而 `audience` 只能靠推断，推断又被恒为 `None` 的 `document_filter` 挡住 → **整个机制从未执行**。<br>详见 **§9.4.5**<br>**修复（2026-09-23）：** ① 的死防御分支**已删**；② 前端**已改成按 `options` 渲染按钮**（`override` / `accept` 从此可达）；③ `audience` 死链**未动** —— 涉及产品决策。回归 **20/20 通过** |
 
 #### 9.4.1 为什么这类问题专挑 `context` 出现（#33 的根因）
 
@@ -1295,6 +1295,22 @@ Agent 真正读的历史是 **`context["history"]`**（来自 `session_memory`�
 #### 9.4.5 三处「契约与实现对不上」（2026-09-23）
 
 同一套方法（谁写谁读 + 注释对照），换三个对象扫。**三处都有发现。**
+
+> **【修复状态 2026-09-23】** 三处里可低风险处理的部分**已改**（其余留给决策）：
+>
+> | 处 | 处理 |
+> |---|---|
+> | ① `result` 的死防御 | ✅ **已删**（aggregator 那处 `isinstance(answer, dict)`） |
+> | ② `options` 假契约 | ✅ **已修** —— 前端改成按 `options` 渲染按钮，不再写死三个 |
+> | ③ `audience` 死链 | ⬜ **未动** —— 涉及"要不要恢复文档角色过滤"的产品决策，留给后续 |
+> | 附带 | ✅ `context["messages"]` 那条**死转发已删**（#39 的延伸） |
+>
+> **验证**：回归测试 **20/20 通过**（耗时 148.9s）；前端弹窗已在浏览器实测
+> —— 用真实 mock 事件跑了 4 个用例（含"无 options 回退"与"未知值被白名单挡掉"）。
+>
+> **顺带勘误**：回归用例**实际已有 20 条**，不是文档里写的 15/16。
+> 那两处数字**按项目惯例不修**（是对当时状态的忠实记录，见 §4 阶段 6 的说明），
+> 此处只记下当前真实值。
 
 ##### ① `agent_results` 的 `result` —— 类型契约不一致
 

@@ -33,11 +33,11 @@ class EnhancedGraphState(TypedDict):
     # ========== 原有字段 ==========
     # messages：写方有两处 —— 入口初始化 1 条 HumanMessage、每个 Agent 节点追加 1 条 AIMessage。
     # ⚠️ 【当前没有读取方】（2026-09-23 复核，见 study.md §9.4.4 / 台账 #39）：
-    #    节点会把它转发进 context["messages"]（nodes.py:158），但 0 个 Agent 读那个键。
-    #    Agent 真正读的历史是 context["history"]（来自 session_memory，nodes.py:193）。
-    #    也就是说项目里有**两条历史通道，只接上了 history 那条** —— 本字段只在累积、无人消费。
-    #    保留不动的原因：messages 是 LangGraph 的惯用键（add_messages 是它的标准 reducer），
-    #    删字段可能牵动框架行为；要清掉的话，最小改动是删 nodes.py:158 那行转发。
+    #    Agent 真正读的历史是 context["history"]（来自 session_memory，见 nodes.py 的 make_agent_node）。
+    #    本字段只在累积、无人消费 —— 原先还额外往 context["messages"] 转发一份，
+    #    那行转发已删（同为 2026-09-23，见 §9.4.5 / #40）。
+    #    字段本身保留：messages 是 LangGraph 的惯用键（add_messages 是它的标准 reducer），
+    #    删字段可能牵动框架的行为。
     messages: Annotated[List[AnyMessage], add_messages]  # add_messages 保证"追加"而非覆盖
     query: str  # 当前要处理的问题；写：入口、router（DAG 中每个任务各改写一次）、upstream_retry；读：Agent 节点、complexity_classifier
     thread_id: Optional[str]  # 会话ID（用于记忆隔离，不同窗口/用户互不干扰）写：入口；读：memory_store 按它隔离记忆

@@ -1274,7 +1274,9 @@ body {
         </div>
         <div class="modal-desc" id="interventionReason">系统需要您的确认才能继续。</div>
         <div class="modal-detail" id="interventionDetail"></div>
-        <div class="modal-actions">
+        <!-- 默认按钮。后端在 intervention_data.options 里给了选项时，
+             showIntervention() 会按 options 把这些按钮整个换掉（见 renderInterventionButtons）。 -->
+        <div class="modal-actions" id="interventionActions">
             <button class="modal-btn danger" onclick="handleIntervention('abort')">终止</button>
             <button class="modal-btn secondary" onclick="handleIntervention('retry')">重试</button>
             <button class="modal-btn primary" onclick="handleIntervention('approved')">批准继续</button>
@@ -2015,6 +2017,46 @@ function removeUpload(index) {
 // ========================================================================
 // 人工介入
 // ========================================================================
+
+// 后端 human_intervention_execute 认识的五个反馈值（见 enhanced_nodes.py 的收敛逻辑）。
+// 只有这些值才允许拼进 onclick —— options 的 key 来自后端，但拼进 HTML 属性前
+// 一律走白名单，避免把任意字符串注入到可执行位置。
+const KNOWN_INTERVENTION_VALUES = ['approved', 'override', 'accept', 'retry', 'abort'];
+
+// 首次调用时把 HTML 里的默认按钮记下来：后端没给 options 时回退到它。
+// 必须在覆盖之前抓，所以放在 renderInterventionButtons 的最前面（那时还没被改过）。
+let _defaultInterventionButtonsHtml = null;
+
+// 按后端给的 options 重建按钮。
+// 为什么需要：每条介入通道的选项和文案都不一样 —— 写操作是"确认无误/不认可"、
+// 质量过低是"接受当前结果/重新执行"、critic 失败是"忽略冲突，强制通过"。
+// 原先前端写死三个按钮（批准/重试/终止），这些差异全表达不出来，
+// 后端的 options 等于摆设（详见 study.md 台账 #40）。
+// options 的形状是 {反馈值: 按钮文案}。
+function renderInterventionButtons(options) {
+    const box = document.getElementById('interventionActions');
+    if (!box) return;
+
+    if (_defaultInterventionButtonsHtml === null) {
+        _defaultInterventionButtonsHtml = box.innerHTML;
+    }
+
+    // 后端没给 options（或给了空的）→ 回退到默认三个按钮，不让弹窗没有按钮可点
+    if (!options || typeof options !== 'object' || Object.keys(options).length === 0) {
+        box.innerHTML = _defaultInterventionButtonsHtml;
+        return;
+    }
+
+    // 配色沿用原来三个按钮的习惯：终止=危险色、重试=次要色、其余=主色
+    const styleOf = (v) => v === 'abort' ? 'danger' : (v === 'retry' ? 'secondary' : 'primary');
+
+    box.innerHTML = Object.entries(options).map(([value, label]) => {
+        if (!KNOWN_INTERVENTION_VALUES.includes(value)) return '';   // 认不出的值不渲染
+        const text = escHtml(String(label));
+        return `<button class="modal-btn ${styleOf(value)}" onclick="handleIntervention('${value}')">${text}</button>`;
+    }).join('');
+}
+
 function showIntervention(event) {
     State.interventionThreadId = event.thread_id || State.threadId;
 
@@ -2023,6 +2065,9 @@ function showIntervention(event) {
 
     const detailEl = document.getElementById('interventionDetail');
     const data = event.data || {};
+
+    // 按钮按后端给的 options 重建（没给就回退默认）
+    renderInterventionButtons(data.options);
 
     // 后端（enhanced_nodes.py 的写操作闸门）会同时给出两样东西：
     //   summary  —— 已经整理成人话的一句摘要，给审批人看的

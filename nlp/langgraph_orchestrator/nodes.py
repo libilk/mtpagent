@@ -154,8 +154,12 @@ def make_agent_node(agent_instance: Any, agent_name: str, shared_memory=None, me
 
         # 构建 context —— 与原始 executor._act() 保持兼容
         # dependencies = 上游 Agent 的产出，按 agent 名索引；DAG 里任务之间就靠它传数据
+        #
+        # 【变更 2026-09-23】原先这里还有一项 "messages"（转发 state 的完整消息列表），
+        # 已删 —— 全项目 0 个 Agent 读 context["messages"]；Agent 取历史走的是下面那句
+        # context["history"]（来自 session_memory）。那条转发是死的。
+        # 见 study.md §9.4.4 / 台账 #39、#40。
         context: Dict[str, Any] = {
-            "messages": state.get("messages", []),
             "dependencies": {
                 r["agent"]: r for r in state.get("agent_results", [])
             },
@@ -445,10 +449,12 @@ class GraphNodes:
         latest = [r for r in results if r.get("iteration", 0) == max_iter]
 
         # 单结果直接返回
+        # 【变更 2026-09-23】原有的一道 `if isinstance(answer, dict)` 兜底已删：
+        # agent_results 的 result 由写方固定成 str（Agent 契约是 handle() -> str，
+        # 见 core/protocol.py），那道分支从不执行。外层 str() 仍能兜住任何类型。
+        # 见 study.md §9.4.5 / 台账 #40。
         if len(latest) == 1:
             answer = latest[0].get("result", "")
-            if isinstance(answer, dict):
-                answer = answer.get("result", str(answer))
             _emit(writer, "aggregator", "单Agent结果，直接输出", stage="done")
             return {"final_answer": str(answer)}
 
