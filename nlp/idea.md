@@ -3538,3 +3538,82 @@ grep -rn 'context\.get("\|context\["' --include="*.py" agents/
 - `messages` 和 `history` 有什么区别？为什么两条都在？
 - `critic_passed` 的注释没错，那这条通道为什么还是死的？
 - 如果要在不跑代码的前提下判断一个 `if` 分支是否可达，你会查什么？
+
+---
+
+## 修正 · 把两处"注释与事实不符"改成如实注释（2026-09-23）
+
+> 承接 §9.4.4 的复核结论。**本次一行逻辑都没改**，只改注释与文档字符串 ——
+> AST 已验证：`enhanced_state.py` 完全一致；`enhanced_nodes.py` 剥掉 docstring 后一致。
+
+### 1. 思路：为什么"修"不等于"改代码"
+
+复核出 3 处注释与事实不符，但**没有一处需要动逻辑**：
+
+| 处 | 问题 | 为什么不动逻辑 |
+|---|---|---|
+| `messages` | 注释说"读：Agent 节点取历史对话"，实际 0 个读取方 | 要接上得改 Agent 的历史来源 —— 那是**功能变更**，不是修注释 |
+| `critic_passed` / 通道 4b | 注释没说错，但字段恒为初始值 → 分支不可达 | 要么注册 critic（4 个阻塞点），要么删通道（万一以后启用 critic 得重写） |
+| `iteration` | 注释说"每判一次**不合格** +1"，实际无条件 +1 | 合格即进 END，**效果一致**，只是措辞不准 |
+
+**所以三处的正确处理都是"如实注释"** —— 把"当前是什么状态"写清楚，把"为什么保留"讲明白。
+
+### 2. 这不是偷懒，是项目里已有的惯例
+
+同类处理在项目里已经出现过三次，本次只是沿用：
+
+| 位置 | 原文 |
+|---|---|
+| `_route_retry_target`（[enhanced_graph.py:203](langgraph_orchestrator/enhanced_graph.py#L203)） | "全项目没有任何地方写入过……**如实注释，未改动逻辑**" |
+| `stop_reason`（[enhanced_state.py](langgraph_orchestrator/enhanced_state.py)） | "代码内无读取方，**仅留档排查**" |
+| `parameters_aligned`（同上） | "**本仓库无读取方** —— 字段目前没被用起来" |
+
+**惯例的判据是：改注释的成本 ≈ 0 且无风险；改逻辑要单独论证。**
+
+### 3. 本次具体改了什么
+
+**① [enhanced_state.py](langgraph_orchestrator/enhanced_state.py) `messages`**
+把原来那句错误的"读：Agent 节点取历史对话"换成一段说明：
+- 写方有两处、读方 0 处
+- 与 `context["history"]` 的区别（两条历史通道只接上一条）
+- **为什么保留不动**（`messages` 是 LangGraph 惯用键，删字段可能牵动框架行为）
+- **要清掉的话最小改动是什么**（删 `nodes.py:158` 那行转发）
+
+**② [enhanced_state.py](langgraph_orchestrator/enhanced_state.py) `critic_passed`**
+保留"读：通道 4b"（这句没说错），补上"为什么通道不可达"。
+
+**③ [enhanced_nodes.py:139+](langgraph_orchestrator/enhanced_nodes.py#L139) 五通道 docstring**
+在通道 1 和通道 5 后面各标一处 `⚠️【当前不可达】 + 台账编号`，
+并在末尾加一句总述：**"五条通道名义上五条，实际只有 2 和 4a 能触发"**。
+
+**④ [enhanced_nodes.py](langgraph_orchestrator/enhanced_nodes.py) 通道 4b 的判断处**
+补上"本判断保留"的理由：**一旦以后启用 critic，它就是现成的接线点，删掉反而要重写**。
+
+### 4. 人类怎么学这部分
+
+**该盯哪里：**
+- [enhanced_nodes.py:139-152](langgraph_orchestrator/enhanced_nodes.py#L139-L152) —— 五通道清单的写法（**可达性标在通道旁边**，不是集中写在别处）
+- [enhanced_state.py](langgraph_orchestrator/enhanced_state.py) 的 `messages` 注释 —— **"为什么保留" + "要清掉怎么清"** 这个双结尾
+- [enhanced_graph.py:202-209](langgraph_orchestrator/enhanced_graph.py#L202-L209) —— 项目里最早的一次"如实注释"
+
+**★ 三个可以直接拿走的问题模板：**
+
+| 问法 | 本次钓出什么 |
+|---|---|
+| **"这个发现，是改注释还是改逻辑？"** | 三处都是改注释 —— 因为改逻辑属于功能变更 |
+| **"这段死代码为什么不删？"** | `critic_passed` 是**预留的接线点**，删了以后要重写 |
+| **"注释里该写什么才算够？"** | 不只写"现在是什么"，还要写"**为什么保留**"和"**要清掉怎么清**" |
+
+**背后的通用概念：**
+
+| 概念 | 一句话 | 为什么重要 |
+|---|---|---|
+| **如实注释 vs 改代码** | 前者零风险，后者是功能变更 | 混在一起会让人分不清"修 bug"和"改行为" |
+| **预留接线的取舍** | 不可达的分支该留还是该删 | 留：以后启用就现成；删：省去读者困惑。**看成本对比** |
+| **注释的三段式** | 现状 + 为什么保留 + 怎么清掉 | 只写"现状"的注释，读者还是会想删它 |
+| **AST 是"没改逻辑"的证据** | 剥掉 docstring 后 AST 一致 = 确定无逻辑变更 | 注释的正确性无法机器校验，但"没改逻辑"可以 |
+
+**看完应该能回答：**
+- 为什么这三处都不改逻辑？改成"能用"分别要付什么代价？
+- `critic_passed` 那处为什么选择保留分支而不是删掉？
+- 怎么向别人证明"我这次只改了注释、没改行为"？

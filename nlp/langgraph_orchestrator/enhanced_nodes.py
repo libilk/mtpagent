@@ -141,10 +141,17 @@ def human_intervention_check_node(state: Dict[str, Any]) -> dict:
 
     里面串着五条互不相干的触发通道，按顺序判断、命中一条就返回（后面的不再看）：
       1. 复杂任务的规划还没被审过（plan 为 complex 且 plan_approved 未置位）
+         ⚠️ 【当前不可达】plan 里从没有 complexity 这个键 —— 见 study.md 台账 #38
       2. Agent 本轮真改了数据（write_operations 非空且未批准）—— 唯一可靠的写操作闸门
       3. 用户原话里含数据库写关键字、且当前 Agent 名带 database（几乎不命中，见下方注释）
       4. 质量分过低且已重试多轮
       5. critic 校验失败
+         ⚠️ 【当前不可达】critic_passed 恒为初始 True —— 见 study.md 台账 #39
+
+    ★ 也就是说：**五条通道名义上五条，实际只有 2 和 4a 两条能真正触发**
+      （2026-09-23 复核，见 study.md §9.4.4）。
+      两条不可达的都不报错、不打日志 —— 光看这里的逻辑是对的，必须去追字段的"值从哪来"。
+
     返回 required=True 后，图会在 execute 节点前停下等人工输入。
 
     每条通道给的 intervention_data["options"] 是给前端渲染按钮的，真人点哪个，
@@ -246,6 +253,11 @@ def human_intervention_check_node(state: Dict[str, Any]) -> dict:
 
     # 通道 4b：critic（评审）不通过。注意 critic 查的是"这段输出能不能接上后续任务"，
     # 不是给答案对错打分 —— 别和 evaluator 的 quality_score 混为一谈。
+    #
+    # ⚠️ 这条当前不可达（2026-09-23 复核）：能把它写成 False 的只有 critic 节点，
+    #    而 critic 从未进图（enable_critic=False），critic_passed 恒为初始 True。
+    #    本判断保留 —— 一旦以后真的启用 critic，它就是现成的接线点，删掉反而要重写。
+    #    详见 study.md §9.4.4 / 台账 #39。
     if not critic_passed:
         _emit("human_intervention_check", "触发: Critic验证失败", stage="triggered")
         return {

@@ -31,7 +31,14 @@ class EnhancedGraphState(TypedDict):
     """LangGraph 增强状态（向后兼容原有 GraphState）"""
 
     # ========== 原有字段 ==========
-    messages: Annotated[List[AnyMessage], add_messages]  # 写：入口初始化、各 Agent 节点追加；读：Agent 节点取历史对话。add_messages 保证"追加"而非覆盖
+    # messages：写方有两处 —— 入口初始化 1 条 HumanMessage、每个 Agent 节点追加 1 条 AIMessage。
+    # ⚠️ 【当前没有读取方】（2026-09-23 复核，见 study.md §9.4.4 / 台账 #39）：
+    #    节点会把它转发进 context["messages"]（nodes.py:158），但 0 个 Agent 读那个键。
+    #    Agent 真正读的历史是 context["history"]（来自 session_memory，nodes.py:193）。
+    #    也就是说项目里有**两条历史通道，只接上了 history 那条** —— 本字段只在累积、无人消费。
+    #    保留不动的原因：messages 是 LangGraph 的惯用键（add_messages 是它的标准 reducer），
+    #    删字段可能牵动框架行为；要清掉的话，最小改动是删 nodes.py:158 那行转发。
+    messages: Annotated[List[AnyMessage], add_messages]  # add_messages 保证"追加"而非覆盖
     query: str  # 当前要处理的问题；写：入口、router（DAG 中每个任务各改写一次）、upstream_retry；读：Agent 节点、complexity_classifier
     thread_id: Optional[str]  # 会话ID（用于记忆隔离，不同窗口/用户互不干扰）写：入口；读：memory_store 按它隔离记忆
     plan: Optional[Dict[str, Any]]  # 规划器产出的任务列表（tasks/依赖/schema）；简单路径不跑规划器，此处为 None。读：参数验证器、critic、波次调度
@@ -40,7 +47,7 @@ class EnhancedGraphState(TypedDict):
     agent_results: Annotated[List[Dict[str, Any]], operator.add]  # 每个 Agent 跑完追加一条 {agent, task_id, result, iteration}；读：aggregator 与下游三个校验节点（都只取 [-1] 最近一条）、波次调度（按 task_id 取上游产出拼进下游 query）
     final_answer: str  # 最终答案；写：aggregator（多 Agent 汇总）、evaluator（重试后覆盖）；读：入口输出、人工介入展示
     quality_score: float  # evaluator（评估器：最终质量把关）打的分，0~1；读：check_quality 决定 pass/retry、人工介入通道 4a
-    iteration: int  # 迭代轮次：evaluator 每判一次不合格 +1；读：check_quality（重试上限）、人工介入
+    iteration: int  # 迭代轮次：evaluator **每评一次就 +1（无条件，不看分数）**；读：check_quality（重试上限）、人工介入通道 4a
     feedback: str  # evaluator 给出的改进建议；读：Agent 节点重试时拼进 prompt
 
     # ========== 参数校验与重试 ==========
@@ -61,7 +68,13 @@ class EnhancedGraphState(TypedDict):
 
     # ========== Critic 验证 ==========
     # critic（评审）= 校验"这段输出能不能接上后续任务"，不是给答案打分（打分是 evaluator）
-    critic_passed: bool  # 写：critic 节点；未注册 critic_agent 或校验抛异常时默认 True 放行；读：human_intervention_check 通道 4b
+    # critic_passed：读方是 human_intervention_check 通道 4b，注释本身没说错 ——
+    # ⚠️ 但【通道 4b 当前不可达】（2026-09-23 复核，见 study.md §9.4.4 / 台账 #39）：
+    #    唯一会把它写成 False 的是 critic 节点（critic.py:92），而 critic 从未进图
+    #    （enable_critic=False），所以它恒为入口写下的初始值 True（enhanced_entry.py:147）
+    #    → 通道 4b 的 `if not critic_passed:` 永不成立。与 #38（通道 1）是一对：
+    #    那条死在"key 从没被写过"，这条死在"字段值恒定不动"。
+    critic_passed: bool  # 写：critic 节点（当前未进图）；未注册 critic_agent 或校验抛异常时默认 True 放行（fail-open）
     critic_validation: Optional[Dict[str, Any]]  # critic 返回的原始结果；读：enhanced_entry 输出给前端
     critic_issues: List[Dict[str, Any]]  # critic 发现的任务衔接问题；读：human_intervention_check 展示给人工
 
