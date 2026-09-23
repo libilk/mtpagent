@@ -1077,7 +1077,7 @@ LangSmith 管**"每一步花了多久、输入输出是什么"**。**两者并�
 | 25 | 8 | 通用政策挂在**兄弟类别**而非父类别上 | 3C数码拿不到「质量问题退货15日」 |
 | 26 | 8 | `route_simple` / `_create_simple_plan` 里的**过期 agent id** | 前者是死代码该删，后者在回退路径上该修 —— **同样是过期 id，处理方式不同** |
 | 32 | 阅读 | **指代消解被放在了"最不需要它的那一步"** | 它写在 `make_agent_node` 的 `node_fn` 里（每个 Agent 一份）。但 `complexity_classifier` / `router` / `planner` **全在它之前、全用未消解的 query** —— 而这三步恰恰最需要消解。DAG 路径下更糟：跑 N 次、消解的是 planner 写的**任务描述**（本就自包含）、结果**不写回 state**、还把任务描述当"用户消息"塞进记忆。**simple 路径下它是正确且必需的**（test_13 靠它过），所以测试全绿也看不出来 |
-| 33 | 阅读 | **`context` 这个隐式契约里 4 个键对不上** | 只有写没有读：`dependencies`、`original_query`（后者还在契约 docstring 里专门解释过）。只有读没有写：`user_id`（5 个 Agent 在读，节点从未设置 → 恒为 `"anonymous"`）。键名不匹配：`chat_agent` 读 `conversation_history`，节点注入的是 `history` → **恒拿空历史**。见下方 §9.4.1 |
+| 33 | 阅读 | **`context` 这个隐式契约里 5 个键对不上** | 只有写没有读：`dependencies`、`original_query`、**`messages`**（最后一个由 2026-09-23 全键复核补出，见 §9.4.3）。只有读没有写：`user_id`（5 个 Agent 在读，节点从未设置 → 恒为 `"anonymous"`）。键名不匹配：`chat_agent` 读 `conversation_history`，节点注入的是 `history` → **恒拿空历史**。见下方 §9.4.1 |
 | 34 | 阅读 → ✅**已修** | ★★ **`dependencies` / `parameter_mapping` 声明了"上游结果传给下游"，但没有任何环节真正传递** | 节点构造了 `context["dependencies"]`，但**全项目 0 个 Agent 读它**；三个 Agent 的提示词构造函数**收了 `context` 却不用**（`database_agent` 连参数都没有）；派发时 `Send` 的 `query` 只是 planner **事先**写好的描述，不含上游结果。唯一读取方是 `critic.py`，而 **critic 从未进图**（`enable_critic=False`）。结果：`depends_on` 只实现了"执行顺序"，`parameter_mapping` 声明的那套数据交接**从未接线**。**详见 §9.4.2**<br>**修法（2026-09-21）：** 派发任务时把上游结果拼进 `query`（下游 Agent 唯一必然读到的入口），并给 `agent_results` 补 `task_id` 以便按任务取结果（agent 名在同一 Agent 跑两次时分不清）。`fan_out` 那处是 no-op（root 任务无依赖），但两处共用同一个拼装函数。<br>**仍未解决的：** `parameter_mapping` 的**字段级**取值 —— 见 **#37**：那条路不是"没接线"，而是**整段被守卫挡死、从不执行** |
 | 36 | 阅读 | **架构不支持"带着中间结果回到同一个 Agent"** | 「共享状态 + 单向无环 DAG」的固有代价：`wave_scheduler` 只发 `depends_on ⊆ completed` 的任务，而已完成集合只增不减 → **没有单任务回退能力**（参数级有 `upstream_retry`、全局级有质量重试环，**中间这一层缺**）；Agent 之间不互调（契约只有 `handle`），所以"A 检索 → 需要 B 的数据 → 回到 A 回答"这种形态**拆得出来、跑得起来，但语义是错的**（A 的第二次执行看不到 B 的产出）。这是**设计边界**而非缺陷 —— 换来的是"必然终止、不会静默卡死"。同类见 §7.2 |
 | 37 | 阅读 | ★ **参数校验 + 上游重试这一整条链路，在当前实现下从不执行** | `parameter_validator_node` 有一道守卫：**「Agent 返回纯文本（非 dict）→ 跳过字段校验」**（[clarification.py:154](langgraph_orchestrator/clarification.py#L154)）。而契约规定 `handle() -> str`，**AST 实测 5 个 Agent 的 `handle` 没有任何一个 return dict**（全是字符串/调用/拼接）→ **守卫永远触发** → `_validate_with_aligner` 与降级用的 `_validate_simple` **都到不了**，`upstream_retry` / `should_retry_validation` / `parameter_retry_count` 全是死机器。<br>**连带影响 #31**：`validation_target` 那个无人写入的字段，正因为**根本没走到那条路**才一直没人发现。两条是一条因果链 |
@@ -1182,6 +1182,50 @@ grep -rn "dependencies" --include=*.py agents/     # 预期：无输出
 >
 > **通用教训：** 一条"不能说"的结论会随着修复**过期**。修完必须回来改措辞边界 ——
 > 否则会在答辩时**低估自己已经做到的功能**，这种伤害和夸大是一样的。
+
+#### 9.4.3 `context` 全键复核（2026-09-23）
+
+**方法**（就是 #38 那套）：先找**唯一的写方**，再找**所有读方**，逐个双向核对。
+
+```bash
+# 写方：context 的唯一构造点是 nodes.py 的 make_agent_node（157~198 行）
+sed -n '148,200p' langgraph_orchestrator/nodes.py | grep -n 'context\['
+# 读方：扫所有 Agent
+grep -rn 'context\.get("\|context\["' --include="*.py" agents/
+```
+
+**核对结果 —— 10 个写键 + 4 个只读键：**
+
+| 键 | 写方 | 读方 | 判定 |
+|---|---|---|---|
+| `_stream_writer` | [nodes.py:197](langgraph_orchestrator/nodes.py#L197) | 6 处 | ✅ 通 |
+| `_agent_name` | [nodes.py:198](langgraph_orchestrator/nodes.py#L198) | 5 处 | ✅ 通 |
+| `history` | [nodes.py:193](langgraph_orchestrator/nodes.py#L193)（条件） | 5 处 | ✅ 通 |
+| `file_paths` | [nodes.py:174](langgraph_orchestrator/nodes.py#L174)（条件） | 1 处 | ✅ 通 |
+| `image_urls` / `image_paths` / `image_base64_list` | [nodes.py:166-169](langgraph_orchestrator/nodes.py#L166-L169)（条件） | VQA 各 1 处 | ✅ 通 |
+| **`messages`** | [nodes.py:158](langgraph_orchestrator/nodes.py#L158) | **0** | ❌ **死数据 —— 本次新发现** |
+| `dependencies` | [nodes.py:159](langgraph_orchestrator/nodes.py#L159) | **0** | ❌ 死数据（#33，**#34 修的是 query 不是它**） |
+| `original_query` | [nodes.py:162](langgraph_orchestrator/nodes.py#L162) | **0** | ❌ 死数据（#33） |
+| `user_id` | **无** | 4 处 | ❌ 恒 `"anonymous"`（#33） |
+| `conversation_history` | **无**（写的是 `history`） | 1 处（chat_agent） | ❌ 恒空列表（#33） |
+| `image_url` / `image_path` / `image_base64`（单数） | **无** | VQA 3 处 | ⚠️ 死分支，**但有正当理由**（见下） |
+| `urgent` | **无** | 0 | ✅ 已清理（#22 记过，代码里只留注释） |
+
+**两点说明：**
+
+1. **`dependencies` 仍然只有写没有读。** #34 的修法是"把上游结果拼进 query"，
+   **没有**去补 `dependencies` 的读取方（选 query 是因为每个 Agent 必然读它）。
+   所以这一格的状态**没有随 #34 改变** —— 别看到 #34 已修就以为它也通了。
+
+2. **VQA 的三个单数键是"刻意的兼容层"，不算缺陷。**
+   [vqa_agent/agent.py:332-348](agents/vqa_agent/agent.py#L332-L348) 有注释 `# 单值兼容字段`，
+   且只在 `if not images:` 时才走 —— 是给"直接调用 Agent、只传一张图"的调用方留的。
+   图里没人写它，所以**在当前链路中是死分支，但作为 API 兼容面是合理的**。
+   > **这正好和 #38 形成对照**：同样是"没人写"，#38 是**忘了写**（条件恒假、静默跳过），
+   > 这里是**有意留**（有注释、有正当用途）。
+   > **判据是：有没有人解释过为什么留着它。** 有解释 → 兼容层；没解释 → 可疑。
+
+**结论：** #33 原写"**4 个键**对不上"，复核后是 **5 个**（多出 `messages`）。其余键全部双向对齐。
 
 ### 9.5 🌐 环境 / 工具类（4 项）
 
