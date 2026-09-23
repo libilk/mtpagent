@@ -3450,3 +3450,91 @@ grep -rn 'context\.get("\|context\["' --include="*.py" agents/
 - 为什么 `context` 的键没法靠类型系统或测试发现对不上？
 - #34 修好了数据传递，为什么 `dependencies` 还是死的？
 - 看到一段没人调用的代码，你怎么判断该删还是该留？
+
+---
+
+## 复核 · `state` 全字段核对（2026-09-23）
+
+> 承接 §9.4.3 的 `context` 复核。这次扫 `state` —— 38 个字段。
+
+### 1. 思路：这次的核对目标不一样
+
+`context` 那份**没有注释**，所以核对的是"谁写谁读"。
+而 [enhanced_state.py](langgraph_orchestrator/enhanced_state.py) **每个字段后面本来就标了
+「写：谁 / 读：谁」** —— 所以这次核对的是：**注释说的，和代码实际做的是否一致。**
+
+方法同上一轮（先写方、再读方），只是多了一步"和注释对照"。
+
+### 2. 两处对不上
+
+#### ① `messages` —— 一条完整接好、却没人消费的「第二历史通道」
+
+| 环节 | 位置 | 状态 |
+|---|---|---|
+| 入口初始化 | [enhanced_entry.py:129](langgraph_orchestrator/enhanced_entry.py#L129) | ✅ 写 |
+| 每个 Agent 追加 `AIMessage` | [nodes.py:240-242](langgraph_orchestrator/nodes.py#L240-L242)（截断 8000 字） | ✅ 写 |
+| 节点转发进 `context` | [nodes.py:158](langgraph_orchestrator/nodes.py#L158) | ✅ 写 |
+| **Agent 真正读取** | — | ❌ **0 处** |
+
+**而注释写着「读：Agent 节点取历史对话」—— 这句话是错的。**
+
+**项目里有两条历史通道，只接上了第二条：**
+
+| 通道 | 来源 | Agent 读吗 |
+|---|---|---|
+| `context["history"]` | `session_memory.get_messages()` | ✅ 5 处 |
+| `context["messages"]` | `state["messages"]` | ❌ 0 处 |
+
+**后果**：那份 `messages` 一直在累积（入口 1 条 + 每 Agent 1 条，单条最长 8000 字）、
+占内存，**但从未被读过**。它唯一的实际作用是"看起来接上了"。
+
+#### ② `human_intervention_check` 的五条通道，只有两条能触发
+
+| 通道 | 条件 | 可达性 |
+|---|---|---|
+| 1 | `plan["complexity"] == "complex"` | ❌ **死**（#38） |
+| 2 | `write_operations` 非空且未批准 | ✅ 活 |
+| 3 | 用户原话含 `INSERT/UPDATE` 且 agent 名带 `database` | ⚠️ 注释自承认"很难命中" |
+| 4a | `quality_score < 0.4 且 iteration >= 2` | ✅ 活 |
+| 4b | `not critic_passed` | ❌ **死** |
+
+**通道 4b 的死法，和 #38 恰好是一对：**
+
+| | #38（通道 1） | 通道 4b |
+|---|---|---|
+| 注释说谎了吗 | **没有** | **没有** |
+| 死因 | 条件依赖一个**从没被写过的 key** | 字段**恒为初始值** |
+| 具体 | `plan["complexity"]` 零写入方 | `critic_passed` 唯一写入方是 critic，而 critic 从未进图 |
+
+> **两者都不报错、不打日志。光看那段 `if` 的逻辑是对的 ——
+> 必须去追「这个字段的值从哪来」才看得出来。**
+
+### 3. 人类怎么学这部分
+
+**该盯哪里：**
+- [enhanced_state.py](langgraph_orchestrator/enhanced_state.py) 的文件头 —— **"读它的重点不是字段名，而是每个字段谁写谁读"**（作者自己写的）
+- 同文件 `messages` / `critic_passed` 两行注释 —— 对照 §9.4.4 看它们哪里不准
+- [enhanced_nodes.py:139-257](langgraph_orchestrator/enhanced_nodes.py#L139-L257) —— 五条通道的完整判断顺序
+- [nodes.py:157-198](langgraph_orchestrator/nodes.py#L157-L198) —— context 的构造，和 state 的区分点
+
+**★ 三个可以直接拿走的问题模板：**
+
+| 问法 | 本次钓出什么 |
+|---|---|
+| **"注释说这个字段被谁读，真的有人读吗？"** | `messages` 的注释是错的 |
+| **"这个 `if` 依赖的字段，它的值从哪来、会不会变？"** | 通道 4b 恒为初始值 → 分支不可达 |
+| **"同一个数据，项目里有几条通道？哪条真的接上了？"** | 两条历史通道只接上一条 |
+
+**背后的通用概念：**
+
+| 概念 | 一句话 | 为什么重要 |
+|---|---|---|
+| **注释是断言，不是事实** | 文档里的"读：X"是一条可证伪的声明 | 越详细的注释，越需要核对 |
+| **分支不可达有两种** | 条件永假 / 字段值恒定不动 | 两种都不报错，追法不同 |
+| **双轨制数据流** | 同一语义有两条通道，往往只接上一条 | 新旧重构并存期的典型残留 |
+| **占内存的死数据** | 不是"没调用"，是"一直在写但没人读" | 比起不跑的代码，这种更耗资源 |
+
+**看完应该能回答：**
+- `messages` 和 `history` 有什么区别？为什么两条都在？
+- `critic_passed` 的注释没错，那这条通道为什么还是死的？
+- 如果要在不跑代码的前提下判断一个 `if` 分支是否可达，你会查什么？
