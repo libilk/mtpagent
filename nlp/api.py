@@ -30,6 +30,12 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 load_dotenv()
 
+# LangSmith 链路追踪开关（可选，.env 里不配就什么都不做）。
+# ★ 位置不能往后挪 ★ 必须早于下面任何 langchain / langgraph 的 import ——
+# langsmith 读环境变量用了 @lru_cache，第一次读之后就锁死了（详见 core/tracing.py 文件头）。
+from core.tracing import enable_langsmith_tracing
+enable_langsmith_tracing()
+
 
 class SafeJSONEncoder(json.JSONEncoder):
     """

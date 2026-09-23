@@ -681,6 +681,42 @@ Agent 答复里出现了可解释的依据：「该商品属于「3C数码产品
    "truth value of an array is ambiguous" —— 必须显式判 `None`。
    这个坑只在真跑治理脚本时才会踩到。
 
+#### 7.1.2 后续需求：LangSmith 链路追踪（2026-09-23）
+
+> 有人提出"加上 LangSmith"。**结论：做，但做成显式开关、默认关闭。**
+
+**为什么不是"填了 key 就自动开"：** LangSmith 会把**完整 prompt / 用户原话 / 工具返回结果**
+全量上传到云端，与「不长期留存投诉原文」的红线（见 §7.1）**直接冲突**。
+所以做成**代码里可见的开关 + 启动时打印警告**，而不是藏在 `.env` 里静默生效。
+
+| 改动 | 说明 |
+|---|---|
+| [core/tracing.py](core/tracing.py) | 新增。读 env → 校验 key → 补默认 project → 打隐私警告；未配置时**静默**返回 False |
+| [api.py](api.py) / [main.py](main.py) | 在 `load_dotenv()` **紧后面**调用 —— **位置不可挪**，原因见下 |
+| [.env.example](.env.example) | 新增 LangSmith 段：启用方式 + 隐私提示 + HIDE 选项 |
+| [core/\_\_init\_\_.py](core/__init__.py) | 模块清单「四个」→「五个」 |
+
+**★ 关键约束：调用时机**
+
+langsmith 读环境变量用了 `@lru_cache`（`.venv/…/langsmith/utils.py` 的 `get_env_var`）——
+**第一次读之后就锁死了**。所以必须在任何 langchain / langgraph import **之前**调用。
+放晚了**不报错、也不打日志**，只是追踪永远不生效 —— 与台账 #37 同一类：**不报错 ≠ 在工作**。
+
+**配置方式**（写进 `nlp/.env`，该文件已被 gitignore）：
+
+```
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=lsv2_pt_xxx
+LANGSMITH_PROJECT=mtpagent-nlp        # 可选，默认 mtpagent-nlp
+LANGSMITH_HIDE_INPUTS=true            # 可选：只留耗时结构，不上传 prompt/响应
+LANGSMITH_HIDE_OUTPUTS=true
+```
+
+**验证方式**：`langsmith.utils.tracing_is_enabled()` 返回 `True`（已实测通过）。
+
+**与既有自建 trace 的分工**：自建 trace（`_emit` → SSE → 前端面板）管**"走到哪一步"**，
+LangSmith 管**"每一步花了多久、输入输出是什么"**。**两者并存，不互相替换。**
+
 ### 7.2 已知局限：申请原因不受政策校验
 
 > 发现于 2026-09-16，阶段 5 补充验证时。
