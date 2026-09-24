@@ -1013,7 +1013,7 @@ LangSmith 管**"每一步花了多久、输入输出是什么"**。**两者并�
 > 改造全程踩过的坑，按**类型**归类（不是按时间）—— 这样能看出"该防哪几类"。
 > 详细分析在 [idea.md](idea.md) 对应章节，这里保证**读 study.md 一份就能看全**。
 
-**合计 40 项。** 最值得注意的分布：**LLM 行为类 10 项**（占三分之一），
+**合计 41 项。** 最值得注意的分布：**LLM 行为类 10 项**（占三分之一），
 而且这一类**没有一个能靠"写好提示词"解决**。
 
 ### 9.1 🤖 LLM 行为类（10 项）
@@ -1070,7 +1070,7 @@ LangSmith 管**"每一步花了多久、输入输出是什么"**。**两者并�
 > #19/#20 是同一类：**"没看到" ≠ "没发生"**。
 > #21 是另一类：**测试代码也需要被怀疑** —— 它红了不代表被测对象坏了。
 
-### 9.4 📐 设计缺陷类（13 项）
+### 9.4 📐 设计缺陷类（14 项）
 
 | # | 阶段 | 问题 | 说明 |
 |---|---|---|---|
@@ -1087,6 +1087,7 @@ LangSmith 管**"每一步花了多久、输入输出是什么"**。**两者并�
 | 38 | 阅读（2026-09-23） | ★ **「复杂任务规划需人工审核」这条通道从不触发 —— 条件依赖一个全项目从没被写过的 key** | [enhanced_nodes.py:163](langgraph_orchestrator/enhanced_nodes.py#L163) 判的是 `plan.get("complexity") == "complex"`，但**没有任何地方往 plan 里写过 `complexity`** —— 复杂度的真实存放处是 **state 顶层的 `is_complex`**（[enhanced_state.py:38](langgraph_orchestrator/enhanced_state.py#L38)）。而 plan 的实际结构只有 `tasks` + `reasoning`（[planner.py:337-347](orchestrator/planner.py#L337-L347)），`planner_node` 也只 `return {"plan": plan}`（[nodes.py:372](langgraph_orchestrator/nodes.py#L372)）→ **条件恒为假**。<br>**"看起来在工作"的四件套全齐**：触发文案（"任务规划完成，等待人工审核"）、前端选项按钮（`{"approved": "确认规划，继续执行"}`）、答复翻译逻辑（[enhanced_entry.py:423](langgraph_orchestrator/enhanced_entry.py#L423) `if "任务规划" in reason: plan_approved = True`）、进度事件 —— **唯独缺那个让条件成立的写入**。比 #34 更隐蔽：条件不成立会**静默跳过，连日志都不打**。<br>**第二层问题（修好 key 也不对）：** `human_intervention_check` 的**唯一入边来自 `evaluator`**（[enhanced_graph.py:252](langgraph_orchestrator/enhanced_graph.py#L252)）—— 即所有 Agent 跑完、答案已生成**之后**才检查。所以它是"事后告知"而非"事前审核"，选项文案"继续执行"与事实不符。要真做计划审核，得插在 `planner → fan_out` 之间，属结构性改动。**未修，先记** |
 | 39 | 阅读（2026-09-23） | ★ **`state` 里 `messages` 是一条完整接好、却没人消费的「第二历史通道」** | 入口初始化（[enhanced_entry.py:129](langgraph_orchestrator/enhanced_entry.py#L129)）→ 每个 Agent 节点追加一条 `AIMessage`（[nodes.py:240-242](langgraph_orchestrator/nodes.py#L240-L242)，单条截断 8000 字）→ 节点把它转发进 `context["messages"]`（[nodes.py:158](langgraph_orchestrator/nodes.py#L158)）→ **然后 0 个 Agent 读它**。而 [enhanced_state.py:34](langgraph_orchestrator/enhanced_state.py#L34) 的注释写着「读：Agent 节点取历史对话」，**这句是错的** —— Agent 真正读的是 `context["history"]`（来自 `session_memory`，[nodes.py:193](langgraph_orchestrator/nodes.py#L193)，5 处）。**两条历史通道只接上了第二条**，第一条一直在累积、占内存，却从未被消费。<br>**连带发现（同一次复核）**：`human_intervention_check` 的 **5 条通道实际只有 2 条能触发** —— 通道 1 死于 #38，**通道 4b 死于 `critic_passed` 恒为初始 `True`**（唯一写入方是 critic 节点，而 critic 从未进图）。<br>详见 **§9.4.4**<br>**修复（2026-09-23）：** `context["messages"]` 那条**死转发已删**；`messages` 字段本身**保留**（LangGraph 惯用键，删了可能牵动框架行为）。通道 4b **未动**（要注册 critic，与 #37 功能重复） |
 | 40 | 阅读（2026-09-23） | ★ **三处「契约与实现对不上」—— 同一套方法换三个对象扫出来的** | ① `agent_results["result"]`：写方**永远写 `str`**（`handle() -> str`），但读方分两派 —— 3 处强转 `str`、3 处**防御 `dict`**（[nodes.py:450-451](langgraph_orchestrator/nodes.py#L450-L451) 在活路径上，另两处在 #37 死链路上），后者**从不执行**。根因是 [protocol.py:52](core/protocol.py#L52) 的 harness **只核对 `handle` 存不存在、不核对签名**。<br>② `intervention_data["options"]`：docstring 写"是给前端渲染按钮的"，**这句是假的** —— 前端三个按钮**写死在 HTML**（[index.html:1278-1280](frontend/index.html#L1278-L1280)），`options` 从没被读过。后果：后端支持 5 个反馈值，前端只能产生 3 个，`override` / `accept` **用户无法表达**（通道 4b 的 `override` 因此多了一层死法）。<br>③ `audience`：**一条从参数到实现的完整死链** —— `knowledge_agent` 的 `vector_search` / `keyword_search` 声明只收 `query`（`QueryOnlyArgs`），方法却收 `query` + `top_k` + `audience`；而 `audience` 只能靠推断，推断又被恒为 `None` 的 `document_filter` 挡住 → **整个机制从未执行**。<br>详见 **§9.4.5**<br>**修复（2026-09-23）：** ① 的死防御分支**已删**；② 前端**已改成按 `options` 渲染按钮**（`override` / `accept` 从此可达）；③ `audience` 死链**未动** —— 涉及产品决策。回归 **20/20 通过** |
+| 41 | 阅读（2026-09-24） | ★ **`config/` 下的 yaml 名册与实际生效的清单不一致 —— 三份里两份不可信** | ① `skills.yaml`（**260 行**）**全项目零引用** —— 克隆时带进来的原始文件，从未被任何代码读过，且一半条目属于旧项目（`generate_code` / `review_code` / `debug_code` / `chart_analysis` …）。**已删（2026-09-24）**。<br>② `agents.yaml` 虽被读进 `config["agents"]`（[enhanced_entry.py:714](langgraph_orchestrator/enhanced_entry.py#L714)），但**全项目无人消费** —— 真实名册由 `_register_*` 硬编码，[enhanced_entry.py:710-711](langgraph_orchestrator/enhanced_entry.py#L710-L711) 已注明这点。<br>**危害的具体形态**：`agents.yaml:71` 仍写着 `document_agent` 且 `enabled: true`，而那个 Agent **阶段 4 已下线**、还有测试断言它不在名册里 —— **配置文件在主动误导**，[document_agent/agent.py:19-20](agents/document_agent/agent.py#L19-L20) 专门写了警告"别被它误导"。<br>**判据**：三份 yaml 里只有 `models.yaml` 真正生效（`_create_llm` 消费）。**"改了 yaml 却不生效"是这类问题的统一症状。** |
 
 #### 9.4.1 为什么这类问题专挑 `context` 出现（#33 的根因）
 

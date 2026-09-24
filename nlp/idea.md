@@ -3853,3 +3853,86 @@ idea.md 逐条追加、术语表按词。缺一份**按关注点组织、且用�
 - 为什么"看起来在工作"的链路，四件套往往齐全？缺的到底是哪一件？
 - `user_id` 这条死链为什么比 `dependencies` 那种更难发现？
 - 五条人工介入通道，两种死法的区别是什么？
+
+---
+
+## 清理 · 删掉 `config/skills.yaml`（2026-09-24）
+
+> 起因：用户问"能否把一类商品的售后方式沉淀成一个 skill"。
+> 排查时发现项目里**早就有一个 `skills.yaml`** —— 260 行，从未被任何代码读过。
+
+### 1. 思路：先盘点"这个容器项目里已经有了几个"
+
+用户的问题是"要不要做 skill"。回答之前先查了项目现状，结果这个概念的**容器已经有两个**：
+
+| 形态 | 状态 |
+|---|---|
+| `config/skills.yaml` | **死的** —— 把工具重新声明成 skill（带"适用/不适用场景"），零引用 |
+| `customer_service_agent` 的【工作流程】段 | **活的** —— [agent.py:722-742](agents/customer_service_agent/agent.py#L722-L742)，一套按**意图**分的流程 |
+
+**所以真正的缺口不是"skill 这个容器"，而是"按商品类别的流程"。**
+问"要不要做 X"之前先盘点"已经有几个 X" —— 这句话本身省下了一次从零设计。
+
+### 2. 删之前的三步排查
+
+删文件是**不易回滚**的操作，所以删前做全仓库排查（不只是 grep 代码）：
+
+```bash
+# ① 全类型文件里搜引用（代码 / 文档 / 配置 / 前端 / 测试）
+grep -rn "skills" --include=*.py --include=*.md --include=*.yaml \
+     --include=*.yml --include=*.json --include=*.html --include=*.txt .
+# ② 有没有"遍历 config 目录"的加载器（会连带读到它）
+grep -rn "listdir\|glob.*config\|config/.*\.yaml" --include=*.py .
+```
+
+**结果**：① 唯一命中是 `skills.yaml` 自己的第一行；② [enhanced_entry.py:714](langgraph_orchestrator/enhanced_entry.py#L714)
+只**显式**加载 `models.yaml` 和 `agents.yaml` —— **没有目录扫描**。
+
+> **两步都必要**：只查代码引用不够 —— 如果那边有个 `os.listdir("config/")` 的加载器，
+> 删文件会静默改变行为。**要确认的是"没有隐式读取方"，不只是"没有显式 import"。**
+
+删除后验证：`import api` 正常（20 条路由）。
+
+### 3. 顺带发现：配置腐化是成对的
+
+删 `skills.yaml` 时发现 **`agents.yaml` 也是死的**，而且**更危险**：
+
+| 文件 | 状态 | 危害 |
+|---|---|---|
+| `skills.yaml` | **从未被读过** | 纯噪音 |
+| `agents.yaml` | **被读进来但无人消费**（[enhanced_entry.py:714](langgraph_orchestrator/enhanced_entry.py#L714)） | **它在主动误导**：`agents.yaml:71` 写着 `document_agent: enabled: true`，而那个 Agent **阶段 4 已下线**，还有测试断言它不在名册里 |
+
+**为什么"从未被读"反而危害小**：没人读，就不会有人信。
+**"被读了但没用"才是陷阱** —— 改动者会以为改 yaml 生效，实际名册硬编码在 `_register_*`。
+
+> **统一症状：改了 yaml 却不生效。** 遇到这个症状，先确认那份 yaml 有没有消费方。
+
+### 4. 人类怎么学这部分
+
+**该盯哪里：**
+- [enhanced_entry.py:707-718](langgraph_orchestrator/enhanced_entry.py#L707-L718) —— `_load_config()`，看它**只认两份** yaml
+- [enhanced_entry.py:710-711](langgraph_orchestrator/enhanced_entry.py#L710-L711) —— 项目自己注明的"config["agents"] 无人消费"
+- [document_agent/agent.py:17-22](agents/document_agent/agent.py#L17-L22) —— 一段专门写来提醒"别被 agents.yaml 误导"的注释
+- [agents/customer_service_agent/agent.py:722-742](agents/customer_service_agent/agent.py#L722-L742) —— 活的"skill"长什么样
+
+**★ 三个可以直接拿走的问题模板：**
+
+| 问法 | 本次钓出什么 |
+|---|---|
+| **"要不要做 X？先看看已经有几个 X。"** | 发现 skill 的容器已有两个（一死一活） |
+| **"删这个文件安全吗？有没有隐式读取方？"** | 逼出"查目录扫描加载器"这一步 |
+| **"改了配置不生效 —— 谁在消费它？"** | `agents.yaml` 被读但无人用；`skills.yaml` 从未被读 |
+
+**背后的通用概念：**
+
+| 概念 | 一句话 | 为什么重要 |
+|---|---|---|
+| **先盘点再设计** | 做新东西前查"已有几个同类" | 省掉一次从零设计，也避免第四份重复实现 |
+| **删文件要查隐式读取方** | 不是只有 import 才算引用 | `listdir` / 通配加载器会静默受影响 |
+| **配置腐化的两种** | 从未被读 vs 被读但没人用 | 后者更危险 —— 它会让人以为改动生效 |
+| **"改了不生效"是统一症状** | 配置类问题的共同信号 | 顺着"谁消费"查，一步到位 |
+
+**看完应该能回答：**
+- 为什么 `agents.yaml` 比 `skills.yaml` 更危险？
+- 删一个文件前，为什么"grep 代码引用"还不够？
+- 项目里"活的 skill"在哪？它和商品类别的维度差在哪？
