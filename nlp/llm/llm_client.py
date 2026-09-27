@@ -79,11 +79,26 @@ class LLM:
 
         # 初始化客户端
         if HAS_OPENAI:
-            self.client = OpenAI(
+            client = OpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url,
                 timeout=timeout  # openai 路径的超时在这里设；手写 requests 路径另传
             )
+            # 用 langsmith 的包装器套一层，让每次 LLM 调用也变成一条可追踪的 span。
+            #
+            # 为什么必须显式包：本项目用的是**裸 openai SDK**（不是 LangChain 的 ChatOpenAI），
+            # 而 LangSmith 的自动埋点只认 LangChain/LangGraph 的 runnable ——
+            # 不包的话，图节点有 span、**但 LLM 的 prompt / 响应 / token 全丢**，
+            # 只能看到"哪个节点慢"，看不到"为什么慢"。见 study.md §9.4.5 与 idea.md。
+            #
+            # 未开追踪时它是纯透传（langsmith 自己判 tracing_is_enabled），所以无需条件判断。
+            try:
+                from langsmith.wrappers import wrap_openai
+                client = wrap_openai(client)
+            except Exception as e:
+                # 包装失败不能影响主流程 —— 追踪是"锦上添花"，不是"必需依赖"
+                logger.warning("LangSmith 包装 openai 客户端失败（追踪将不含 LLM 明细）: %s", e)
+            self.client = client
         else:
             # fallback（降级兜底）：没装 openai 就把 client 置空，改走 _chat_with_requests
             self.client = None
