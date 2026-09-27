@@ -1013,7 +1013,7 @@ LangSmith 管**"每一步花了多久、输入输出是什么"**。**两者并�
 > 改造全程踩过的坑，按**类型**归类（不是按时间）—— 这样能看出"该防哪几类"。
 > 详细分析在 [idea.md](idea.md) 对应章节，这里保证**读 study.md 一份就能看全**。
 
-**合计 41 项。** 最值得注意的分布：**LLM 行为类 10 项**（占三分之一），
+**合计 42 项。** 最值得注意的分布：**LLM 行为类 10 项**（占三分之一），
 而且这一类**没有一个能靠"写好提示词"解决**。
 
 ### 9.1 🤖 LLM 行为类（10 项）
@@ -1070,7 +1070,7 @@ LangSmith 管**"每一步花了多久、输入输出是什么"**。**两者并�
 > #19/#20 是同一类：**"没看到" ≠ "没发生"**。
 > #21 是另一类：**测试代码也需要被怀疑** —— 它红了不代表被测对象坏了。
 
-### 9.4 📐 设计缺陷类（14 项）
+### 9.4 📐 设计缺陷类（15 项）
 
 | # | 阶段 | 问题 | 说明 |
 |---|---|---|---|
@@ -1088,6 +1088,7 @@ LangSmith 管**"每一步花了多久、输入输出是什么"**。**两者并�
 | 39 | 阅读（2026-09-23） | ★ **`state` 里 `messages` 是一条完整接好、却没人消费的「第二历史通道」** | 入口初始化（[enhanced_entry.py:129](langgraph_orchestrator/enhanced_entry.py#L129)）→ 每个 Agent 节点追加一条 `AIMessage`（[nodes.py:240-242](langgraph_orchestrator/nodes.py#L240-L242)，单条截断 8000 字）→ 节点把它转发进 `context["messages"]`（[nodes.py:158](langgraph_orchestrator/nodes.py#L158)）→ **然后 0 个 Agent 读它**。而 [enhanced_state.py:34](langgraph_orchestrator/enhanced_state.py#L34) 的注释写着「读：Agent 节点取历史对话」，**这句是错的** —— Agent 真正读的是 `context["history"]`（来自 `session_memory`，[nodes.py:193](langgraph_orchestrator/nodes.py#L193)，5 处）。**两条历史通道只接上了第二条**，第一条一直在累积、占内存，却从未被消费。<br>**连带发现（同一次复核）**：`human_intervention_check` 的 **5 条通道实际只有 2 条能触发** —— 通道 1 死于 #38，**通道 4b 死于 `critic_passed` 恒为初始 `True`**（唯一写入方是 critic 节点，而 critic 从未进图）。<br>详见 **§9.4.4**<br>**修复（2026-09-23）：** `context["messages"]` 那条**死转发已删**；`messages` 字段本身**保留**（LangGraph 惯用键，删了可能牵动框架行为）。通道 4b **未动**（要注册 critic，与 #37 功能重复） |
 | 40 | 阅读（2026-09-23） | ★ **三处「契约与实现对不上」—— 同一套方法换三个对象扫出来的** | ① `agent_results["result"]`：写方**永远写 `str`**（`handle() -> str`），但读方分两派 —— 3 处强转 `str`、3 处**防御 `dict`**（[nodes.py:450-451](langgraph_orchestrator/nodes.py#L450-L451) 在活路径上，另两处在 #37 死链路上），后者**从不执行**。根因是 [protocol.py:52](core/protocol.py#L52) 的 harness **只核对 `handle` 存不存在、不核对签名**。<br>② `intervention_data["options"]`：docstring 写"是给前端渲染按钮的"，**这句是假的** —— 前端三个按钮**写死在 HTML**（[index.html:1278-1280](frontend/index.html#L1278-L1280)），`options` 从没被读过。后果：后端支持 5 个反馈值，前端只能产生 3 个，`override` / `accept` **用户无法表达**（通道 4b 的 `override` 因此多了一层死法）。<br>③ `audience`：**一条从参数到实现的完整死链** —— `knowledge_agent` 的 `vector_search` / `keyword_search` 声明只收 `query`（`QueryOnlyArgs`），方法却收 `query` + `top_k` + `audience`；而 `audience` 只能靠推断，推断又被恒为 `None` 的 `document_filter` 挡住 → **整个机制从未执行**。<br>详见 **§9.4.5**<br>**修复（2026-09-23）：** ① 的死防御分支**已删**；② 前端**已改成按 `options` 渲染按钮**（`override` / `accept` 从此可达）；③ `audience` 死链**未动** —— 涉及产品决策。回归 **20/20 通过** |
 | 41 | 阅读（2026-09-24） | ★ **`config/` 下的 yaml 名册与实际生效的清单不一致 —— 三份里两份不可信** | ① `skills.yaml`（**260 行**）**全项目零引用** —— 克隆时带进来的原始文件，从未被任何代码读过，且一半条目属于旧项目（`generate_code` / `review_code` / `debug_code` / `chart_analysis` …）。**已删（2026-09-24）**。<br>② `agents.yaml` 虽被读进 `config["agents"]`（[enhanced_entry.py:714](langgraph_orchestrator/enhanced_entry.py#L714)），但**全项目无人消费** —— 真实名册由 `_register_*` 硬编码，[enhanced_entry.py:710-711](langgraph_orchestrator/enhanced_entry.py#L710-L711) 已注明这点。<br>**危害的具体形态**：`agents.yaml:71` 仍写着 `document_agent` 且 `enabled: true`，而那个 Agent **阶段 4 已下线**、还有测试断言它不在名册里 —— **配置文件在主动误导**，[document_agent/agent.py:19-20](agents/document_agent/agent.py#L19-L20) 专门写了警告"别被它误导"。<br>**判据**：三份 yaml 里只有 `models.yaml` 真正生效（`_create_llm` 消费）。**"改了 yaml 却不生效"是这类问题的统一症状。** |
+| 42 | 运行（2026-09-27） | ★ **`python main.py` 启动即崩：stdout 被包装两次，「孤儿包装器」被 GC 回收时关掉了共享的底层 buffer** | **现象**：打印"系统就绪"时抛 `ValueError: write to closed file`，堆栈落在 `<frozen codecs>`（注意：是 codecs 的 write，**不是** main.py 自己包的那个）。<br>**根因两层**：① [main.py:44-52](main.py#L44-L52) 新建 `io.TextIOWrapper(sys.stdout.buffer, ...)` 覆盖 `sys.stdout` —— **新旧包装器共用同一个底层 buffer**；② 启动时 `EnhancedLangGraphRAGSystem.__init__` 会调 `_auto_update_vector_index()`（[enhanced_entry.py:202](langgraph_orchestrator/enhanced_entry.py#L202)），里面 `import tools.scripts.incremental_update` —— 而**那个模块在模块级**又包了一次 stdout（`codecs.getwriter`）。<br>于是第一次包的 `TextIOWrapper` 失去引用 → GC 回收 → **`__del__` 关掉共享 buffer** → 之后所有 print 都写向已关闭的文件。<br>**为什么只有 main.py 崩**：`api.py` 不包 stdout，那条路只被包一次、没有孤儿 → 正常。**这也正是它一直没被发现的原因**（API 是日常入口）。<br>**注意**：`incremental_update.py` 的包装在**模块级**，所以 `from ... import ...` 这一步就会执行 —— **不受下面 `if new_files or modified_files:` 保护**。<br>**修法**：两处都改用 `reconfigure(encoding=..., errors=...)` —— 就地改编码，**不产生新对象**，也就没有孤儿可回收。<br>**验证**：`echo "/exit" \| python main.py` → 退出码 0，"系统就绪"正常打印，中文正常。<br>**⚠️ 同类写法还有 20+ 处**（`tools/scripts/*` 里的 `codecs.getwriter`、`test_after_sales.py`、`diagnose_db_agent.py`）—— 它们目前都是独立脚本所以安全，但**只要有人在进程内 import 就会重现**。 |
 
 #### 9.4.1 为什么这类问题专挑 `context` 出现（#33 的根因）
 

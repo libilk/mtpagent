@@ -41,15 +41,20 @@ enable_langsmith_tracing()
 # 设置Windows控制台UTF-8编码
 # 为什么需要：Windows 控制台默认 GBK，print 中文/特殊符号会抛 UnicodeEncodeError
 # 直接把循环打断；errors='replace' 保证最坏情况是乱码而不是崩溃。
+#
+# ★ 必须用 reconfigure，不能新建 TextIOWrapper ★（2026-09-27 修）
+# 旧写法 `sys.stdout = io.TextIOWrapper(sys.stdout.buffer, ...)` 有个致命副作用：
+# 新包装器用的是**同一个底层 buffer**，而旧的那个 TextIOWrapper 一旦失去引用，
+# 被 GC 回收时 __del__ 会**关掉那个共享 buffer** —— 之后所有写入都变成
+#     ValueError: write to closed file
+# 本项目会真的踩到：tools/scripts/incremental_update.py 是在**模块级**包装 stdout 的，
+# 而 main.py 启动时会 import 它（见本文件后面的 incremental_update()）→ 触发第二次包装
+# → 第一次包的那个成了孤儿 → 被回收 → 崩。api.py 不包 stdout，所以只有 main.py 会炸。
+# reconfigure 是**就地**改编码，不产生新对象，也就不存在"孤儿被回收"这回事。
 if sys.platform == 'win32':
-    import io
-    # 强制 stdin/stdout/stderr 使用 UTF-8 编码
-    if hasattr(sys.stdin, 'buffer'):
-        sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8', errors='replace')
-    if hasattr(sys.stdout, 'buffer'):
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    if hasattr(sys.stderr, 'buffer'):
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(_stream, 'reconfigure'):
+            _stream.reconfigure(encoding='utf-8', errors='replace')
 
 
 def load_env():

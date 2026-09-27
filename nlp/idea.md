@@ -4087,3 +4087,111 @@ self.client = client
 - 为什么图节点有 span、LLM 调用却没有？
 - `wrap_openai` 为什么不需要判断"追踪开没开"？
 - 只有节点级耗时的时候，你能优化什么、不能优化什么？
+
+---
+
+## 修复 · `python main.py` 启动即崩（台账 #42，2026-09-27）
+
+> 现象：打印"系统就绪"那一行时抛 `ValueError: write to closed file`。
+
+### 1. 思路：从堆栈的"下落点"读出第一条线索
+
+堆栈说错误发生在：
+
+```
+File "<frozen codecs>", line 381, in write
+ValueError: write to closed file
+```
+
+**注意 `codecs` 这个词。** main.py 自己包的明明是 `io.TextIOWrapper`（[main.py:50](main.py#L50)），
+可报错的却是 `codecs` 的 write —— **说明那一刻 `sys.stdout` 已经不是 main.py 包的那个了。**
+
+**这是整条排查的转折点**：不是"包装失败"，是"**被换掉了**"。
+
+### 2. 根因：两次包装 + 孤儿回收
+
+复现（最小）：
+
+```python
+import sys, io, codecs, gc
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')   # 第 1 次
+sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')                    # 第 2 次
+gc.collect()      # 第 1 次包的那个没人引用了
+print("还能打印吗")   # → ValueError: write to closed file
+```
+
+**机制**：两次包装**共用同一个底层 buffer**。第一次包的那个 `TextIOWrapper` 失去引用后
+被 GC 回收 —— 而 `TextIOWrapper.__del__` 会**关掉它持有的 buffer**。
+第二个包装器还指着那个已经关掉的 buffer，于是所有写入都失败。
+
+**完整触发链**：
+
+```
+① main.py:44-52        包一次 stdout（新建 TextIOWrapper）        → A
+② 启动时 __init__       调 _auto_update_vector_index()            [enhanced_entry.py:202]
+③ 该函数 import          tools.scripts.incremental_update
+④ 那个模块的模块级代码   又包一次 stdout（codecs.getwriter）        → B 覆盖 A
+⑤ A 失去引用 → GC 回收 → __del__ 关掉共享 buffer
+⑥ main.py:243 print    → 写向已关闭的文件 → 💥
+```
+
+**关键细节**：第 ④ 步在**模块级**，所以 `from ... import ...` 这一步就执行了 ——
+**不受下面 `if new_files or modified_files:` 保护**。"有没有新文档"跟崩不崩无关。
+
+**为什么只有 main.py 崩**：api.py **不包 stdout**，所以它那条路只被包一次、没有孤儿。→ 一直没暴露。
+
+### 3. 修法：`reconfigure` —— 就地改，不产生新对象
+
+```python
+# 旧（危险）
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+# 新（安全）
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+```
+
+**`reconfigure` 是就地修改现有包装器的编码**，不新建对象 —— 没有新对象，就没有孤儿，也就没有 `__del__` 关 buffer 这回事。
+
+改了两处：
+- [main.py:41-56](main.py#L41-L56) —— 顶层包装
+- [tools/scripts/incremental_update.py:35-47](tools/scripts/incremental_update.py#L35-L47) —— 模块级包装（**真正的第二枪**）
+
+**验证**：`echo "/exit" | python main.py` → 退出码 0，"系统就绪"正常打印，中文正常显示。
+
+### 4. ⚠️ 同一个坑还有 20+ 处
+
+`tools/scripts/*.py` 里大量使用 `codecs.getwriter` 的写法（init_vector_db / init_memory_db /
+extract_memory_events / govern_memory …），`tests/test_after_sales.py`、`diagnose_db_agent.py` 也是。
+
+它们**目前是安全的** —— 因为都是独立脚本（直接跑，进程里只有它们自己包一次）。
+**但只要有人在进程内 `import` 它们，同样的崩法会立刻重现。**
+
+（已经踩到过一次：`python main.py --init-db` 那条路会 in-process import `init_vector_db`。）
+
+### 5. 人类怎么学这部分
+
+**该盯哪里：**
+- [main.py:41-56](main.py#L41-L56) —— 那段注释把"为什么必须 reconfigure"讲全了
+- [tools/scripts/incremental_update.py:35-47](tools/scripts/incremental_update.py#L35-L47) —— 模块级包装的完整说明
+- [enhanced_entry.py:694-705](langgraph_orchestrator/enhanced_entry.py#L694-L705) —— **import 在 if 之外**，这一步是关键
+
+**★ 三个可以直接拿走的问题模板：**
+
+| 问法 | 本次钓出什么 |
+|---|---|
+| **"报错的这个对象，是我创建的那个吗？"** | 堆栈里的 `codecs` ≠ main.py 包的 `TextIOWrapper` → 被换过 |
+| **"这段包装代码什么时候执行 —— import 时还是调用时？"** | 模块级 vs `if __name__` 决定它会不会污染调用方 |
+| **"两个包装器共用同一个底层对象吗？"** | 共用 → 一个被回收就会拖垮另一个 |
+
+**背后的通用概念：**
+
+| 概念 | 一句话 | 为什么重要 |
+|---|---|---|
+| **共用底层对象的包装器** | 多个包装器指同一个 buffer/handle 时，谁持有生命周期？ | 任一个被回收就可能拖垮其余 |
+| **模块级副作用** | `import` 时执行的代码会污染导入方 | 库/模块不该在 import 时改全局状态 |
+| **`__del__` 的隐式关闭** | 文件类的析构函数常会 close | "对象被回收"和"资源被关"是同一件事 |
+| **堆栈里的类型是线索** | 报错在 `codecs`、而代码里用的是 `io` → 中间有人换过 | 读堆栈先看"是哪个类在报错" |
+
+**看完应该能回答：**
+- 为什么复制一段"能跑"的编码处理代码到另一个文件里就崩了？
+- `import` 一个脚本会执行它的哪些代码？这为什么危险？
+- `reconfigure` 和"新建一个 TextIOWrapper"在生命周期上差在哪？

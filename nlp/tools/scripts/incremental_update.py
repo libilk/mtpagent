@@ -32,13 +32,22 @@ from pathlib import Path
 import json
 import hashlib
 
-# 设置Windows控制台UTF-8编码
+# 设置 Windows 控制台 UTF-8 编码
+#
+# ★ 这段是**模块级**的 —— import 时就会执行，不只是当脚本直接跑时。★
+# 因为它既被 `python tools/scripts/incremental_update.py` 直接跑，
+# 也被 main.py 和 enhanced_entry.py 在**进程内** import 调用（incremental_update()）。
+#
+# 所以这里必须用 reconfigure（就地改编码），**不能**用 codecs.getwriter（新建包装器）：
+# 新建包装器会在"调用方已经包过一次"时，把先包的那个变成孤儿 —— 它被 GC 回收时
+# __del__ 会关掉**共享的底层 buffer**，之后所有 print 都变成
+#     ValueError: write to closed file
+# main.py 就踩了这个（它在顶部包过一次，再 import 本模块就崩）。见 main.py 顶部注释。
+# reconfigure 不产生新对象，天然幂等；若 stdout 已被别人换成非 TextIOWrapper，hasattr 会跳过。
 if sys.platform == 'win32':
-    import codecs
-    if hasattr(sys.stdout, 'buffer'):
-        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
-    if hasattr(sys.stderr, 'buffer'):
-        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, 'reconfigure'):
+            _stream.reconfigure(encoding='utf-8', errors='replace')
 
 # 加载.env文件
 # 手写的极简 .env 解析（项目别处用的是 python-dotenv）。够用即可：
