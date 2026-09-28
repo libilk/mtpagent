@@ -88,7 +88,7 @@ START → complexity_classifier ─┬─ simple  → router ──→ 单个 Ag
 |---|---|---|
 | `knowledge_agent` | 与售后无关的通用知识、概念解释 | 14 |
 | `database_agent` | 订单/物流/退款/会员数据查询（Text-to-SQL） | 4 |
-| `customer_service_agent` | 售后政策问答 + 退换货办理 + 投诉工单 | 12 |
+| `customer_service_agent` | 售后政策问答 + 退换货办理 + 投诉工单 | 13 |
 | `vqa_agent` | 破损商品照、快递单、发票截图识别（三种模式，非工具式） | — |
 | `chat_agent` | 闲聊兜底（无工具） | — |
 
